@@ -39,6 +39,168 @@ Primary branch: main
 Local path: wherever your spx-diagonal-dashboard folder lives (parent folder contains .venv)
 
 ---
+**Implementation Date:** 2026-06-22
+**Implementation Status:** Complete — all changes verified live
+
+### Files Modified
+
+**`config.py`**
+- Replaced `POLL_INTERVAL_SECONDS = 10` with `POLL_INTERVAL_NORMAL = 300` and `POLL_INTERVAL_EVENT = 60`
+- Added `STRIKE_COUNT = 80`, `STRIKE_FETCH_WIDTH_POINTS = 300`, `MAX_EXPIRY_DTE = 20`
+- Added `DISPLAY_TIMEZONE = "America/New_York"`
+
+**`schwab_client.py`**
+- `get_option_chain()` default `strike_count` changed from `20` → `config.STRIKE_COUNT` (80)
+- Added `filter_chain_by_strike_window()` — Python-side safety filter enforcing ±300 pt hard boundary; includes optional 2 SD log warning if window becomes inadequate
+
+**`iv_engine.py`**
+- Added `ExpectedMoveCheck` dataclass and `expected_move_log_check()` — computes 1 SD and 2 SD expected move, checks adequacy of configured window; informational only, never gates the fetch
+
+**`app.py`**
+- `to_date` changed from hardcoded `+45 days` → `config.MAX_EXPIRY_DTE` (20 days)
+- `filter_chain_by_strike_window()` called immediately after `chain_to_dataframe()`
+- Event Mode toggle added to sidebar; `poll_interval` variable drives `st_autorefresh` and header caption
+- Expected move log check wired into snapshot cycle (live mode only)
+- All chart X-axis timestamps converted from UTC → `America/New_York`
+
+**`db.py`**
+- Verified only — no changes required; schema compatible with wider data
+
+### Verified Working
+- Strikes 7550C and 7350P resolved without "showing nearest" fallback
+- Expiry selector now shows full 20 DTE window (~10 expirations)
+- Event Mode toggle visible in sidebar; header reflects active poll interval
+- Chart timestamps display in Eastern time
+---
+
+## Session: Architecture Review & Data Collection Redesign
+**Date:** 2026-06-22
+**Status:** Decisions finalized — implementation pending approval
+
+### What Was Decided
+
+This session was a full architectural review of the data collection layer,
+triggered by a UX bug: strikes such as 7550C and 7350P were not found in
+the dashboard when SPX was near 7478. The root cause was confirmed as an
+API-level fetch limitation, not a storage or UI bug.
+
+---
+
+### Root Cause Confirmed
+
+`schwab_client.py` was calling `get_option_chain()` with `strike_count=20`,
+returning only ~40 strikes centered on ATM (±100 pts at 5-pt spacing).
+No `range` parameter was passed, so Schwab defaulted to NTM behavior.
+The `iv_engine.strike_contract()` fallback to "nearest" was working correctly —
+it was simply receiving sparse input from upstream.
+
+Failure point: API fetch layer only. All downstream logic (parsing, storage,
+UI lookup) was functioning as designed.
+
+---
+
+### Strike Collection: Decision
+
+**Chosen approach:** `strike_count=80` at API level + Python-side safety filter.
+
+- `strike_count=80` requests 80 strikes above and 80 below ATM from Schwab
+- Covers approximately ±300–400 points at 5-pt spacing near spot
+- A Python-side filter (`filter_chain_by_strike_window()`) enforces a hard
+  ±300-point boundary as a safety net against any overshoot
+- `STRIKE_FETCH_WIDTH_POINTS = 300` stored in `config.py` for easy adjustment
+
+**Why not `range='ALL'`:**
+`range='ALL'` returns 300–600 unique strikes per expiry across the full SPX
+chain (roughly 8,000 contracts per response, ~12 MB payload). At 2-minute
+polling that is unnecessary bandwidth — we would download and discard ~70%
+of every response. `strike_count=80` achieves the same practical coverage
+at ~2.5 MB per call with zero waste.
+
+**Why not dynamic 2 SD filtering:**
+Calculating expected move before determining what to fetch creates a
+chicken-and-egg dependency (IV is needed to compute SD, but IV comes from
+the fetch). A fixed configurable window avoids this entirely. The 2 SD
+calculation is preserved as a log-only informational check
+(`expected_move_log_check()` in `iv_engine.py`) that flags when the
+configured window may be too narrow — but never gates the fetch.
+
+**Why ±300 points:**
+Covers all practical diagonal calendar candidates at any expiry within the
+20 DTE analysis window. At 5-pt spacing this is ~120 unique strikes.
+Far-OTM tail strikes (beyond ±300 pts) are not relevant to short-dated
+diagonal structures and are not worth storing.
+
+---
+
+### Expiration Collection: Decision
+
+**Chosen approach:** All expirations from today through `today + 20 calendar days`.
+
+- `MAX_EXPIRY_DTE = 20` stored in `config.py`
+- Enforced via `from_date` / `to_date` parameters already supported by
+  Schwab's `get_option_chain()` — no additional filtering needed
+- Captures approximately 10–11 SPX expirations per fetch window
+  (Mon/Wed/Fri weeklies + end-of-month within 20 days)
+
+**Rationale:** Dashboard purpose is not to track one specific diagonal but
+to compare IV across many strike/expiry combinations to identify where
+front-dated IV is elevated relative to back-dated IV. 20 DTE covers all
+realistic diagonal pairings without storing irrelevant longer-dated data.
+
+---
+
+### Polling Strategy: Decision
+
+**Chosen approach:** Manual event mode toggle in the Streamlit sidebar.
+
+- **Normal mode:** 5-minute polling (`POLL_INTERVAL_NORMAL = 300`)
+- **Event mode:** 60-second polling (`POLL_INTERVAL_EVENT = 60`)
+- Toggle control: `st.toggle("⚡ Event Mode (60s polling)")` in sidebar
+- User activates event mode manually before known high-impact events
+  (FOMC, CPI, NFP, PPI, Powell speeches, etc.)
+
+**Why not fixed 2-minute:** Storage cost is 2.5x higher than 5-minute for
+minimal analytical gain on normal days. IV term structure shifts over
+minutes and hours, not seconds — 5-minute captures it faithfully.
+
+**Why not automatic adaptive polling:** Automatic IV-threshold detection
+has inherent lag (only switches after the spike has started). A calendar-
+based approach requires external dependencies and ongoing maintenance.
+The user already knows when major events occur and can activate event mode
+10–15 minutes in advance — earlier than any automatic system would trigger.
+
+**Why manual toggle wins:** Zero external dependencies, zero maintenance
+burden, anticipatory rather than reactive, and trivial to implement.
+The FOMC example (spread briefly spiking from $8 to $20 before reverting)
+is exactly the scenario a manual pre-event toggle handles better than any
+automatic system.
+
+---
+
+### Timezone Fix
+
+All timestamp display and chart X-axis labels to be converted from UTC to
+`America/New_York` (EST/EDT). A `DISPLAY_TIMEZONE` constant added to
+`config.py` so timezone is defined in one place across the application.
+
+---
+
+### Files Affected By Implementation
+
+| File | Nature of Change |
+|---|---|
+| `config.py` | Add 6 new constants |
+| `schwab_client.py` | Update fetch params, add safety filter function |
+| `iv_engine.py` | Add expected move log check function |
+| `app.py` | Date range, filter call, sidebar toggle, timezone fix |
+| `db.py` | Verification only — no changes expected |
+
+### Schema Impact
+None. Existing `strike_snapshots` table is compatible with wider data.
+DB growth will increase proportionally to wider strike/expiry coverage —
+accepted and expected per design.
+
+---
 
 ## 2026-06-21 — Fix: db.py duplicated causing SCHEMA overwrite
 **Changed:** Replaced db.py with a clean single-copy version.

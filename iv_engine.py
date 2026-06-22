@@ -5,10 +5,13 @@ because it means you can unit-test the math (and you should — options math is
 exactly the kind of thing where a sign error silently costs you real money) without
 needing a live Schwab connection or a running dashboard.
 """
+import math
 from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
+
+import config
 
 
 # ---------------------------------------------------------------------------
@@ -264,3 +267,63 @@ def strike_contract(chain_df: pd.DataFrame, expiry: str, strike: float, side: st
         found_exact=exact,
     )
 
+
+# ---------------------------------------------------------------------------
+# Expected Move Log Check
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ExpectedMoveCheck:
+    spot: float
+    atm_iv_pct: float        # ATM IV as a percentage, e.g. 18.4
+    max_dte: int             # Longest DTE in the current fetch window
+    em_1sd: float            # 1 standard deviation expected move (points)
+    em_2sd: float            # 2 standard deviation expected move (points)
+    configured_window: int   # config.STRIKE_FETCH_WIDTH_POINTS
+    window_adequate: bool    # True if configured window >= 2 SD move
+
+
+def expected_move_log_check(
+    spot: float,
+    atm_iv_pct: float,
+    max_dte: int,
+) -> ExpectedMoveCheck:
+    """
+    Computes the 1 SD and 2 SD expected move for the longest expiry in scope
+    and checks whether the configured strike window (STRIKE_FETCH_WIDTH_POINTS)
+    covers the full 2 SD range.
+
+    This function is informational only — its result is never used to gate or
+    modify what gets fetched or stored. Call it once per snapshot cycle and log
+    the result. If window_adequate is ever False, it is a signal to increase
+    STRIKE_FETCH_WIDTH_POINTS in config.py (and correspondingly STRIKE_COUNT).
+
+    Formula: Expected Move = Spot × (IV / 100) × √(DTE / 365)
+    This is the standard market-implied 1 SD move, derived from ATM straddle
+    pricing. It matches the convention used by most options platforms.
+
+    Args:
+        spot:        Current SPX underlying price.
+        atm_iv_pct: ATM implied volatility as a percentage (e.g. 18.4 for 18.4%).
+                    Use the longest-DTE expiry in the current window as the anchor,
+                    since this produces the widest expected move and is therefore
+                    the most conservative adequacy check.
+        max_dte:    DTE of the longest expiry in the current fetch window.
+
+    Returns:
+        ExpectedMoveCheck dataclass with all computed values and adequacy flag.
+    """
+    iv_decimal = atm_iv_pct / 100.0
+    em_1sd = spot * iv_decimal * math.sqrt(max_dte / 365)
+    em_2sd = 2 * em_1sd
+    window = config.STRIKE_FETCH_WIDTH_POINTS
+
+    return ExpectedMoveCheck(
+        spot=spot,
+        atm_iv_pct=atm_iv_pct,
+        max_dte=max_dte,
+        em_1sd=round(em_1sd, 1),
+        em_2sd=round(em_2sd, 1),
+        configured_window=window,
+        window_adequate=em_2sd <= window,
+    )

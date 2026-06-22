@@ -12,6 +12,7 @@ Layout (top to bottom):
   Trade Quality Score
   Options chain table
 """
+import logging
 from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
@@ -24,6 +25,8 @@ import db
 import demo_data
 import iv_engine
 import schwab_client
+
+logger = logging.getLogger(__name__)
 
 st.set_page_config(page_title="SPX Diagonal Calendar Analyzer", layout="wide")
 
@@ -39,7 +42,20 @@ if demo_mode:
         "Showing synthetic data. Toggle off once your Schwab credentials are in .env."
     )
 
-st_autorefresh(interval=config.POLL_INTERVAL_SECONDS * 1000, key="autorefresh")
+event_mode = st.sidebar.toggle(
+    "⚡ Event Mode (60s polling)",
+    value=False,
+    help=(
+        "Enable during high-impact events (FOMC, CPI, NFP, PPI, Powell speeches) "
+        "to capture short-lived volatility dislocations. Turn on ~10–15 min before "
+        "the announcement. Normal mode = 5 min; Event mode = 60 sec."
+    ),
+)
+poll_interval = config.POLL_INTERVAL_EVENT if event_mode else config.POLL_INTERVAL_NORMAL
+if event_mode:
+    st.sidebar.caption("⚡ Event Mode active — polling every 60 seconds.")
+
+st_autorefresh(interval=poll_interval * 1000, key="autorefresh")
 
 
 @st.cache_resource
@@ -65,9 +81,10 @@ else:
         raw_chain = schwab_client.get_option_chain(
             client,
             from_date=date.today(),
-            to_date=date.today() + timedelta(days=45),
+            to_date=date.today() + timedelta(days=config.MAX_EXPIRY_DTE),
         )
         chain_df = schwab_client.chain_to_dataframe(raw_chain)
+        chain_df = schwab_client.filter_chain_by_strike_window(chain_df, spx_price)
     except Exception as e:
         st.error(f"Couldn't reach Schwab API: {e}")
         st.stop()
@@ -88,7 +105,8 @@ db.init_db(db_path)
 # ---------------------------------------------------------------------------
 st.title("SPX Diagonal Calendar Analyzer")
 st.caption(
-    f"SPX: **{spx_price:,.2f}**  |  Auto-refresh every {config.POLL_INTERVAL_SECONDS}s"
+    f"SPX: **{spx_price:,.2f}**  |  Auto-refresh every {poll_interval}s"
+    + ("  |  ⚡ Event Mode" if event_mode else "")
     + ("  |  ⚠️ DEMO DATA" if demo_mode else "  |  🟢 Live")
 )
 
@@ -209,6 +227,31 @@ with right:
         except (ValueError, IndexError):
             continue
 
+    # Expected move log check (informational only — logged, never gates the fetch)
+    if not demo_mode:
+        try:
+            max_dte_idx = chain_df["dte"].idxmax()
+            max_dte_expiry = chain_df.loc[max_dte_idx, "expiry"]
+            max_dte_val = int(chain_df.loc[max_dte_idx, "dte"])
+            longest_atm_iv = iv_engine.atm_iv(chain_df, max_dte_expiry, spx_price)
+            em_check = iv_engine.expected_move_log_check(spx_price, longest_atm_iv, max_dte_val)
+            if not em_check.window_adequate:
+                logger.warning(
+                    "2SD expected move ±%.0f pts exceeds strike window ±%d pts "
+                    "(IV=%.1f%%, DTE=%d). Consider widening STRIKE_FETCH_WIDTH_POINTS.",
+                    em_check.em_2sd, em_check.configured_window,
+                    em_check.atm_iv_pct, em_check.max_dte,
+                )
+            else:
+                logger.debug(
+                    "Strike window adequate: 1SD=±%.0f, 2SD=±%.0f, window=±%d "
+                    "(IV=%.1f%%, DTE=%d)",
+                    em_check.em_1sd, em_check.em_2sd, em_check.configured_window,
+                    em_check.atm_iv_pct, em_check.max_dte,
+                )
+        except Exception as exc:
+            logger.debug("expected_move_log_check skipped: %s", exc)
+
     # Strike-specific snapshot — only when strikes are entered
     if strikes_set:
         for side, strike in [("CALL", call_strike), ("PUT", put_strike)]:
@@ -251,7 +294,10 @@ with right:
             on="timestamp", how="inner",
         )
         atm_merged["iv_ratio"] = atm_merged["front_iv"] / atm_merged["back_iv"]
-        atm_merged["timestamp"] = pd.to_datetime(atm_merged["timestamp"], format="ISO8601")
+        atm_merged["timestamp"] = (
+            pd.to_datetime(atm_merged["timestamp"], format="ISO8601", utc=True)
+            .dt.tz_convert(config.DISPLAY_TIMEZONE)
+        )
 
     # ── TOP CHART — Selected-strike IV ──────────────────────────────────────
     if strikes_set:
@@ -281,7 +327,10 @@ with right:
                     on="timestamp", how="inner",
                 )
                 call_merged["call_ratio"] = call_merged["f_call_iv"] / call_merged["b_call_iv"]
-                call_merged["timestamp"] = pd.to_datetime(call_merged["timestamp"], format="ISO8601")
+                call_merged["timestamp"] = (
+                    pd.to_datetime(call_merged["timestamp"], format="ISO8601", utc=True)
+                    .dt.tz_convert(config.DISPLAY_TIMEZONE)
+                )
                 fig_strike.add_trace(go.Scatter(
                     x=call_merged["timestamp"], y=call_merged["f_call_iv"],
                     name=f"Front {call_strike:.0f}C IV",
@@ -305,7 +354,10 @@ with right:
                     on="timestamp", how="inner",
                 )
                 put_merged["put_ratio"] = put_merged["f_put_iv"] / put_merged["b_put_iv"]
-                put_merged["timestamp"] = pd.to_datetime(put_merged["timestamp"], format="ISO8601")
+                put_merged["timestamp"] = (
+                    pd.to_datetime(put_merged["timestamp"], format="ISO8601", utc=True)
+                    .dt.tz_convert(config.DISPLAY_TIMEZONE)
+                )
                 fig_strike.add_trace(go.Scatter(
                     x=put_merged["timestamp"], y=put_merged["f_put_iv"],
                     name=f"Front {put_strike:.0f}P IV",
@@ -335,7 +387,7 @@ with right:
             st.info(
                 f"Strike-specific history will appear here as the dashboard collects data "
                 f"for {call_strike:.0f}C / {put_strike:.0f}P. Keep it running — "
-                f"each 10s poll adds a data point."
+                f"each {poll_interval}s poll adds a data point."
             )
     else:
         st.markdown("#### Selected-Strike IV")
