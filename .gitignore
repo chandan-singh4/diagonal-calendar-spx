@@ -1,0 +1,7 @@
+.env
+data/token.json
+data/dashboard.db
+venv/
+__pycache__/
+*.pyc
+.DS_Store
