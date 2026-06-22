@@ -14,6 +14,48 @@ Newest entries at the top.
 
 ---
 
+## HOW TO START A NEW CHAT SESSION
+*(Read this every time before opening a new Claude chat)*
+
+1. **Push any unsaved local changes first:**
+   ```bash
+   git add .
+   git commit -m "brief description of what changed"
+   git push
+   ```
+2. **Open a new Claude chat under the same Project.**
+3. **Paste the full contents of this DEV_JOURNAL.md** into the first message.
+   - This is the single file that tells Claude everything: what's been built,
+     what bugs were fixed, what decisions were made, and what's next.
+   - The repo is private so Claude cannot fetch it directly — pasting the journal
+     is the handshake that gets Claude up to speed instantly.
+4. **If Claude needs to see a specific file** (e.g. to debug app.py), paste that
+   file's contents into the chat on request. No need to paste all files upfront.
+5. **At the end of each session**, push again before closing the chat so the
+   journal and any changed files are always current on GitHub.
+
+GitHub repo: https://github.com/chandan-singh4/spx-diagonal-dashboard
+Primary branch: main
+Local path: wherever your spx-diagonal-dashboard folder lives (parent folder contains .venv)
+
+---
+
+## 2026-06-21 — GitHub repo created + sync workflow established
+**Changed:** Created private GitHub repo `chandan-singh4/spx-diagonal-dashboard`.
+All project files as of end of this session pushed to `main` branch. `.gitignore`
+already excludes `.env`, `data/token.json`, `data/dashboard.db` — credentials and
+local data never go to GitHub.
+**Why:** Needed a persistent source of truth that survives between Claude chat
+sessions. Claude's sandbox is ephemeral; GitHub is not.
+**Impact:** From this point forward, GitHub `main` is the canonical version of
+the code. Any changes made in a Claude session must be applied locally and pushed
+before closing — otherwise the next session starts from stale code.
+**Workflow confirmed:** Repo is private, so Claude cannot fetch files directly.
+Instead: paste DEV_JOURNAL.md at the start of each new chat (see instructions
+above), paste specific files on request. Claude makes changes in sandbox, gives
+edited files back, you apply locally and push.
+**Open questions / follow-ups:** None for this entry — workflow is established.
+
 ## 2026-06-21 — Feature: strike-specific IV chart + independent expiry selectors
 **Changed:**
 - `db.py`: Added `strike_snapshots` table (expiry, strike, side, iv, bid, ask, volume, OI)
