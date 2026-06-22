@@ -40,6 +40,30 @@ Local path: wherever your spx-diagonal-dashboard folder lives (parent folder con
 
 ---
 
+## 2026-06-21 — Fix: db.py duplicated causing SCHEMA overwrite
+**Changed:** Replaced db.py with a clean single-copy version.
+**Why:** The file had been fully duplicated (two complete copies concatenated).
+The second copy redefined SCHEMA without strike_snapshots, so Python always
+used the old schema. init_db() never created strike_snapshots even on a
+fresh database file.
+**Impact:** strike_snapshots table now created correctly on startup.
+**Open questions:** Check git history to find when the duplication was introduced
+— likely a session where file content was appended instead of replaced.
+
+## 2026-06-21 — Fix: strike_snapshots table missing on existing DB
+**Changed:** Deleted data/demo_dashboard.db and data/dashboard.db so init_db()
+recreates all tables from scratch including the new strike_snapshots table.
+**Why:** DB files were created in a prior session before strike_snapshots was
+added to db.py. Existing files don't auto-migrate — CREATE TABLE IF NOT EXISTS
+only adds tables missing from a blank DB, not from an already-existing file
+that predates the schema change.
+**Impact:** Lost ~1 session of synthetic demo history (no real data existed).
+All tables now match current db.py schema. Won't recur unless schema changes
+again without a migration step.
+**Open questions / follow-ups:** For future schema changes, consider adding
+a simple migration check in init_db() that runs ALTER TABLE or CREATE TABLE
+for any new tables/columns, so existing DB files don't need to be deleted.
+
 ## 2026-06-21 — GitHub repo created + sync workflow established
 **Changed:** Created private GitHub repo `chandan-singh4/spx-diagonal-dashboard`.
 All project files as of end of this session pushed to `main` branch. `.gitignore`
