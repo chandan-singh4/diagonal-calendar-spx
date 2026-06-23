@@ -14,7 +14,7 @@ Newest entries at the top.
 
 ---
 
-## HOW TO START A NEW CHAT SESSION
+## HOW TO START A NEW CHAT SESSION IF REPO IS PRIVATE
 *(Read this every time before opening a new Claude chat)*
 
 1. **Push any unsaved local changes first:**
@@ -34,7 +34,7 @@ Newest entries at the top.
 5. **At the end of each session**, push again before closing the chat so the
    journal and any changed files are always current on GitHub.
 
-GitHub repo: https://github.com/chandan-singh4/spx-diagonal-dashboard
+GitHub repo: https://github.com/chandan-singh4/diagonal-calendar-spx
 Primary branch: main
 Local path: wherever your spx-diagonal-dashboard folder lives (parent folder contains .venv)
 
@@ -71,6 +71,7 @@ Local path: wherever your spx-diagonal-dashboard folder lives (parent folder con
 - Expiry selector now shows full 20 DTE window (~10 expirations)
 - Event Mode toggle visible in sidebar; header reflects active poll interval
 - Chart timestamps display in Eastern time
+
 ---
 
 ## Session: Architecture Review & Data Collection Redesign
