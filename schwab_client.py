@@ -2,22 +2,26 @@
 schwab_client.py — Authentication + thin data-access layer over the Schwab API.
 
 Uses the `schwab-py` community library, which handles the OAuth dance and token
-refresh for you. We wrap it so the rest of the app (iv_engine.py, app.py) never
-has to think about auth, tokens, or raw HTTP — it just calls get_spx_quote() or
-get_option_chain() and gets clean data back.
+refresh for you. We wrap it so the rest of the app (iv_engine.py, app.py,
+collector.py) never has to think about auth, tokens, or raw HTTP — it just calls
+get_spx_quote() or get_option_chain() and gets clean data back.
 
 Reference: https://schwab-py.readthedocs.io/
 """
+
 import math
 import logging
 import schwab
 import pandas as pd
 from pathlib import Path
-
 import config
 
 logger = logging.getLogger(__name__)
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Authentication
+# ─────────────────────────────────────────────────────────────────────────────
 
 def get_client():
     """
@@ -38,19 +42,24 @@ def get_client():
 
     First run: walks you through that copy-paste login in the terminal, then
     caches the token to config.SCHWAB_TOKEN_PATH.
+
     Subsequent runs: loads the cached token directly and auto-refreshes it as
     needed — no login flow at all, as long as a token file already exists.
+
     You'll need to redo the login about once every 7 days (Schwab expires
     refresh tokens on that schedule — not something this code can change).
     """
     config.validate()
+
     token_path = Path(config.SCHWAB_TOKEN_PATH)
+
     if token_path.exists():
         return schwab.auth.client_from_token_file(
             token_path=config.SCHWAB_TOKEN_PATH,
             api_key=config.SCHWAB_APP_KEY,
             app_secret=config.SCHWAB_APP_SECRET,
         )
+
     return schwab.auth.client_from_manual_flow(
         api_key=config.SCHWAB_APP_KEY,
         app_secret=config.SCHWAB_APP_SECRET,
@@ -59,13 +68,97 @@ def get_client():
     )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Internal Utilities
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _safe_float(val) -> float | None:
+    """
+    Return float(val), or None if val is null, NaN, zero, or unconvertible.
+    Used to sanitize Schwab API response fields before returning to callers.
+    """
+    try:
+        v = float(val)
+        return v if (v == v and v != 0.0) else None   # v != v catches NaN
+    except (TypeError, ValueError):
+        return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Quotes
+# ─────────────────────────────────────────────────────────────────────────────
+
 def get_spx_quote(client) -> float:
-    """Returns the current SPX index price."""
+    """
+    Returns the current SPX index last price as a float.
+    Kept for backward compatibility with existing callers (app.py).
+    For new code, prefer get_spx_quote_full() which returns bid/ask as well.
+    """
     resp = client.get_quote(config.UNDERLYING_SYMBOL)
     resp.raise_for_status()
     data = resp.json()
     return float(data[config.UNDERLYING_SYMBOL]["quote"]["lastPrice"])
 
+
+def get_spx_quote_full(client) -> dict:
+    """
+    Returns SPX bid, ask, last, and mark as a dict.
+    Used by collector.py to populate snapshot.underlying_price/bid/ask.
+
+    SPX is an index (not a traded security), so bid and ask may be None —
+    Schwab does not always publish a two-sided quote for the index itself.
+    In that case, mark falls back to lastPrice.
+
+    Return format:
+        {
+            "bid":  float | None,
+            "ask":  float | None,
+            "last": float | None,
+            "mark": float | None,   # (bid+ask)/2, or last if bid/ask unavailable
+        }
+    """
+    resp = client.get_quote(config.UNDERLYING_SYMBOL)
+    resp.raise_for_status()
+    q    = resp.json()[config.UNDERLYING_SYMBOL]["quote"]
+
+    bid  = _safe_float(q.get("bidPrice") or q.get("bid"))
+    ask  = _safe_float(q.get("askPrice") or q.get("ask"))
+    last = _safe_float(q.get("lastPrice"))
+
+    if bid is not None and ask is not None:
+        mark = (bid + ask) / 2.0
+    else:
+        mark = last
+
+    return {"bid": bid, "ask": ask, "last": last, "mark": mark}
+
+
+def get_vix_quote(client) -> float | None:
+    """
+    Returns the current VIX spot value, or None if the fetch fails.
+
+    VIX is stored alongside each SPX snapshot to provide volatility regime
+    context for historical IV percentile analysis. A high VIX explains *why*
+    front-month IV is elevated; without it, an 88th-percentile reading could
+    be misread as SPX-specific when it's a broad market event.
+
+    This call is deliberately non-fatal: if Schwab's VIX quote is unavailable,
+    the snapshot is still recorded with vix_value=NULL. The caller should
+    handle None gracefully.
+    """
+    try:
+        resp = client.get_quote(config.VIX_SYMBOL)
+        resp.raise_for_status()
+        q = resp.json()[config.VIX_SYMBOL]["quote"]
+        return _safe_float(q.get("lastPrice"))
+    except Exception as exc:
+        logger.warning("VIX quote fetch failed (non-fatal): %s", exc)
+        return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Option Chain
+# ─────────────────────────────────────────────────────────────────────────────
 
 def get_option_chain(client, from_date, to_date,
                      strike_count: int = config.STRIKE_COUNT) -> dict:
@@ -100,8 +193,18 @@ def chain_to_dataframe(raw_chain: dict) -> pd.DataFrame:
     """
     Flattens Schwab's nested option chain JSON (callExpDateMap / putExpDateMap,
     each keyed by expiry-string -> strike-string -> [contract]) into one tidy
-    DataFrame with one row per contract. This is the shape every other module
-    in this project expects to work with.
+    DataFrame with one row per contract.
+
+    Columns returned:
+        expiry, dte, strike, side (CALL/PUT),
+        bid, ask, last, volume, open_interest,
+        iv (percentage, e.g. 18.4 for 18.4% — caller divides by 100 for storage),
+        delta, gamma, theta, vega
+
+    Note on IV: Schwab's "volatility" field is returned as a percentage.
+    The collector divides by 100 before writing to the database (stored as
+    decimal: 0.184). This conversion happens in collector.py, not here, so
+    app.py code that reads from the legacy schema remains unaffected.
     """
     rows = []
     for side, key in (("CALL", "callExpDateMap"), ("PUT", "putExpDateMap")):
@@ -110,23 +213,26 @@ def chain_to_dataframe(raw_chain: dict) -> pd.DataFrame:
             # Schwab formats expiry keys like "2026-06-26:5" (date:days-to-exp)
             expiry_date = exp_str.split(":")[0]
             dte = int(exp_str.split(":")[1]) if ":" in exp_str else None
+
             for strike_str, contracts in strikes.items():
                 for c in contracts:
                     rows.append({
-                        "expiry": expiry_date,
-                        "dte": dte,
-                        "strike": float(strike_str),
-                        "side": side,
-                        "bid": c.get("bid"),
-                        "ask": c.get("ask"),
-                        "last": c.get("last"),
-                        "volume": c.get("totalVolume"),
-                        "open_interest": c.get("openInterest"),
-                        "iv": c.get("volatility"),  # Schwab returns this as a percentage, e.g. 18.4
-                        "delta": c.get("delta"),
-                        "gamma": c.get("gamma"),
-                        "theta": c.get("theta"),
+                        "expiry":         expiry_date,
+                        "dte":            dte,
+                        "strike":         float(strike_str),
+                        "side":           side,
+                        "bid":            c.get("bid"),
+                        "ask":            c.get("ask"),
+                        "last":           c.get("last"),
+                        "volume":         c.get("totalVolume"),
+                        "open_interest":  c.get("openInterest"),
+                        "iv":             c.get("volatility"),  # percentage, e.g. 18.4
+                        "delta":          c.get("delta"),
+                        "gamma":          c.get("gamma"),
+                        "theta":          c.get("theta"),
+                        "vega":           c.get("vega"),        # added: sensitivity to IV change
                     })
+
     return pd.DataFrame(rows)
 
 
@@ -139,7 +245,6 @@ def filter_chain_by_strike_window(
 ) -> pd.DataFrame:
     """
     Python-side safety filter: drops any strikes outside spot ± width points.
-
     This is a backstop for the API-level strike_count filter, not a replacement
     for it. In practice, strike_count=80 should never return strikes beyond
     ±300 points at SPX's spacing — but if strike spacing widens in the far wings
@@ -154,13 +259,13 @@ def filter_chain_by_strike_window(
     config.STRIKE_FETCH_WIDTH_POINTS should be reviewed.
 
     Args:
-        chain_df:     Full chain DataFrame from chain_to_dataframe().
-        spot:         Current SPX underlying price.
-        width:        Strike window half-width in points (default: config value).
-        atm_iv_pct:   ATM IV as a percentage (e.g. 18.4), used for SD log check.
-                      Pass None to skip the check.
-        max_dte:      Longest DTE in the current fetch window, used for SD check.
-                      Pass None to skip the check.
+        chain_df:    Full chain DataFrame from chain_to_dataframe().
+        spot:        Current SPX underlying price.
+        width:       Strike window half-width in points (default: config value).
+        atm_iv_pct:  ATM IV as a percentage (e.g. 18.4), used for SD log check.
+                     Pass None to skip the check.
+        max_dte:     Longest DTE in the current fetch window, used for SD check.
+                     Pass None to skip the check.
 
     Returns:
         Filtered DataFrame containing only strikes within [spot - width, spot + width].
@@ -168,8 +273,8 @@ def filter_chain_by_strike_window(
     if chain_df.empty:
         return chain_df
 
-    lower = spot - width
-    upper = spot + width
+    lower    = spot - width
+    upper    = spot + width
     filtered = chain_df[
         (chain_df["strike"] >= lower) &
         (chain_df["strike"] <= upper)
@@ -184,7 +289,6 @@ def filter_chain_by_strike_window(
         )
 
     # Optional: log a warning if 2 SD expected move exceeds the configured window.
-    # This is a purely informational check — it does not change what gets stored.
     if atm_iv_pct is not None and max_dte is not None and max_dte > 0:
         iv_decimal = atm_iv_pct / 100.0
         em_2sd = 2 * spot * iv_decimal * math.sqrt(max_dte / 365)

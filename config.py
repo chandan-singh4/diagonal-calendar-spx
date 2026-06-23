@@ -4,6 +4,7 @@ config.py — Centralized configuration loaded from .env
 Every other module pulls settings from here instead of reading os.environ directly,
 so there's exactly one place to look when you need to change a setting.
 """
+
 import os
 from pathlib import Path
 from dotenv import load_dotenv
@@ -12,12 +13,12 @@ load_dotenv()
 
 PROJECT_ROOT = Path(__file__).parent
 
-SCHWAB_APP_KEY = os.environ.get("SCHWAB_APP_KEY", "")
-SCHWAB_APP_SECRET = os.environ.get("SCHWAB_APP_SECRET", "")
+SCHWAB_APP_KEY      = os.environ.get("SCHWAB_APP_KEY", "")
+SCHWAB_APP_SECRET   = os.environ.get("SCHWAB_APP_SECRET", "")
 SCHWAB_CALLBACK_URL = os.environ.get("SCHWAB_CALLBACK_URL", "https://127.0.0.1:8182")
-SCHWAB_TOKEN_PATH = str(PROJECT_ROOT / os.environ.get("SCHWAB_TOKEN_PATH", "data/token.json"))
+SCHWAB_TOKEN_PATH   = str(PROJECT_ROOT / os.environ.get("SCHWAB_TOKEN_PATH", "data/token.json"))
 
-DB_PATH = str(PROJECT_ROOT / os.environ.get("DB_PATH", "data/dashboard.db"))
+DB_PATH      = str(PROJECT_ROOT / os.environ.get("DB_PATH", "data/dashboard.db"))
 DEMO_DB_PATH = str(PROJECT_ROOT / "data" / "demo_dashboard.db")
 
 # Default state of the Demo Mode toggle in the dashboard sidebar, used every time
@@ -37,8 +38,8 @@ if _explicit_demo_mode is not None:
 else:
     DEMO_MODE = not (SCHWAB_APP_KEY and SCHWAB_APP_SECRET)
 
-UNDERLYING_SYMBOL = "$SPX"  # Schwab's symbol convention for the SPX index
-
+UNDERLYING_SYMBOL = "$SPX"   # Schwab's symbol convention for the SPX index
+VIX_SYMBOL        = "$VIX.X" # Schwab's symbol for the CBOE Volatility Index
 
 # ---------------------------------------------------------------------------
 # Data Collection
@@ -62,7 +63,6 @@ STRIKE_FETCH_WIDTH_POINTS = 300
 # Increase this only if you begin analyzing longer-dated diagonal pairings.
 MAX_EXPIRY_DTE = 20
 
-
 # ---------------------------------------------------------------------------
 # Polling
 # ---------------------------------------------------------------------------
@@ -70,14 +70,12 @@ MAX_EXPIRY_DTE = 20
 # Standard polling interval for normal trading days. IV term structure shifts
 # over minutes and hours — 5 minutes captures all meaningful moves without
 # accumulating unnecessary database volume.
-POLL_INTERVAL_NORMAL = 300  # seconds (5 minutes)
+POLL_INTERVAL_NORMAL = 300   # seconds (5 minutes)
 
-# High-resolution polling interval for major scheduled events (FOMC, CPI, NFP,
-# PPI, Powell speeches). Activated manually via the Event Mode toggle in the
-# sidebar — flip it on ~10–15 minutes before the announcement, off afterward.
-# Designed to capture short-lived volatility dislocations that revert quickly.
-POLL_INTERVAL_EVENT = 60  # seconds (1 minute)
-
+# High-resolution polling interval used during OPEN (9:30–10:00) and CLOSE
+# (15:30–16:00) sessions, where IV moves most aggressively. Also activated
+# manually via the Event Mode toggle in the sidebar for FOMC/CPI/NFP days.
+POLL_INTERVAL_EVENT = 60     # seconds (1 minute)
 
 # ---------------------------------------------------------------------------
 # Display
@@ -87,13 +85,36 @@ POLL_INTERVAL_EVENT = 60  # seconds (1 minute)
 # in the database are UTC — this constant controls conversion at display time only.
 DISPLAY_TIMEZONE = "America/New_York"
 
+# ---------------------------------------------------------------------------
+# Market Holidays
+# ---------------------------------------------------------------------------
+# US equity market holidays for 2026. The collector uses this list to classify
+# collection gaps as HOLIDAY vs COLLECTOR_OFFLINE, so weekend/holiday gaps
+# don't appear as unexpected data losses in the dashboard.
+#
+# Update this set each January for the new calendar year. Only full-day closures
+# are listed — early-close days (e.g. Black Friday, Christmas Eve) are treated
+# as normal trading days since SPX options still trade until 4:00 PM ET.
+MARKET_HOLIDAYS = {
+    # 2026
+    "2026-01-01",   # New Year's Day (Thursday)
+    "2026-01-19",   # Martin Luther King Jr. Day (3rd Monday)
+    "2026-02-16",   # Presidents' Day (3rd Monday)
+    "2026-04-03",   # Good Friday
+    "2026-05-25",   # Memorial Day (last Monday)
+    "2026-07-03",   # Independence Day observed (July 4 falls on Saturday)
+    "2026-09-07",   # Labor Day (1st Monday)
+    "2026-11-26",   # Thanksgiving Day (4th Thursday)
+    "2026-12-25",   # Christmas Day (Friday)
+}
+
 
 def validate():
     """Call this at startup so a missing credential fails loudly, not with a
     confusing downstream error."""
     missing = [
         name for name, val in [
-            ("SCHWAB_APP_KEY", SCHWAB_APP_KEY),
+            ("SCHWAB_APP_KEY",    SCHWAB_APP_KEY),
             ("SCHWAB_APP_SECRET", SCHWAB_APP_SECRET),
         ] if not val
     ]
