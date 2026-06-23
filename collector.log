@@ -25,3 +25,58 @@ For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/St
 2026-06-23 14:11:43  WARNING   2 SD expected move (±732 pts, IV=21.2%, DTE=20) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
 2026-06-23 14:16:45  WARNING   2 SD expected move (±725 pts, IV=21.0%, DTE=20) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
 2026-06-23 14:21:42  WARNING   2 SD expected move (±714 pts, IV=20.7%, DTE=20) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-23 14:30:46  WARNING   Startup gap recorded: 9 min of missing data (~1 snapshots lost). Reason: COLLECTOR_OFFLINE.
+2026-06-23 14:30:55  WARNING   2 SD expected move (±826 pts, IV=20.2%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-23 14:35:55  WARNING   2 SD expected move (±819 pts, IV=20.0%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-23 14:40:50  WARNING   2 SD expected move (±818 pts, IV=20.0%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-23 14:45:55  WARNING   2 SD expected move (±1015 pts, IV=24.9%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-23 14:50:51  WARNING   2 SD expected move (±950 pts, IV=23.3%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-23 14:55:50  WARNING   2 SD expected move (±1015 pts, IV=24.9%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-23 15:00:51  WARNING   2 SD expected move (±994 pts, IV=24.4%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-23 15:05:52  WARNING   2 SD expected move (±993 pts, IV=24.3%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-23 15:10:55  WARNING   2 SD expected move (±1009 pts, IV=24.7%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-23 15:15:49  WARNING   2 SD expected move (±960 pts, IV=23.5%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-23 15:20:51  WARNING   2 SD expected move (±957 pts, IV=23.5%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-23 15:25:58  WARNING   2 SD expected move (±1018 pts, IV=24.9%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-23 15:30:54  WARNING   2 SD expected move (±974 pts, IV=23.8%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-23 15:30:55  WARNING   Mid-session gap recorded: 5 min between snapshots.
+2026-06-23 15:31:57  WARNING   2 SD expected move (±966 pts, IV=23.6%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-23 15:32:49  WARNING   2 SD expected move (±963 pts, IV=23.6%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-23 15:33:55  WARNING   2 SD expected move (±960 pts, IV=23.5%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-23 15:34:49  WARNING   2 SD expected move (±953 pts, IV=23.3%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-23 15:35:57  ERROR     Cycle failure #1: [Errno 11001] getaddrinfo failed
+2026-06-23 15:36:27  ERROR     Cycle failure #2: [Errno 11001] getaddrinfo failed
+2026-06-23 15:37:08  ERROR     Cycle failure #3: [Errno 11001] getaddrinfo failed
+2026-06-23 15:37:42  WARNING   2 SD expected move (±954 pts, IV=23.3%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-23 15:37:42  WARNING   Mid-session gap recorded: 3 min between snapshots.
+2026-06-23 15:38:42  WARNING   2 SD expected move (±911 pts, IV=22.3%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-23 15:39:46  WARNING   2 SD expected move (±900 pts, IV=22.0%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-23 15:40:41  WARNING   2 SD expected move (±890 pts, IV=21.8%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-23 15:41:46  WARNING   2 SD expected move (±885 pts, IV=21.7%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-23 15:42:42  WARNING   2 SD expected move (±889 pts, IV=21.8%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-23 15:43:42  WARNING   2 SD expected move (±838 pts, IV=20.5%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-23 15:44:47  WARNING   2 SD expected move (±817 pts, IV=20.0%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-23 15:45:46  WARNING   2 SD expected move (±810 pts, IV=19.8%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-23 15:46:41  WARNING   2 SD expected move (±794 pts, IV=19.4%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-23 15:47:38  ERROR     Cycle failure #1: [Errno 11001] getaddrinfo failed
+2026-06-23 15:48:08  ERROR     Cycle failure #2: [Errno 11001] getaddrinfo failed
+2026-06-23 15:48:46  WARNING   2 SD expected move (±834 pts, IV=20.4%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-23 15:49:46  WARNING   2 SD expected move (±829 pts, IV=20.3%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-23 15:50:38  ERROR     Cycle failure #1: [Errno 11001] getaddrinfo failed
+2026-06-23 15:51:08  ERROR     Cycle failure #2: [Errno 11001] getaddrinfo failed
+2026-06-23 15:51:49  ERROR     Cycle failure #3: [Errno 11001] getaddrinfo failed
+2026-06-23 15:52:30  ERROR     Cycle failure #4: [Errno 11001] getaddrinfo failed
+2026-06-23 15:53:04  WARNING   2 SD expected move (±617 pts, IV=15.1%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-23 15:53:04  WARNING   Mid-session gap recorded: 3 min between snapshots.
+2026-06-23 15:54:05  WARNING   2 SD expected move (±588 pts, IV=14.4%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-23 15:55:10  WARNING   2 SD expected move (±660 pts, IV=16.2%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-23 15:56:11  ERROR     Cycle failure #1: [Errno 11001] getaddrinfo failed
+2026-06-23 15:56:52  ERROR     Cycle failure #2: [Errno 11001] getaddrinfo failed
+2026-06-23 15:57:22  ERROR     Cycle failure #3: [Errno 11001] getaddrinfo failed
+2026-06-23 15:57:52  ERROR     Cycle failure #4: [Errno 11001] getaddrinfo failed
+2026-06-23 15:58:22  ERROR     Cycle failure #5: [Errno 11001] getaddrinfo failed
+2026-06-23 15:58:22  CRITICAL  5 consecutive failures. Check Schwab API status. Collector is still running and will keep retrying.
+2026-06-23 15:59:03  ERROR     Cycle failure #6: [Errno 11001] getaddrinfo failed
+2026-06-23 15:59:03  CRITICAL  6 consecutive failures. Check Schwab API status. Collector is still running and will keep retrying.
+2026-06-23 15:59:44  ERROR     Cycle failure #7: [Errno 11001] getaddrinfo failed
+2026-06-23 15:59:44  CRITICAL  7 consecutive failures. Check Schwab API status. Collector is still running and will keep retrying.

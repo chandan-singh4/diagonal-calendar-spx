@@ -81,7 +81,7 @@ else:
         raw_chain = schwab_client.get_option_chain(
             client,
             from_date=date.today(),
-            to_date=date.today() + timedelta(days=config.MAX_EXPIRY_DTE),
+            to_date=date.today() + timedelta(days=config.MAX_EXPIRY_FETCH_DAYS),
         )
         chain_df = schwab_client.chain_to_dataframe(raw_chain)
         chain_df = schwab_client.filter_chain_by_strike_window(chain_df, spx_price)

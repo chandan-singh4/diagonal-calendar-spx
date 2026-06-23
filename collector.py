@@ -611,7 +611,7 @@ def main() -> None:
     logger.info("=" * 62)
     logger.info("SPX Diagonal Collector starting")
     logger.info("Database    : %s", db_path)
-    logger.info("Max DTE     : %d days", config.MAX_EXPIRY_DTE)
+    logger.info("Max DTE     : %d days", config.MAX_EXPIRY_COUNT)
     logger.info("Strikes     : %d per expiry / ±%d pt window",
                 config.STRIKE_COUNT, config.STRIKE_FETCH_WIDTH_POINTS)
     logger.info("Poll normal : %ds  |  event: %ds",
