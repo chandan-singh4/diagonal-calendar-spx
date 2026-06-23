@@ -38,6 +38,148 @@ GitHub repo: https://github.com/chandan-singh4/diagonal-calendar-spx
 Primary branch: main
 Local path: wherever your spx-diagonal-dashboard folder lives (parent folder contains .venv)
 
+## 6/23/2026 — app.py: Fixed broken reference to removed config constant
+
+**What changed**
+`app.py` referenced `config.MAX_EXPIRY_DTE` which was removed when the expiry
+collection strategy changed from DTE-capped to count-based. Replaced all
+occurrences with `config.MAX_EXPIRY_FETCH_DAYS` via VS Code Find and Replace
+(Ctrl+H → Replace All).
+
+**Why**
+Dashboard failed on launch with: "Couldn't reach Schwab API: module 'config'
+has no attribute 'MAX_EXPIRY_DTE'"
+
+**Impact**
+Dashboard loads normally again. No logic change — `MAX_EXPIRY_FETCH_DAYS = 90`
+is the direct drop-in replacement for the old `MAX_EXPIRY_DTE = 20` in any
+context where a date range in days is needed.
+
+---
+
+## 6/23/2026 — config.py + collector.py: Collect next 20 expirations by count
+
+**What changed**
+`config.py`: replaced `MAX_EXPIRY_DTE = 20` with two new constants:
+  - `MAX_EXPIRY_COUNT = 20` — collect exactly this many expirations per snapshot
+  - `MAX_EXPIRY_FETCH_DAYS = 90` — how far out to cast the net before trimming
+
+`collector.py` (`_run_cycle`): two changes:
+  1. `max_date` now uses `MAX_EXPIRY_FETCH_DAYS` instead of `MAX_EXPIRY_DTE`
+  2. After `chain_to_dataframe`, chain is trimmed to the nearest
+     `MAX_EXPIRY_COUNT` expirations before any further processing:
+
+```python
+all_expiries = sorted(chain_df["expiry"].unique())
+keep_expiries = set(all_expiries[:config.MAX_EXPIRY_COUNT])
+chain_df = chain_df[chain_df["expiry"].isin(keep_expiries)]
+```
+
+**Why**
+Original design capped collection at expirations within 20 calendar days.
+First live run showed only 14 expirations in that window. Collecting by count
+instead guarantees exactly 20 expirations per snapshot regardless of how SPX
+weekly calendars are spaced — typically reaching ~35–50 DTE for the 20th
+expiry.
+
+**Impact**
+- `exp=14` → `exp=20` per snapshot
+- `rows=2240` → `rows=3200` per snapshot (~43% more option rows)
+- Storage: ~330,000 option rows per trading day vs ~230,000 previously
+- Term structure view now spans ~6–7 weeks out rather than 3 weeks
+- `iv_spread_to_front` column covers a fuller curve
+
+---
+
+## 6/23/2026 — check_db.py: New database health check script
+
+**What changed**
+New file `check_db.py` added to project root.
+
+**Why**
+Multiline `python -c "..."` commands don't work in PowerShell. Rather than
+finding PowerShell-compatible syntax, a dedicated script is cleaner, reusable,
+and readable. Replaces all ad-hoc database query snippets with one command:
+`python check_db.py`
+
+**What it shows**
+- Total snapshots today and all-time (by status: COMPLETE / PARTIAL / FAILED)
+- Total option rows stored
+- Last 5 snapshots with SPX, VIX, row count, latency, status
+- Full IV term structure from the most recent COMPLETE snapshot
+- Recent collection gaps (last 5)
+
+**Usage**
+Run from any second terminal while the collector is running in Terminal 1.
+Never writes to the database — read-only.
+
+---
+
+## 6/23/2026 — config.py: Fixed VIX symbol
+
+**What changed**
+`config.py`: `VIX_SYMBOL = "$VIX.X"` → `VIX_SYMBOL = "$VIX"`
+
+**Why**
+First live collection run showed:
+`HTTP/1.1 400 Bad Request` for `$VIX.X`
+Schwab's correct symbol for the VIX index is `$VIX` not `$VIX.X`.
+VIX was logging as N/A in every snapshot.
+
+**Impact**
+VIX value now populates `snapshots.vix_value` correctly. Required collector
+restart to take effect.
+
+---
+
+## 6/23/2026 — Collector: First live run confirmed working
+
+**What happened**
+First successful live collection cycle:
+
+✓ snap=1 | MIDDAY | SPX=7397.57 | VIX=N/A | rows=2240 | exp=14 | 6467ms | COMPLETE
+
+**Observations**
+- 14 expirations within 20 DTE (prompted the count-based change above)
+- 2240 rows = 14 × 80 strikes × 2 sides — math confirms design is correct
+- 2SD warning fired: IV=21.3%, DTE=20 → expected move ±736 pts exceeds ±300pt
+  window. Decision: leave `STRIKE_FETCH_WIDTH_POINTS = 300`. For diagonal
+  calendar trading, strikes beyond ±150 pts are never traded. Warning is
+  informational only and does not affect data quality.
+- VIX returned 400 → fixed separately (see entry above)
+- Collection latency 6467ms — normal for first authenticated cycle
+
+**Startup confirmed**
+Collector started via `python collector.py` in VS Code Terminal 1.
+Startup shortcut added to Windows Startup folder (shell:startup) pointing
+directly to `python.exe` to bypass Smart App Control block on .bat files.
+Sleep mode set to Never (plugged in) so collection is uninterrupted during
+market hours while laptop is locked.
+
+---
+
+## 6/22/2026 — Windows auto-start: Startup folder shortcut
+
+**What changed**
+Added shortcut to Windows Startup folder (`shell:startup`) pointing to:
+`C:\Users\chand\Python\.venv\Scripts\python.exe`
+with argument: `"C:\Users\chand\Python\spx-diagonal-dashboard\collector.py"`
+and Start In: `C:\Users\chand\Python\spx-diagonal-dashboard`
+
+`start_collector.bat` and `register_collector_task.ps1` were created but
+could not be used:
+- `.bat` file blocked by Windows Smart App Control
+- PowerShell script failed silently (no Admin rights in VS Code terminal)
+
+**Why shortcut instead of Task Scheduler**
+Direct Python shortcut bypasses Smart App Control entirely (python.exe is a
+trusted executable). No Admin rights needed. Equivalent reliability for a
+personal machine.
+
+**Behavior**
+Collector starts automatically at every Windows logon. Sleeps outside market
+hours (9:30 AM – 4:00 PM ET). No manual intervention required on trading days
+except weekly Schwab OAuth re-authorization (~every 7 days).
 
 ---
 
