@@ -39,6 +39,99 @@ Primary branch: main
 Local path: wherever your spx-diagonal-dashboard folder lives (parent folder contains .venv)
 
 ---
+
+## 2026-06-22 — db.py: Full schema overhaul (snapshot-anchored design)
+
+### What changed
+`db.py` completely rewritten. The file grew from 164 lines to ~390 lines.
+All existing functions are preserved with identical signatures — `app.py`
+requires zero changes and continues to work as before.
+
+### New tables added (new schema)
+
+| Table | Purpose |
+|---|---|
+| `schema_version` | Version tracking; enables future migrations |
+| `snapshots` | One row per collection cycle; anchor for all child data |
+| `option_rows` | One row per contract per snapshot; irreplaceable intraday record |
+| `atm_iv_by_expiry` | Pre-aggregated ATM IV per expiry; primary analytics query target |
+| `collection_gaps` | Audit log of missed collection windows |
+
+### Legacy tables kept (for existing app.py)
+
+| Table | Status |
+|---|---|
+| `expiry_snapshots` | Kept — app.py still reads from this |
+| `strike_snapshots` | Kept — app.py still reads from this |
+| `positions` | Kept — unchanged |
+
+Legacy tables will be removed in a future commit when `app.py` is
+refactored to read from the new schema.
+
+### New functions added
+
+**Write (collector.py only):**
+- `create_snapshot()` — opens a PARTIAL snapshot; returns snapshot_id
+- `finalize_snapshot()` — seals to COMPLETE/PARTIAL/FAILED after child rows commit
+- `insert_option_rows()` — bulk insert in single transaction
+- `insert_atm_iv_records()` — bulk insert pre-aggregated ATM IV
+- `record_gap()` — writes gap record on restart or missed cycle
+
+**Read (future refactored app.py):**
+- `get_last_snapshot_timestamp()` — for gap detection on startup
+- `get_snapshots()` — time-range query, default status=COMPLETE
+- `get_option_chain()` — chain reconstruction at any historical snapshot
+- `get_contract_iv_history()` — IV time-series for a specific strike
+- `get_atm_iv_history()` — ATM IV time-series for a specific expiry
+- `get_term_structure()` — all expiries for a snapshot (for curve chart)
+- `get_iv_spread_history()` — front/back spread for IV percentile engine
+- `get_gaps()` — gap query with optional reason exclusion
+- `update_snapshot_notes()` — narrow write exception permitted from app.py
+
+### Connection management improvements
+- `get_conn()` (legacy) now rolls back on exception — this was missing before
+- `managed_conn()` (new) requires explicit db_path; no silent default writes
+- Both context managers set WAL mode and `PRAGMA foreign_keys = ON` per connection
+- `_make_conn()` shared internal factory with 15-second timeout
+
+### Indexes added (9 total)
+```
+idx_snapshots_timestamp
+idx_snapshots_status
+idx_snapshots_timestamp_status      ← primary dashboard query index
+idx_option_rows_snapshot_id
+idx_option_rows_contract
+idx_option_rows_contract_snap       ← most critical: covers per-contract IV history
+idx_atm_iv_snapshot_id
+idx_atm_iv_expiry_snap              ← primary percentile engine index
+idx_gaps_start
+```
+
+### Why this design
+Schwab provides no historical intraday option chain endpoint. Every row in
+`option_rows` represents a moment that cannot be reconstructed from any external
+source once missed. The snapshot-anchored design ensures:
+- Every collection cycle is auditable (COMPLETE / PARTIAL / FAILED)
+- Partial fetches don't silently pollute IV percentile statistics
+- Chain reconstruction at any historical timestamp is a first-class query
+- The `atm_iv_by_expiry` pre-aggregation keeps dashboard queries fast at scale
+  (scans ~3,150 rows vs ~4.8M rows for a 30-day ATM IV history query)
+
+### Impact on existing system
+- `app.py` requires no changes
+- `demo_data.py` requires no changes
+- `iv_engine.py` requires no changes
+- `schwab_client.py` requires no changes
+- `collector.py` (not yet written) will use the new write functions
+
+### Open questions
+- When to refactor `app.py` to read from new schema (after collector.py is
+  built and accumulating real data)
+- `SCHEMA_VERSION = 1`: increment to 2 when the first schema change is needed
+  post-deployment; add migration function to `init_db()` at that time
+
+
+---
 **Implementation Date:** 2026-06-22
 **Implementation Status:** Complete — all changes verified live
 
