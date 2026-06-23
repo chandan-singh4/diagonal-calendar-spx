@@ -478,7 +478,7 @@ def _run_cycle(client, db_path: str, session: str, poll_interval: int) -> int:
 
         # ── 4. Fetch option chain ────────────────────────────────────────────
         today    = date.today()
-        max_date = today + timedelta(days=config.MAX_EXPIRY_DTE)
+        max_date = today + timedelta(days=config.MAX_EXPIRY_FETCH_DAYS)
         raw_chain = schwab_client.get_option_chain(client, today, max_date)
 
         if not raw_chain:
@@ -488,6 +488,11 @@ def _run_cycle(client, db_path: str, session: str, poll_interval: int) -> int:
         chain_df = schwab_client.chain_to_dataframe(raw_chain)
         if chain_df.empty:
             raise ValueError("Option chain contained no contracts after parsing")
+        
+        # NEW: keep only the nearest MAX_EXPIRY_COUNT expirations (sorted by date)
+        all_expiries = sorted(chain_df["expiry"].unique())
+        keep_expiries = set(all_expiries[:config.MAX_EXPIRY_COUNT])
+        chain_df = chain_df[chain_df["expiry"].isin(keep_expiries)]
 
         raw_expiry_count = chain_df["expiry"].nunique()
 

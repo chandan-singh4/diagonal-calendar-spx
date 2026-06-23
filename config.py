@@ -39,7 +39,7 @@ else:
     DEMO_MODE = not (SCHWAB_APP_KEY and SCHWAB_APP_SECRET)
 
 UNDERLYING_SYMBOL = "$SPX"   # Schwab's symbol convention for the SPX index
-VIX_SYMBOL        = "$VIX.X" # Schwab's symbol for the CBOE Volatility Index
+VIX_SYMBOL        = "$VIX" # Schwab's symbol for the CBOE Volatility Index
 
 # ---------------------------------------------------------------------------
 # Data Collection
@@ -61,7 +61,11 @@ STRIKE_FETCH_WIDTH_POINTS = 300
 # from today through today + MAX_EXPIRY_DTE calendar days. SPX has ~10–11
 # expirations in a typical 20-day window (Mon/Wed/Fri weeklies + end-of-month).
 # Increase this only if you begin analyzing longer-dated diagonal pairings.
-MAX_EXPIRY_DTE = 20
+
+#Changed the logic - Collect exactly 20 expirations
+
+MAX_EXPIRY_COUNT = 20        # collect exactly this many expirations per snapshot
+MAX_EXPIRY_FETCH_DAYS = 90   # how far out to look when fetching (wide net; trimmed after)
 
 # ---------------------------------------------------------------------------
 # Polling
