@@ -8,7 +8,7 @@ No Schwab API calls. No DB writes.
 Dashboard v1 new panels (2026-06-25):
   1. IV Structure Panel  — per-strike IV ratio, regime color, 30-min sparkline
   2. Calendar Edge Panel — call edge vs put edge, independent side trend
-  3. Transform Credit    — theoretical lock-in profit, threshold status, theta ETA
+  3. Transform Credit    — theoretical lock-in profit, threshold status, leg breakdown
 
 Data sources (all read from dashboard.db):
   snapshots         → latest SPX price, VIX, snapshot timestamp
@@ -22,6 +22,7 @@ IV SCALE NOTE
 """
 
 import logging
+import math
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
@@ -232,32 +233,102 @@ def _mini_edge_chart(merged_df: pd.DataFrame, color: str) -> go.Figure | None:
     return fig
 
 
-def _edge_color(edge_val: float | None) -> str:
-    """Color for the Calendar Edge panel based on edge value."""
-    if edge_val is None:
-        return "#888888"
-    # Negative edge = front IV < back IV = inverted = favorable
-    if edge_val < -0.5:
-        return "#00d97e"    # strongly inverted — green
-    elif edge_val < 0:
-        return "#4ecdc4"    # mildly inverted — teal
-    elif edge_val <= 0.5:
-        return "#ffd32a"    # near-parity — amber
+# ─── TERM-STRUCTURE LABELLING (NEUTRAL — see DOCUMENTATION.md v1.1) ───────────
+# Favorability by IV ratio is an UNVALIDATED hypothesis (audit 2026-06-25).
+# These helpers describe term-structure SHAPE only and never encode good/bad.
+#
+# Standard volatility term-structure terminology:
+#   ratio > 1.0  → front IV > back IV  → FRONT-ELEVATED (backwardation / "inverted")
+#   ratio < 1.0  → front IV < back IV  → BACK-ELEVATED  (contango / "normal")
+#   ratio ≈ 1.0  → FLAT
+#
+# NOTE: As of 2026-06-25, iv_engine.iv_regime() and iv_engine.interpret_curve()
+# have ALSO been corrected to neutral, terminologically-accurate output. The local
+# helpers below are retained because they carry finer banding (↑↑ / ↓↓) tuned for
+# the panel display. Engine and app now agree in meaning; neither implies good/bad.
+
+_ACCENT_FRONT = "#7b8cde"   # periwinkle — front-elevated (neutral accent)
+_ACCENT_BACK  = "#6aa0a8"   # slate-teal — back-elevated  (neutral accent)
+_ACCENT_FLAT  = "#8b94a6"   # grey       — flat
+_ACCENT_NA    = "#6b7280"   # muted grey — no data
+
+
+def _neutral_regime(ratio: float | None) -> tuple[str, str]:
+    """
+    Returns (label, hex_color) describing term-structure shape only.
+    No favorability is implied; colors are neutral accents, not green/red.
+    """
+    if ratio is None or (isinstance(ratio, float) and math.isnan(ratio)):
+        return "N/A", _ACCENT_NA
+    if ratio >= 1.10:
+        return "FRONT-ELEVATED ↑↑", _ACCENT_FRONT
+    elif ratio > 1.02:
+        return "FRONT-ELEVATED ↑", _ACCENT_FRONT
+    elif ratio >= 0.98:
+        return "FLAT", _ACCENT_FLAT
+    elif ratio > 0.90:
+        return "BACK-ELEVATED ↓", _ACCENT_BACK
     else:
-        return "#ff4757"    # contango — red
+        return "BACK-ELEVATED ↓↓", _ACCENT_BACK
+
+
+def _edge_color(edge_val: float | None) -> str:
+    """
+    Neutral accent color for the Calendar Edge panel.
+    edge = front_iv - back_iv.  Positive = front-elevated; negative = back-elevated.
+    Colors carry NO favorability judgment.
+    """
+    if edge_val is None:
+        return _ACCENT_NA
+    if edge_val > 0.10:
+        return _ACCENT_FRONT     # front above back
+    elif edge_val < -0.10:
+        return _ACCENT_BACK      # back above front
+    else:
+        return _ACCENT_FLAT      # essentially flat
 
 
 def _edge_label(edge_val: float | None) -> str:
+    """Neutral directional label. edge = front_iv - back_iv."""
     if edge_val is None:
         return "—"
-    if edge_val < -0.5:
-        return "Back-Elevated ↑"
-    elif edge_val < 0:
-        return "Mildly Inverted"
-    elif edge_val <= 0.5:
-        return "Near-Parity"
+    if edge_val > 0.10:
+        return "Front-Elevated ↑"   # front IV above back (backwardation)
+    elif edge_val < -0.10:
+        return "Back-Elevated ↓"    # front IV below back (contango)
     else:
-        return "Front-Elevated ↓"
+        return "Flat"
+
+
+def _describe_curve(ts) -> str:
+    """
+    Neutral, non-judgmental description of the ATM term-structure shape.
+    Replaces iv_engine.interpret_curve(), which used favorable/unfavorable
+    language now retracted (see DOCUMENTATION.md v1.1).
+    """
+    r = ts.ratio
+    if math.isnan(r):
+        return "Term structure unavailable (missing ATM IV on one expiry)."
+    if r >= 1.10:
+        shape = ("Strong backwardation — front ATM IV well above back. "
+                 "Near-term IV is elevated relative to the back month.")
+    elif r > 1.02:
+        shape = ("Backwardation — front ATM IV above back. "
+                 "Near-term IV sits above the back month.")
+    elif r >= 0.98:
+        shape = ("Flat term structure — front and back ATM IV are close. "
+                 "Little IV differential across the two expiries.")
+    elif r > 0.90:
+        shape = ("Contango — front ATM IV below back. "
+                 "Back-month IV sits above the near term.")
+    else:
+        shape = ("Steep contango — front ATM IV well below back. "
+                 "Back-month IV is substantially above the near term.")
+    return (
+        f"{shape}  ·  Ratio {r:.4f}.  "
+        "Whether this shape favors entry is an open, unvalidated question — "
+        "treat as neutral context, not a buy/avoid signal."
+    )
 
 
 # ─── Sidebar ─────────────────────────────────────────────────────────────────
@@ -465,8 +536,8 @@ with pan1:
         c_ratio = (fc_c.iv / bc_c.iv) if (fc_c.iv and bc_c.iv) else None
         p_ratio = (fc_p.iv / bc_p.iv) if (fc_p.iv and bc_p.iv) else None
 
-        c_label, c_color = iv_engine.iv_regime(c_ratio) if c_ratio else ("N/A", "#555")
-        p_label, p_color = iv_engine.iv_regime(p_ratio) if p_ratio else ("N/A", "#555")
+        c_label, c_color = _neutral_regime(c_ratio) if c_ratio else ("N/A", _ACCENT_NA)
+        p_label, p_color = _neutral_regime(p_ratio) if p_ratio else ("N/A", _ACCENT_NA)
 
         iv_s1, iv_s2 = st.columns(2)
 
@@ -633,7 +704,6 @@ with pan3:
             call_strike=call_strike,
             put_strike=put_strike,
             entry_debit=entry_debit,
-            front_dte=front_dte,
             threshold=transform_threshold,
         )
 
@@ -717,20 +787,11 @@ with pan3:
                     unsafe_allow_html=True,
                 )
 
-            # Theta ETA
-            if not tc.is_viable and tc.trading_hrs_to_threshold is not None:
-                st.markdown('<hr class="mini-sep">', unsafe_allow_html=True)
-                st.markdown(
-                    f'<div class="sub-label" style="color:rgba(201,209,217,0.7)">'
-                    f'⏱ Theta ETA (rough): '
-                    f'<span style="color:#7b8cde;font-weight:600">'
-                    f'{tc.trading_hrs_to_threshold:.1f} trading hrs</span>'
-                    f'</div>'
-                    f'<div class="sub-label" style="font-size:0.75em;margin-top:2px">'
-                    f'Front theta only · ignores vega / delta movement'
-                    f'</div>',
-                    unsafe_allow_html=True,
-                )
+            # NOTE: The rough "Theta ETA" indicator was removed (audit 2026-06-25).
+            # It ignored back-leg theta, vega, delta, and gamma — an assumption-based
+            # estimate inconsistent with the project's data-over-guesswork principle.
+            # A proper time-to-viability metric is deferred to Phase 3, to be built
+            # from stored per-leg Greeks. See DOCUMENTATION.md v1.1 §10.3.
         else:
             st.info(
                 "Mark data unavailable for one or more legs. "
@@ -753,7 +814,7 @@ except ValueError as e:
     st.stop()
 
 iv_index   = float(chain_df.groupby("expiry")["iv"].mean().mean())
-atm_regime_label, atm_regime_color = iv_engine.iv_regime(ts.ratio)
+atm_regime_label, atm_regime_color = _neutral_regime(ts.ratio)
 
 m1, m2, m3, m4, m5 = st.columns(5)
 m1.metric("IV Ratio (F/B) · ATM", f"{ts.ratio:.4f}")
@@ -764,14 +825,14 @@ m5.markdown(
     f'<div style="padding-top:6px">'
     f'<div style="font-size:0.72em;color:rgba(201,209,217,0.45);'
     f'letter-spacing:.1em;text-transform:uppercase;margin-bottom:5px">'
-    f'ATM Regime</div>'
+    f'ATM Structure</div>'
     f'<span class="regime-badge" style="background:{atm_regime_color}22;'
     f'color:{atm_regime_color};font-size:0.95em">{atm_regime_label}</span>'
     f'</div>',
     unsafe_allow_html=True,
 )
 
-st.info(iv_engine.interpret_curve(ts))
+st.info(_describe_curve(ts))
 
 # ─── Time range selector ─────────────────────────────────────────────────────
 period_label = st.radio(
@@ -1008,12 +1069,18 @@ if warning:
     st.warning(warning)
 
 
-# ─── TRADE QUALITY SCORE ─────────────────────────────────────────────────────
+# ─── CONTEXT METRICS  (neutral — NOT a buy signal) ───────────────────────────
+# The former composite "Trade Quality Score" was retired (audit 2026-06-25):
+#   • Composite 0–100 scores were rejected project-wide (raw numbers preferred).
+#   • Its IV-edge component had no justified direction, because IV-ratio
+#     favorability is an unvalidated hypothesis (DOCUMENTATION.md v1.1 §3.1).
+#   • Its theta component is a Phase-3 placeholder.
+# We now show the raw components only, as neutral context.
 st.markdown(
     "<hr style='margin:10px 0 10px 0;border:none;border-top:1px solid rgba(255,255,255,0.08)'>",
     unsafe_allow_html=True,
 )
-st.markdown("#### Trade Quality Score")
+st.markdown("#### Context Metrics  ·  *neutral — not a buy/avoid signal*")
 
 near_front = chain_df[chain_df["expiry"] == front_expiry]
 atm_row    = near_front.iloc[(near_front["strike"] - spx_price).abs().argsort()[:1]]
@@ -1021,15 +1088,28 @@ liquidity  = iv_engine.liquidity_score(
     atm_row["volume"].fillna(0).mean(),
     atm_row["open_interest"].fillna(0).mean(),
 )
-iv_pct         = iv_engine.percentile_rank(ratio_series, ts.ratio) if not ratio_series.empty else 50
-theta_advantage = 50  # Phase 3 placeholder
-score          = iv_engine.trade_quality_score(iv_pct, liquidity, theta_advantage)
+iv_pctile  = (
+    iv_engine.percentile_rank(ratio_series, ts.ratio)
+    if not ratio_series.empty else float("nan")
+)
 
-s1, s2, s3, s4 = st.columns(4)
-s1.metric("Overall Score",          f"{score:.0f} / 100")
-s2.metric("IV Edge (ratio pctl.)",  f"{iv_pct:.0f}")
-s3.metric("Liquidity",              f"{liquidity:.0f}")
-s4.metric("Theta Adv. (Phase 3)",   f"{theta_advantage:.0f}")
+s1, s2, s3 = st.columns(3)
+s1.metric("ATM IV Ratio percentile",
+          f"{iv_pctile:.0f}" if not math.isnan(iv_pctile) else "—",
+          help="Where the current ATM IV ratio sits within its history for the "
+               "selected range. Direction of 'good' is NOT established — context only.")
+s2.metric("ATM Liquidity (vol + OI)", f"{liquidity:.0f} / 100",
+          help="Composite of front-ATM volume and open interest. SPX is usually "
+               "highly liquid, so this is typically near 100.")
+s3.metric("Net Theta Advantage", "Phase 3",
+          help="Net $/day from time decay across all legs. Requires reliable "
+               "per-leg theta in option_rows. Not yet implemented.")
+
+st.caption(
+    "These are raw context numbers, deliberately not combined into a single "
+    "score. The IV-ratio percentile has no validated favorable direction — see "
+    "DOCUMENTATION.md §3.1 (favorability is an open question pending trade data)."
+)
 
 
 # ─── OPTIONS CHAIN TABLE ─────────────────────────────────────────────────────

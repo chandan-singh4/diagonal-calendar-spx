@@ -70,45 +70,30 @@ def term_structure(front_iv: float, back_iv: float) -> TermStructure:
 
 def interpret_curve(ts: TermStructure) -> str:
     """
-    Plain-language read on the curve shape.
+    Plain-language, NON-DIRECTIONAL read on the curve shape.
 
-    Edge interpretation for diagonal calendar spreads:
-    - Inverted (ratio < 1.0, back IV > front): Your long back legs carry higher IV
-      → more transformation credit potential → FAVORABLE for this strategy.
-    - Contango (ratio > 1.0, front IV > back): Your short front legs are more
-      expensive to buy back → reduced transformation credit → LESS FAVORABLE.
+    TERMINOLOGY (standard volatility conventions):
+      ratio > 1.0  → front IV > back IV → BACKWARDATION (inverted term structure)
+      ratio < 1.0  → front IV < back IV → CONTANGO (normal term structure)
+      ratio ≈ 1.0  → flat
 
-    Thresholds are starting points — tune against your own historical data.
+    FAVORABILITY IS NOT ASSERTED. Whether a given structure is good or bad for
+    this strategy is an OPEN, UNVALIDATED question (see DOCUMENTATION.md §3.1 and
+    the 2026-06-25 audit). Earlier versions claimed ratio < 1.0 was "favorable";
+    that claim rested on a single paper trade and has been retracted. This text
+    describes the structure factually and offers no entry recommendation.
     """
-    if ts.ratio < 0.90:
-        return (
-            "🟢 Strongly Inverted — back IV significantly above front. "
-            "Your long legs carry elevated IV; transformation credit is maximized. "
-            "High-quality structural edge."
-        )
-    elif ts.ratio < 1.00:
-        return (
-            "🟢 Inverted — back IV above front. "
-            "Structural edge present. Long legs hold value well; "
-            "front theta decay accumulates in your favor."
-        )
+    if ts.ratio < 0.95:
+        shape = "Contango (normal) — back IV above front."
     elif ts.ratio <= 1.05:
-        return (
-            "🟡 Near-Parity — IV structure flat across expiries. "
-            "Reduced edge; monitor for regime shift before entry."
-        )
-    elif ts.ratio <= 1.15:
-        return (
-            "🟠 Mild Contango — front IV slightly above back. "
-            "Front legs more expensive to close; transformation credit compressed. "
-            "Use caution on new entries."
-        )
+        shape = "Flat — front and back IV roughly equal."
     else:
-        return (
-            "🔴 Steep Contango — front IV well above back. "
-            "Unfavorable for diagonal entry. Consider waiting for "
-            "IV reversion before initiating a new position."
-        )
+        shape = "Backwardation (inverted) — front IV above back."
+    return (
+        f"ℹ️ {shape}  Favorability for this strategy is unvalidated — treat this "
+        f"as neutral context, not an entry signal. Validate against logged trades "
+        f"before acting on any regime."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -119,29 +104,33 @@ def iv_regime(ratio: float) -> tuple[str, str]:
     """
     Returns (regime_label, hex_color) for a given IV ratio (front_iv / back_iv).
 
-    Regime logic for diagonal calendar spreads:
-      Inverted (ratio < 1.0): back IV > front IV.
-        Your long back legs carry higher IV → more transformation credit → FAVORABLE.
-      Near-Parity (0.95–1.05): flat structure, reduced edge.
-      Contango (ratio > 1.05): front IV > back IV → LESS FAVORABLE.
+    NEUTRAL, NON-VALENCED classification. Labels describe WHICH SIDE is elevated;
+    they do NOT assert good/bad. Colors are a non-valenced blue↔purple palette
+    (neither conventionally means good or bad in finance) so the UI never implies
+    that one regime is favorable. Favorability is unvalidated — see
+    DOCUMENTATION.md §3.1 and the 2026-06-25 audit.
 
-    Colors:
-      #00d97e  emerald green  — inverted, strong structural edge
-      #4ecdc4  teal           — mildly inverted, edge present
-      #ffd32a  amber          — near-parity, watch
-      #ff9f43  orange         — mild contango, caution
-      #ff4757  red            — steep contango, unfavorable
+    TERMINOLOGY (standard volatility conventions):
+      ratio > 1.0 → front IV > back IV → BACKWARDATION (inverted term structure)
+      ratio < 1.0 → front IV < back IV → CONTANGO (normal term structure)
+
+    Bands:
+      < 0.92        BACK-ELEVATED   (strong contango)
+      0.92 – 0.97   BACK-LEANING
+      0.97 – 1.03   FLAT
+      1.03 – 1.08   FRONT-LEANING
+      > 1.08        FRONT-ELEVATED  (strong backwardation)
     """
-    if ratio < 0.90:
-        return "INVERTED ●", "#00d97e"
-    elif ratio < 1.00:
-        return "INVERTED",   "#4ecdc4"
-    elif ratio <= 1.05:
-        return "NEAR-PARITY","#ffd32a"
-    elif ratio <= 1.15:
-        return "CONTANGO",   "#ff9f43"
+    if ratio < 0.92:
+        return "BACK-ELEVATED", "#5b8fb9"     # muted blue
+    elif ratio < 0.97:
+        return "BACK-LEANING",  "#7b9cc4"
+    elif ratio <= 1.03:
+        return "FLAT",          "#8b949e"      # neutral gray
+    elif ratio <= 1.08:
+        return "FRONT-LEANING", "#b59cc4"
     else:
-        return "STEEP CONTANGO", "#ff4757"
+        return "FRONT-ELEVATED","#9b7cc4"      # muted purple
 
 
 # ---------------------------------------------------------------------------
@@ -365,11 +354,14 @@ class CalendarEdge:
     """
     Per-strike IV differential between front and back expiry.
 
-    call_edge = front_call_iv - back_call_iv  (negative = back elevated = inverted)
-    put_edge  = front_put_iv  - back_put_iv   (negative = back elevated = inverted)
+    call_edge = front_call_iv - back_call_iv
+    put_edge  = front_put_iv  - back_put_iv
 
-    Negative edges are FAVORABLE for this diagonal strategy because they indicate
-    the back (long) legs carry higher IV relative to the front (short) legs.
+    Sign reading (standard terminology, NO favorability implied — see audit
+    2026-06-25 and DOCUMENTATION.md §3.1):
+      positive edge → front IV above back → backwardation on that side
+      negative edge → front IV below back → contango on that side
+    Which (if either) is advantageous is an open, unvalidated question.
     """
     call_edge:   float | None
     put_edge:    float | None
@@ -394,8 +386,9 @@ def calendar_edge(
     call_edge = front_call_iv - back_call_iv
     put_edge  = front_put_iv  - back_put_iv
 
-    Negative values (front < back) indicate inverted structure on that side,
-    which is the favorable regime for diagonal calendar entry and transformation.
+    Negative values mean front IV is below back IV (contango on that side);
+    positive values mean front above back (backwardation). No favorability is
+    implied — see DOCUMENTATION.md §3.1.
     """
     fc = strike_contract(chain_df, front_expiry, call_strike, "CALL")
     bc = strike_contract(chain_df, back_expiry,  call_strike, "CALL")
@@ -440,9 +433,11 @@ class TransformCredit:
 
     If theoretical_credit >= threshold → transformation is viable.
 
-    From forensic analysis (2026-06-23):
+    Note on the metric (from 2026-06-23 review, corroborated by 2026-06-25 audit):
       The correct viability metric is theoretical_credit, NOT the diagonal mark alone.
       The diagonal mark ignores the entry debit, so it overstates the locked profit.
+      (This is a definitional point and is independent of the unvalidated IV-regime
+      favorability question.)
     """
     back_call_mark:    float | None
     back_put_mark:     float | None
@@ -456,9 +451,10 @@ class TransformCredit:
     is_viable:         bool           # theoretical_credit >= threshold
     threshold:         float
     entry_debit:       float
-    # Theta ETA fields
-    daily_theta_est:   float | None   # rough daily credit gain from front theta
-    trading_hrs_to_threshold: float | None  # eta in trading hours (None if above threshold)
+    # NOTE: Theta ETA fields were REMOVED 2026-06-25 (audit). The estimate
+    # ignored back-leg theta, vega, delta, and gamma and presented a single-leg
+    # linear-decay guess as an actionable time-to-threshold. A proper estimate
+    # belongs in Phase 3, built from stored per-leg Greeks — not from close_cost/dte.
 
 
 def transform_credit(
@@ -468,7 +464,6 @@ def transform_credit(
     call_strike:   float,
     put_strike:    float,
     entry_debit:   float,
-    front_dte:     int,
     threshold:     float = 5.0,
 ) -> TransformCredit:
     """
@@ -479,10 +474,7 @@ def transform_credit(
     diagonal_mark   = back_legs_value - close_cost
     theoretical_credit = diagonal_mark - entry_debit
 
-    Theta ETA estimate (rough):
-        daily_theta_est ≈ close_cost / front_dte
-        (front legs lose roughly this much per day — simplification, ignores
-        back-leg theta drag and vega effects, treat as directional only)
+    (Theta ETA was removed 2026-06-25 — see dataclass note.)
     """
     def _get(expiry, strike, side, col):
         rows = chain_df[
@@ -516,15 +508,6 @@ def transform_credit(
     credit    = (diag_mark - entry_debit) if diag_mark is not None else None
     gap       = (threshold - credit) if credit is not None else None
 
-    # Rough theta ETA
-    daily_theta = None
-    eta_hrs     = None
-    if close_cost is not None and front_dte > 0:
-        daily_theta = close_cost / front_dte
-        if gap is not None and gap > 0 and daily_theta > 0:
-            days_needed = gap / daily_theta
-            eta_hrs = days_needed * 6.5   # ~6.5 trading hours per day
-
     return TransformCredit(
         back_call_mark=bc_mark,
         back_put_mark=bp_mark,
@@ -538,8 +521,6 @@ def transform_credit(
         is_viable=(credit >= threshold) if credit is not None else False,
         threshold=threshold,
         entry_debit=entry_debit,
-        daily_theta_est=daily_theta,
-        trading_hrs_to_threshold=eta_hrs,
     )
 
 
