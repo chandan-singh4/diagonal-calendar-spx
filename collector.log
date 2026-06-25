@@ -308,3 +308,13 @@ For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/St
 2026-06-25 15:31:04  WARNING   Mid-session gap recorded: 5 min between snapshots.
 2026-06-25 15:32:03  WARNING   2 SD expected move (±995 pts, IV=24.4%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
 2026-06-25 15:33:03  WARNING   2 SD expected move (±985 pts, IV=24.2%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-25 15:34:02  WARNING   2 SD expected move (±992 pts, IV=24.4%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-25 15:35:08  WARNING   2 SD expected move (±987 pts, IV=24.2%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-25 15:36:14  WARNING   2 SD expected move (±990 pts, IV=24.3%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-25 15:37:07  WARNING   2 SD expected move (±967 pts, IV=23.7%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-25 15:38:09  WARNING   2 SD expected move (±954 pts, IV=23.4%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-25 15:39:03  WARNING   2 SD expected move (±969 pts, IV=23.8%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-25 15:40:03  WARNING   2 SD expected move (±924 pts, IV=22.7%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-25 15:41:08  WARNING   2 SD expected move (±921 pts, IV=22.6%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-25 15:42:08  WARNING   2 SD expected move (±913 pts, IV=22.4%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-25 15:43:10  WARNING   2 SD expected move (±887 pts, IV=21.8%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
