@@ -38,6 +38,84 @@ GitHub repo: https://github.com/chandan-singh4/diagonal-calendar-spx
 Primary branch: main
 Local path: wherever your spx-diagonal-dashboard folder lives (parent folder contains .venv)
 
+
+
+## 2026-06-25 — Dashboard v1: Three New Analytics Panels + Visual Overhaul
+
+**Changed:**
+
+**`app.py`** — Complete replacement. Major structural changes:
+- Added **IV Structure Panel** (Panel 1 of 3): per-strike IV ratio for call and put legs
+  independently, regime badge (INVERTED / NEAR-PARITY / CONTANGO) color-coded green/
+  teal/amber/orange/red, 30-minute ratio sparkline in periwinkle (#7b8cde) with ratio=1
+  reference line. Sparklines filter to last 30 minutes of today's contract history.
+- Added **Calendar Edge Panel** (Panel 2 of 3): call-side edge (front call IV − back call IV)
+  and put-side edge (front put IV − back put IV) shown as independent live numbers with
+  color coding and today's edge trend sparkline per side.
+- Added **Transform Credit Panel** (Panel 3 of 3): theoretical transformation credit
+  (back_legs_value − close_cost − entry_debit), threshold viability status, full leg
+  breakdown table, and rough theta ETA in trading hours. Entry Debit and Transform
+  Threshold are sidebar inputs persisted in `st.session_state`.
+- Selectors moved to a full-width 4-column row above the panels (front expiry, back
+  expiry, call strike, put strike all visible simultaneously).
+- Header streamlined to 4 columns (SPX price, VIX, data staleness, snapshot timestamp).
+- ATM term structure metrics + regime badge moved to a 5-column strip below the panels.
+- ATM IV interpretation updated to reflect correct regime direction: inverted (ratio < 1,
+  back IV > front IV) is now labeled as favorable; contango is labeled unfavorable.
+- Custom CSS block: GitHub-dark palette (#0d1117 / #161b22), panel tiles with
+  `border-radius:4px`, monospace financial numbers, regime badges with colored background.
+- `.streamlit/config.toml` added: dark base theme with `primaryColor = "#00d97e"`.
+
+**`iv_engine.py`** — Complete replacement. New functions:
+- `iv_regime(ratio)` → `(label, hex_color)`: 5-level regime classification matching
+  updated interpret_curve() logic. Thresholds: <0.90 INVERTED●, <1.00 INVERTED,
+  ≤1.05 NEAR-PARITY, ≤1.15 CONTANGO, >1.15 STEEP CONTANGO.
+- `CalendarEdge` dataclass + `calendar_edge()`: computes call_edge, put_edge,
+  call_ratio, put_ratio, and the 4 StrikeContract objects in one call.
+- `TransformCredit` dataclass + `transform_credit()`: full transformation viability
+  calculation. Formula: theoretical_credit = back_legs_value − close_cost − entry_debit.
+  Includes rough daily_theta_est and trading_hrs_to_threshold for the ETA display.
+  back legs use `mark` (pre-computed mid); front legs use `ask` (cost to close shorts).
+- `StrikeContract` dataclass: added `mark` field (falls back to (bid+ask)/2 if pre-computed
+  mark column absent or null).
+- `interpret_curve()`: updated regime direction to match forensic findings from 2026-06-23:
+  inverted (back IV > front IV) = favorable; contango (front IV > back IV) = unfavorable.
+
+**`.streamlit/config.toml`** — New file. Sets dark theme globally so CSS panel styling
+renders correctly without depending on user's local Streamlit theme preference.
+
+**Why:**
+The three panels were confirmed as the next build targets in the previous session.
+The forensic analysis of the 2026-06-23 paper trade established the correct regime
+interpretation (inverted = favorable, the confirmed call/put IV ratios were 0.85 / 0.82)
+and the correct transformation metric (theoretical credit, not diagonal mark). Dashboard
+v1 surfaces both of those learnings as live, per-strike, per-side numbers.
+
+**Impact:**
+- Transform Credit panel is the critical new addition: it now shows, in real-time, whether
+  the transformation threshold has been crossed — the exact information gap that meant the
+  June 23 transformation had to be executed manually without confirmation.
+- Calendar Edge panel allows independent monitoring of call-side and put-side edge so
+  asymmetric opportunities (one side strengthening while the other weakens) are visible.
+- IV Structure panel's 30-minute sparklines show regime drift, not just current snapshot.
+- Regime color coding is now consistent across all three panels, ATM metric strip, and
+  interpret_curve() text — same thresholds everywhere.
+- `StrikeContract.mark` is now populated (with (bid+ask)/2 fallback), enabling the
+  Transform Credit calculation without requiring a separate DB query.
+
+**Open questions / follow-ups:**
+- Theta ETA in Transform Credit panel is a rough estimate (close_cost / front_dte),
+  treating front leg theta as linear and ignoring back-leg drag and vega effects.
+  It is directionally useful but should not be used for precision timing. Phase 3
+  will replace this with actual stored theta from option_rows once it's confirmed
+  that collector.py is populating the theta column reliably.
+- The `pytz` import in app.py requires `pytz` to be installed
+  (`pip install pytz` if not already present from schwab-py dependencies).
+- IV Structure sparklines will show "30m history building..." until at least 2 matching
+  timestamps exist in contract IV history for both front and back legs at the selected
+  strikes. This is expected behavior — they populate within the first poll cycle.
+
+
 ---
 
 ## 2026-06-24 — app.py + db.py: Refactor dashboard to pure DB reader
