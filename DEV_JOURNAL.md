@@ -38,7 +38,90 @@ GitHub repo: https://github.com/chandan-singh4/diagonal-calendar-spx
 Primary branch: main
 Local path: wherever your spx-diagonal-dashboard folder lives (parent folder contains .venv)
 
+## 2026-06-25 — Audit Pass v1.1: Retracted Regime Favorability, Removed Theta ETA, Fixed Terminology
 
+**Changed:**
+
+**`DOCUMENTATION.md`** — v1.0 → v1.1 (full rewrite, change-log row added):
+- Retracted the "ratio < 1.0 is favorable / maximizes transformation credit" claim.
+  It rested on a single paper trade (2026-06-23) — Category D evidence. Black-Scholes
+  analysis run during the audit pointed the opposite way (high front IV relative to
+  back gives more short-leg extrinsic to harvest), but a few modeled scenarios are not
+  proof either. Net result: favorability demoted to an explicit `HYPOTHESIS` block,
+  status "unknown, pending trade data."
+- Fixed term-structure terminology to standard convention: backwardation/inverted =
+  front IV > back (ratio > 1.0); contango/normal = front IV < back (ratio < 1.0).
+  v1.0 had "inverted" attached to the wrong direction.
+- Rewrote the Transformation → Iron Condor section to the actual workflow: KEEP the
+  short front legs, CLOSE the back-dated longs, BUY protective wings in the front
+  expiration. (v1.0 wrongly said "close the short front legs first.")
+- Corrected expiry collection: "20 expirations by count (~35–50 DTE)", not "within
+  20 calendar days."
+- Reframed 100-pt strike width as an illustrative example, not a rule.
+- Removed Theta ETA from the metric set; moved to §10.3 Rejected.
+- "Risk-free" → "risk-reduced" throughout, with slippage caveat.
+- Flagged as unvalidated: Greeks net-sign table, Trade Quality Score IV direction,
+  liquidity thresholds (500/2000), IV Index value.
+- Softened canonical-authority statement to exempt HYPOTHESIS blocks; added rule
+  barring fact-words (confirmed/proven/favorable/optimal/maximizes) without derivation
+  or stated sample size.
+- Added APPROVED trade-logging mechanism to §10.1 (the `trades` table schema) as the
+  means to answer the favorability question from real fills and calibrate the live
+  threshold from modeled-vs-actual credit.
+
+**`iv_engine.py`** — Complete replacement:
+- `iv_regime(ratio)` rewritten to neutral, non-valenced output. Labels now
+  BACK-ELEVATED / BACK-LEANING / FLAT / FRONT-LEANING / FRONT-ELEVATED with a
+  blue↔purple non-valenced palette (no green=good / red=bad).
+- `interpret_curve()` rewritten to describe shape only and state that favorability is
+  unvalidated; removed all "FAVORABLE / structural edge / maximizes" language.
+- `TransformCredit` dataclass: removed `daily_theta_est` and `trading_hrs_to_threshold`.
+- `transform_credit()`: removed the `front_dte` parameter and the Theta ETA computation.
+- `CalendarEdge` and `calendar_edge()` docstrings de-claimed (no favorability, correct
+  backwardation/contango wording).
+
+**`app.py`** — Terminology + Theta ETA cleanup:
+- Term-structure labelling already neutralized via local helpers `_neutral_regime()`,
+  `_edge_color()`, `_edge_label()`, `_describe_curve()` (FRONT/BACK-ELEVATED, neutral
+  accents). Stale comment claiming the engine still held old labels was corrected — the
+  engine is now neutral too; local helpers retained only for finer ↑↑/↓↓ banding.
+- Removed the Theta ETA display block from the Transform Credit panel (replaced with a
+  removal NOTE).
+- Removed the now-invalid `front_dte=front_dte` argument from the `transform_credit()`
+  call. (`front_dte` variable itself retained — still used for DTE display.)
+- Transform Credit ✅/⏳/⛔ coloring intentionally KEPT: it tracks realized dollar profit
+  vs a dollar threshold, which is legitimately valenced, unlike the IV regime.
+
+**Why:**
+A self-review flagged that v1.0 had elevated a single paper trade into project-wide
+"ground truth." The audit confirmed the central regime-favorability claim was unproven
+and likely backwards, found a terminology inversion, an incorrect transformation
+description, two implementation conflicts (expiry scope, strike width), and an
+assumption-based Theta ETA inconsistent with the project's data-over-guesswork principle.
+
+**Impact:**
+- The dashboard no longer implies any IV regime is good or bad. Regime is shown as
+  neutral context only — removing the risk of trading a sign that isn't established.
+- Transform Credit (the genuinely decision-relevant dollar metric) is unaffected and
+  remains the primary monitoring number.
+- Codebase and documentation are now consistent (no drift between labels, engine, and
+  doc). Both Python files parse; transform_credit and calendar_edge run clean against a
+  synthetic chain.
+- The favorability question is now set up to be answered empirically via the planned
+  `trades` table rather than asserted.
+
+**Open questions / follow-ups:**
+- `trades` table + logging step is approved in the doc (§10.1) but NOT yet implemented
+  in db.py / collector.py — next-session build task.
+- Phase 3 time-to-viability metric (proper, from per-leg Greeks) still to be built to
+  replace the removed Theta ETA.
+- Live Transform Threshold (~$6.50–$7.00) still needs calibration from the first
+  5–10 live transformations (modeled vs actual credit).
+- app.py keeps local regime helpers parallel to the engine's `iv_regime()`; both are
+  now neutral and agree in meaning, but a future pass could consolidate to a single
+  source if the finer banding is moved into the engine.
+
+---
 
 ## 2026-06-25 — Dashboard v1: Three New Analytics Panels + Visual Overhaul
 
