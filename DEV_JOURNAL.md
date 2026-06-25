@@ -40,6 +40,41 @@ Local path: wherever your spx-diagonal-dashboard folder lives (parent folder con
 
 ---
 
+## 2026-06-24 — app.py + db.py: Refactor dashboard to pure DB reader
+
+**Changed:**
+app.py: Removed all Schwab API calls, demo mode, and DB writes. Now reads
+exclusively from the snapshot-anchored schema (snapshots, option_rows,
+atm_iv_by_expiry). Added data staleness indicator to header. Added two
+helper functions (_load_atm_hist, _load_contract_hist) that handle the
+IV decimal→percentage conversion at the load boundary (×100).
+
+db.py: Removed _LEGACY_DDL and 8 legacy functions (save_expiry_snapshot,
+save_strike_snapshot, save_position, get_expiry_history,
+get_latest_two_snapshots, has_any_data, get_strike_history,
+get_open_positions). Added get_latest_complete_snapshot() and
+get_latest_atm_iv_snapshots(). Removed _LEGACY_DDL so init_db() no longer
+silently recreates the dropped legacy tables.
+
+**Why:**
+app.py and collector.py were two independent systems writing to different
+tables in the same DB. Dashboard showed data only from the moment the
+browser tab was opened. 559,942 rows collected by collector.py were
+invisible to the dashboard.
+
+**Impact:**
+Dashboard now shows all history since 6/23 (183 snapshots, 559,942 rows).
+No more duplicate data paths. app.py has zero Schwab API dependency —
+it works as a pure SQLite reader with no credentials needed. The collector
+is now the sole writer; the dashboard is a pure reader.
+
+**IV scale note:**
+option_rows and atm_iv_by_expiry store IVs as decimals (0.18 = 18%).
+app.py multiplies by 100 at every load boundary. All iv_engine calls and
+chart code continue to operate in percentage form unchanged.
+
+---
+
 ## Session: June 23, 2026
 
 ### Type: Paper Trade Forensics + Dashboard Architecture Review

@@ -3,34 +3,34 @@ db.py — Database layer for the SPX Diagonal Calendar Dashboard.
 
 This module is the single source of truth for:
   - Schema creation and versioning
-  - All write operations  (collector.py for the new schema;
-                           legacy writes kept for the existing app.py)
-  - All read operations   (app.py — both legacy and new)
+  - All write operations  (collector.py ONLY)
+  - All read operations   (app.py)
 
 ARCHITECTURE RULE
   collector.py and app.py never issue SQL directly.
   All database interaction goes through functions defined here.
 
-SCHEMA EVOLUTION
-  Two schemas coexist in the same .db file until app.py is refactored:
+WRITER / READER SPLIT
+  collector.py — sole writer; calls create_snapshot, finalize_snapshot,
+                 insert_option_rows, insert_atm_iv_records, record_gap
+  app.py       — pure reader; calls get_latest_complete_snapshot,
+                 get_latest_atm_iv_snapshots, get_option_chain,
+                 get_atm_iv_history, get_contract_iv_history,
+                 get_iv_spread_history, update_snapshot_notes
 
-  LEGACY (supports existing app.py — do not remove until app.py is updated)
-    expiry_snapshots  — per-expiry ATM IV rows used by current charts
-    strike_snapshots  — per-strike IV rows used by current charts
-    positions         — basic position log
+SCHEMA
+  schema_version    — version tracking; enables future migrations
+  snapshots         — one row per collection cycle; anchor for all child data
+  option_rows       — one row per contract per snapshot; irreplaceable record
+  atm_iv_by_expiry  — pre-aggregated ATM IV per expiry; powers analytics queries
+  collection_gaps   — audit log of missed collection windows
 
-  NEW (snapshot-anchored — used by collector.py and future refactored app.py)
-    schema_version    — version tracking; enables future migrations
-    snapshots         — one row per collection cycle; anchor for all child data
-    option_rows       — one row per contract per snapshot; irreplaceable record
-    atm_iv_by_expiry  — pre-aggregated ATM IV per expiry; powers analytics queries
-    collection_gaps   — audit log of missed collection windows
-
-  Migration plan: once collector.py is running and app.py is refactored to
-  read from the new tables, the LEGACY tables and their functions are removed
-  in a single commit.
+IV SCALE
+  All IV values are stored as decimals (0.18 = 18%).
+  Callers are responsible for multiplying by 100 before display or passing
+  to iv_engine functions (which expect percentage form).
 """
-from __future__ import annotations  # allows X | Y type hints on Python 3.7+
+from __future__ import annotations   # allows X | Y type hints on Python 3.7+
 
 import logging
 import sqlite3
@@ -43,201 +43,117 @@ logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Schema Version
-# Increment this constant when the new schema changes and add a migration
+# Increment this constant when the schema changes and add a migration
 # function. The init_db() version check will detect the mismatch on startup.
 # ─────────────────────────────────────────────────────────────────────────────
 
 SCHEMA_VERSION = 1
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DDL — Legacy Schema
-# Kept verbatim from the original db.py so existing app.py calls are unaffected.
-# Remove this block (and the legacy functions below) when app.py is refactored.
+# DDL — Snapshot-Anchored Schema
 # ─────────────────────────────────────────────────────────────────────────────
 
-_LEGACY_DDL = """
-CREATE TABLE IF NOT EXISTS expiry_snapshots (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp        TEXT    NOT NULL,
-    underlying_price REAL    NOT NULL,
-    expiry           TEXT    NOT NULL,
-    dte              INTEGER,
-    atm_iv           REAL    NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_expiry_snapshots_expiry_ts
-    ON expiry_snapshots(expiry, timestamp);
-
-CREATE TABLE IF NOT EXISTS strike_snapshots (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp        TEXT    NOT NULL,
-    underlying_price REAL    NOT NULL,
-    expiry           TEXT    NOT NULL,
-    strike           REAL    NOT NULL,
-    side             TEXT    NOT NULL,
-    iv               REAL,
-    bid              REAL,
-    ask              REAL,
-    volume           INTEGER,
-    open_interest    INTEGER
-);
-
-CREATE INDEX IF NOT EXISTS idx_strike_snapshots
-    ON strike_snapshots(expiry, strike, side, timestamp);
-
-CREATE TABLE IF NOT EXISTS positions (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
-    opened_at        TEXT    NOT NULL,
-    front_expiry     TEXT    NOT NULL,
-    back_expiry      TEXT    NOT NULL,
-    call_strike      REAL    NOT NULL,
-    put_strike       REAL    NOT NULL,
-    entry_debit      REAL    NOT NULL,
-    status           TEXT    NOT NULL DEFAULT 'open',
-    transformed_at   TEXT,
-    transform_notes  TEXT
-);
-"""
-
-# ─────────────────────────────────────────────────────────────────────────────
-# DDL — New Snapshot-Anchored Schema
-# ─────────────────────────────────────────────────────────────────────────────
-
-_NEW_DDL = """
+_DDL = """
 -- ── Schema version tracker ───────────────────────────────────────────────────
--- Enables future migrations. Written once on fresh database creation.
 CREATE TABLE IF NOT EXISTS schema_version (
     version     INTEGER NOT NULL,
-    applied_at  TEXT    NOT NULL,   -- UTC ISO8601
+    applied_at  TEXT    NOT NULL,
     description TEXT
 );
 
 -- ── snapshots ─────────────────────────────────────────────────────────────────
--- One row per collection cycle, attempted or successful.
--- Created at cycle START with status='PARTIAL' so a record always exists even
--- if the process crashes during option_row insertion. Updated to 'COMPLETE' or
--- 'FAILED' only after all child rows are committed.
 CREATE TABLE IF NOT EXISTS snapshots (
     snapshot_id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    snapshot_timestamp    TEXT    NOT NULL,          -- UTC ISO8601; set when cycle begins, not when it ends
+    snapshot_timestamp    TEXT    NOT NULL,
     status                TEXT    NOT NULL
                               CHECK(status IN ('COMPLETE', 'PARTIAL', 'FAILED')),
-    underlying_price      REAL,                      -- SPX mid-price at collection time
-    underlying_bid        REAL,                      -- SPX bid (widens during stress)
-    underlying_ask        REAL,                      -- SPX ask
-    vix_value             REAL,                      -- VIX spot; NULL if VIX call failed (non-fatal)
-    market_session        TEXT                       -- 'OPEN' | 'MIDDAY' | 'CLOSE'
+    underlying_price      REAL,
+    underlying_bid        REAL,
+    underlying_ask        REAL,
+    vix_value             REAL,
+    market_session        TEXT
                               CHECK(market_session IN ('OPEN', 'MIDDAY', 'CLOSE')),
-    poll_interval_used    INTEGER,                   -- seconds: 60 (event) or 300 (normal)
-    strikes_fetched       INTEGER,                   -- actual option_rows written this cycle
-    expiries_fetched      INTEGER,                   -- distinct expiry_dates written this cycle
-    collection_latency_ms INTEGER,                   -- wall-clock ms: first API call → DB commit
-    error_message         TEXT,                      -- populated for PARTIAL or FAILED
-    notes                 TEXT                       -- human annotations; writable from app.py
+    poll_interval_used    INTEGER,
+    strikes_fetched       INTEGER,
+    expiries_fetched      INTEGER,
+    collection_latency_ms INTEGER,
+    error_message         TEXT,
+    notes                 TEXT
 );
 
--- Time-range queries are the dominant access pattern.
 CREATE INDEX IF NOT EXISTS idx_snapshots_timestamp
     ON snapshots(snapshot_timestamp);
 
--- Status filter: analytics always filters to COMPLETE snapshots.
 CREATE INDEX IF NOT EXISTS idx_snapshots_status
     ON snapshots(status);
 
--- Combined: nearly every dashboard query filters by both time range and status.
 CREATE INDEX IF NOT EXISTS idx_snapshots_timestamp_status
     ON snapshots(snapshot_timestamp, status);
 
 -- ── option_rows ───────────────────────────────────────────────────────────────
--- One row per option contract per snapshot.
--- IRREPLACEABLE — Schwab has no historical intraday option chain endpoint.
--- Every row here is data that cannot be reconstructed from any external source.
 CREATE TABLE IF NOT EXISTS option_rows (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
     snapshot_id      INTEGER NOT NULL
                          REFERENCES snapshots(snapshot_id) ON DELETE CASCADE,
-    expiry_date      TEXT    NOT NULL,               -- 'YYYY-MM-DD'
-    dte              INTEGER NOT NULL,               -- DTE as of snapshot_timestamp
-                                                     -- (stored, not derived — DTE at collection is a historical fact)
+    expiry_date      TEXT    NOT NULL,
+    dte              INTEGER NOT NULL,
     strike           REAL    NOT NULL,
     right            TEXT    NOT NULL
                          CHECK(right IN ('C', 'P')),
     bid              REAL,
     ask              REAL,
-    mark             REAL,                           -- (bid + ask) / 2; stored explicitly to avoid recomputation
-    last             REAL,                           -- last traded price
-    iv               REAL,                           -- decimal: 0.18 = 18%
-    delta            REAL,                           -- directional exposure
-    gamma            REAL,                           -- rate of delta change; elevated near expiry
-    theta            REAL,                           -- daily time decay; core diagonal strategy metric
-    vega             REAL,                           -- IV sensitivity; drives transformation timing
-    volume           INTEGER,                        -- today's contract volume; first liquidity signal
-    open_interest    INTEGER,                        -- total open contracts; second liquidity signal
-    intrinsic_value  REAL,                           -- stored at collection to avoid joins in historical queries
-    time_value       REAL                            -- mark - intrinsic_value; the pure optionality premium
+    mark             REAL,
+    last             REAL,
+    iv               REAL,
+    delta            REAL,
+    gamma            REAL,
+    theta            REAL,
+    vega             REAL,
+    volume           INTEGER,
+    open_interest    INTEGER,
+    intrinsic_value  REAL,
+    time_value       REAL
 );
 
--- Chain reconstruction: "give me all rows for snapshot X"
 CREATE INDEX IF NOT EXISTS idx_option_rows_snapshot_id
     ON option_rows(snapshot_id);
 
--- Contract lookup: "give me all rows for the 5700C expiring 2026-06-26"
 CREATE INDEX IF NOT EXISTS idx_option_rows_contract
     ON option_rows(expiry_date, strike, right);
 
--- MOST CRITICAL INDEX: makes "IV history for a specific contract over N days"
--- a covering index scan rather than a full-table scan.
--- Without this, every per-contract time-series query scans the entire table.
--- At ~40M rows/year this difference is seconds vs milliseconds.
 CREATE INDEX IF NOT EXISTS idx_option_rows_contract_snap
     ON option_rows(expiry_date, strike, right, snapshot_id);
 
 -- ── atm_iv_by_expiry ──────────────────────────────────────────────────────────
--- Pre-aggregated ATM IV per expiry per snapshot. Computed and stored at
--- collection time. This is what the IV percentile engine, term structure charts,
--- and diagonal opportunity scanner primarily query — not option_rows directly.
---
--- Performance rationale: "give me the front-vs-back IV spread for every COMPLETE
--- snapshot in the last 180 days" scans ~1.8M rows here vs ~360M rows if done
--- against option_rows. The difference compounds as history grows.
 CREATE TABLE IF NOT EXISTS atm_iv_by_expiry (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     snapshot_id         INTEGER NOT NULL
                             REFERENCES snapshots(snapshot_id) ON DELETE CASCADE,
-    expiry_date         TEXT    NOT NULL,            -- 'YYYY-MM-DD'
+    expiry_date         TEXT    NOT NULL,
     dte                 INTEGER NOT NULL,
-    atm_strike          REAL    NOT NULL,            -- strike closest to underlying at collection time
-                                                     -- (stored because ATM shifts as SPX moves)
+    atm_strike          REAL    NOT NULL,
     atm_call_iv         REAL,
     atm_put_iv          REAL,
-    atm_avg_iv          REAL,                        -- (atm_call_iv + atm_put_iv) / 2
-    iv_spread_to_front  REAL,                        -- this_iv - front_iv; NULL for front expiry itself
-    iv_ratio_to_front   REAL                         -- this_iv / front_iv; NULL for front; handles inversions
+    atm_avg_iv          REAL,
+    iv_spread_to_front  REAL,
+    iv_ratio_to_front   REAL
 );
 
--- Term structure per snapshot
 CREATE INDEX IF NOT EXISTS idx_atm_iv_snapshot_id
     ON atm_iv_by_expiry(snapshot_id);
 
--- IV history for a specific expiry: primary index for percentile calculations.
 CREATE INDEX IF NOT EXISTS idx_atm_iv_expiry_snap
     ON atm_iv_by_expiry(expiry_date, snapshot_id);
 
 -- ── collection_gaps ───────────────────────────────────────────────────────────
--- Audit log of intervals where no collection occurred during market hours.
--- No FK to snapshots — gap records describe the ABSENCE of snapshots.
--- Used by the analytics layer to qualify IV percentile claims:
---   "88th percentile based on 163 of 180 trading days" is honest;
---   "88th percentile" without coverage context may be misleading.
 CREATE TABLE IF NOT EXISTS collection_gaps (
     id                       INTEGER PRIMARY KEY AUTOINCREMENT,
-    gap_start                TEXT    NOT NULL,       -- UTC: last successful snapshot before gap
-    gap_end                  TEXT    NOT NULL,       -- UTC: first successful snapshot after gap
+    gap_start                TEXT    NOT NULL,
+    gap_end                  TEXT    NOT NULL,
     gap_minutes              REAL    NOT NULL,
-    expected_snapshots_lost  INTEGER,               -- gap_minutes / poll_interval estimate
-    reason                   TEXT,                  -- 'COLLECTOR_OFFLINE' | 'API_ERROR' |
-                                                    -- 'MARKET_CLOSED' | 'HOLIDAY' | 'UNKNOWN'
-    detected_at              TEXT    NOT NULL,       -- UTC: when collector noticed the gap
+    expected_snapshots_lost  INTEGER,
+    reason                   TEXT,
+    detected_at              TEXT    NOT NULL,
     notes                    TEXT
 );
 
@@ -267,10 +183,8 @@ def _make_conn(db_path: str) -> sqlite3.Connection:
 @contextmanager
 def get_conn(db_path: str | None = None):
     """
-    Legacy context manager — keeps the original function signature so all
-    existing app.py calls work unchanged.
-
-    Upgraded from original: now rolls back on exception (was missing before).
+    Context manager for app.py read operations.
+    Accepts optional db_path; defaults to config.DB_PATH.
     """
     conn = _make_conn(db_path or config.DB_PATH)
     try:
@@ -286,8 +200,8 @@ def get_conn(db_path: str | None = None):
 @contextmanager
 def managed_conn(db_path: str):
     """
-    New context manager for collector.py functions. Requires explicit db_path
-    (no default) to prevent accidental writes to the wrong database.
+    Context manager for collector.py write operations.
+    Requires explicit db_path — no silent default writes.
     """
     conn = _make_conn(db_path)
     try:
@@ -318,35 +232,27 @@ def init_db(db_path: str | None = None) -> None:
     Initialize database schema. Safe to call on an existing database —
     every DDL statement uses IF NOT EXISTS.
 
-    Creates both the legacy tables (backward-compat for app.py) and the new
-    snapshot-anchored tables (for collector.py). Both coexist until app.py
-    is refactored.
-
     Raises RuntimeError if the database contains a schema_version newer than
     SCHEMA_VERSION — this means old code is opening a newer database.
     """
     path = db_path or config.DB_PATH
     conn = _make_conn(path)
     try:
-        # executescript issues implicit commits between statements — correct
-        # behavior for DDL (schema changes don't need to be transactional).
-        conn.executescript(_LEGACY_DDL)
-        conn.executescript(_NEW_DDL)
+        conn.executescript(_DDL)
         conn.commit()
 
-        # Version tracking
         row = conn.execute(
             "SELECT MAX(version) AS v FROM schema_version"
         ).fetchone()
         current = row["v"] if row and row["v"] is not None else 0
 
         if current == 0:
-            # Fresh database — write the version record
             conn.execute(
                 "INSERT INTO schema_version (version, applied_at, description) "
                 "VALUES (?, ?, ?)",
                 (SCHEMA_VERSION, _utcnow(),
-                 "Initial schema: legacy compat tables + new snapshot-anchored tables")
+                 "Snapshot-anchored schema: snapshots, option_rows, "
+                 "atm_iv_by_expiry, collection_gaps")
             )
             conn.commit()
             logger.info("Schema v%d created at %s", SCHEMA_VERSION, path)
@@ -365,124 +271,8 @@ def init_db(db_path: str | None = None) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# LEGACY — Write Operations  (app.py — keep until app.py is refactored)
-# Function signatures are UNCHANGED from original db.py.
-# ─────────────────────────────────────────────────────────────────────────────
-
-def save_expiry_snapshot(underlying_price, expiry, dte, atm_iv,
-                          db_path: str | None = None,
-                          timestamp: str | None = None) -> str:
-    """
-    Write one ATM IV row for a single expiry.
-    Pass the same timestamp value for all expiries in the same poll cycle
-    so they share a consistent timestamp for front/back joining.
-    """
-    ts = timestamp or datetime.now(timezone.utc).isoformat()
-    with get_conn(db_path) as conn:
-        conn.execute(
-            "INSERT INTO expiry_snapshots "
-            "(timestamp, underlying_price, expiry, dte, atm_iv) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (ts, underlying_price, expiry, dte, atm_iv),
-        )
-    return ts
-
-
-def save_strike_snapshot(underlying_price, expiry, strike, side, iv, bid, ask,
-                          volume, open_interest,
-                          db_path: str | None = None,
-                          timestamp: str | None = None) -> str:
-    """
-    Write IV for a specific strike. Call once per leg of the diagonal
-    (front_call, front_put, back_call, back_put) with the same timestamp.
-    """
-    ts = timestamp or datetime.now(timezone.utc).isoformat()
-    with get_conn(db_path) as conn:
-        conn.execute(
-            "INSERT INTO strike_snapshots "
-            "(timestamp, underlying_price, expiry, strike, side, "
-            "iv, bid, ask, volume, open_interest) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (ts, underlying_price, expiry, strike, side,
-             iv, bid, ask, volume, open_interest),
-        )
-    return ts
-
-
-def save_position(front_expiry, back_expiry, call_strike, put_strike,
-                   entry_debit, db_path: str | None = None) -> None:
-    with get_conn(db_path) as conn:
-        conn.execute(
-            "INSERT INTO positions "
-            "(opened_at, front_expiry, back_expiry, call_strike, "
-            "put_strike, entry_debit) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (datetime.now(timezone.utc).isoformat(), front_expiry, back_expiry,
-             call_strike, put_strike, entry_debit),
-        )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# LEGACY — Read Operations  (app.py — keep until app.py is refactored)
-# Function signatures are UNCHANGED from original db.py.
-# ─────────────────────────────────────────────────────────────────────────────
-
-def get_expiry_history(expiry: str, since_iso: str | None = None,
-                        db_path: str | None = None, limit: int = 20000) -> list:
-    query = "SELECT * FROM expiry_snapshots WHERE expiry = ?"
-    params: list = [expiry]
-    if since_iso:
-        query += " AND timestamp >= ?"
-        params.append(since_iso)
-    query += " ORDER BY timestamp ASC LIMIT ?"
-    params.append(limit)
-    with get_conn(db_path) as conn:
-        return conn.execute(query, params).fetchall()
-
-
-def get_latest_two_snapshots(expiry: str, db_path: str | None = None) -> list:
-    with get_conn(db_path) as conn:
-        return conn.execute(
-            "SELECT * FROM expiry_snapshots WHERE expiry = ? "
-            "ORDER BY timestamp DESC LIMIT 2",
-            (expiry,),
-        ).fetchall()
-
-
-def has_any_data(db_path: str | None = None) -> bool:
-    with get_conn(db_path) as conn:
-        row = conn.execute(
-            "SELECT COUNT(*) AS n FROM expiry_snapshots"
-        ).fetchone()
-        return row["n"] > 0
-
-
-def get_strike_history(expiry: str, strike: float, side: str,
-                        since_iso: str | None = None,
-                        db_path: str | None = None,
-                        limit: int = 20000) -> list:
-    query = ("SELECT * FROM strike_snapshots "
-             "WHERE expiry = ? AND strike = ? AND side = ?")
-    params: list = [expiry, strike, side]
-    if since_iso:
-        query += " AND timestamp >= ?"
-        params.append(since_iso)
-    query += " ORDER BY timestamp ASC LIMIT ?"
-    params.append(limit)
-    with get_conn(db_path) as conn:
-        return conn.execute(query, params).fetchall()
-
-
-def get_open_positions(db_path: str | None = None) -> list:
-    with get_conn(db_path) as conn:
-        return conn.execute(
-            "SELECT * FROM positions WHERE status = 'open'"
-        ).fetchall()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# NEW — Write Operations  (collector.py ONLY)
-# app.py never calls these. collector.py is the sole writer on the new schema.
+# Write Operations  (collector.py ONLY)
+# app.py never calls these. collector.py is the sole writer.
 # ─────────────────────────────────────────────────────────────────────────────
 
 def create_snapshot(db_path: str,
@@ -496,12 +286,9 @@ def create_snapshot(db_path: str,
     """
     Open a new snapshot record with status='PARTIAL'. Returns snapshot_id.
 
-    Why PARTIAL at creation: if the process crashes during option_row insertion,
-    the snapshot record still exists with PARTIAL status rather than the database
-    containing orphaned option rows with no parent anchor. Every failure mode is
-    auditable; no silent data corruption is possible.
-
-    Call finalize_snapshot() after all child rows are committed.
+    Created at cycle START with status='PARTIAL' so a record always exists even
+    if the process crashes during option_row insertion. Updated to 'COMPLETE'
+    or 'FAILED' only after all child rows are committed.
     """
     with managed_conn(db_path) as conn:
         cursor = conn.execute(
@@ -525,11 +312,7 @@ def finalize_snapshot(db_path: str,
                        expiries_fetched: int,
                        collection_latency_ms: int,
                        error_message: str | None = None) -> None:
-    """
-    Seal a snapshot after all child rows are committed.
-    status: 'COMPLETE' if all rows written cleanly; 'PARTIAL' or 'FAILED' otherwise.
-    collection_latency_ms: wall-clock time from first API call to DB commit.
-    """
+    """Seal a snapshot after all child rows are committed."""
     with managed_conn(db_path) as conn:
         conn.execute(
             """
@@ -549,14 +332,7 @@ def finalize_snapshot(db_path: str,
 def insert_option_rows(db_path: str, rows: list[dict]) -> int:
     """
     Bulk-insert option rows for a snapshot in a single transaction.
-    Either all rows commit or none do — no half-written snapshots.
-    Returns the number of rows inserted.
-
-    Each dict must contain these keys:
-        snapshot_id, expiry_date, dte, strike, right,
-        bid, ask, mark, last,
-        iv, delta, gamma, theta, vega,
-        volume, open_interest, intrinsic_value, time_value
+    Either all rows commit or none do. Returns the number of rows inserted.
     """
     if not rows:
         return 0
@@ -583,11 +359,6 @@ def insert_atm_iv_records(db_path: str, records: list[dict]) -> None:
     """
     Bulk-insert pre-aggregated ATM IV records.
     One record per expiry per snapshot — call after insert_option_rows() commits.
-
-    Each dict must contain:
-        snapshot_id, expiry_date, dte, atm_strike,
-        atm_call_iv, atm_put_iv, atm_avg_iv,
-        iv_spread_to_front, iv_ratio_to_front
     """
     if not records:
         return
@@ -614,15 +385,7 @@ def record_gap(db_path: str,
                 expected_snapshots_lost: int,
                 reason: str,
                 notes: str | None = None) -> None:
-    """
-    Write a collection gap record.
-    Called by collector.py on startup (if a gap is detected since the last
-    snapshot) and during cycle monitoring (if consecutive snapshots are further
-    apart than expected).
-
-    reason values: 'COLLECTOR_OFFLINE', 'API_ERROR', 'MARKET_CLOSED',
-                   'HOLIDAY', 'UNKNOWN'
-    """
+    """Write a collection gap record."""
     with managed_conn(db_path) as conn:
         conn.execute(
             """
@@ -637,9 +400,51 @@ def record_gap(db_path: str,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# NEW — Read Operations  (app.py — future refactored version)
-# These replace the LEGACY read functions once app.py is updated.
+# Read Operations  (app.py)
 # ─────────────────────────────────────────────────────────────────────────────
+
+def get_latest_complete_snapshot(db_path: str) -> sqlite3.Row | None:
+    """
+    Most recent COMPLETE snapshot row.
+    Returns None if no complete snapshots exist (collector not yet running).
+
+    Called once per dashboard refresh to get the current SPX price,
+    VIX value, snapshot timestamp, and snapshot_id for chain reconstruction.
+    """
+    with managed_conn(db_path) as conn:
+        return conn.execute(
+            """
+            SELECT * FROM snapshots
+            WHERE status = 'COMPLETE'
+            ORDER BY snapshot_timestamp DESC
+            LIMIT 1
+            """
+        ).fetchone()
+
+
+def get_latest_atm_iv_snapshots(db_path: str,
+                                  expiry_date: str,
+                                  n: int = 2) -> list:
+    """
+    Last N ATM IV records for a specific expiry, most recent first.
+    Used for the day-change metric in the dashboard left panel.
+
+    IVs are returned in decimal form (0.18 = 18%) — multiply by 100 for display.
+    """
+    with managed_conn(db_path) as conn:
+        return conn.execute(
+            """
+            SELECT a.atm_avg_iv, s.snapshot_timestamp
+            FROM atm_iv_by_expiry a
+            JOIN snapshots s ON s.snapshot_id = a.snapshot_id
+            WHERE a.expiry_date = ?
+              AND s.status      = 'COMPLETE'
+            ORDER BY s.snapshot_timestamp DESC
+            LIMIT ?
+            """,
+            (expiry_date, n)
+        ).fetchall()
+
 
 def get_last_snapshot_timestamp(db_path: str) -> str | None:
     """
@@ -655,11 +460,7 @@ def get_last_snapshot_timestamp(db_path: str) -> str | None:
 
 def get_snapshots(db_path: str, start: str, end: str,
                    status: str = "COMPLETE") -> list:
-    """
-    Snapshots between start and end (UTC ISO8601 strings) with given status.
-    Default status='COMPLETE' — all analytics must filter to verified data only.
-    Partial and failed snapshots exist for auditability, not analysis.
-    """
+    """Snapshots between start and end (UTC ISO8601) with given status."""
     with managed_conn(db_path) as conn:
         return conn.execute(
             """
@@ -675,8 +476,10 @@ def get_snapshots(db_path: str, start: str, end: str,
 def get_option_chain(db_path: str, snapshot_id: int) -> list:
     """
     Full option chain for a specific snapshot.
-    Enables complete chain reconstruction at any historical timestamp.
+    Used by app.py to reconstruct chain_df on every dashboard refresh.
+
     Results ordered by expiry_date, strike, right for consistent display.
+    IVs are in decimal form — app.py multiplies by 100 at the load boundary.
     """
     with managed_conn(db_path) as conn:
         return conn.execute(
@@ -693,12 +496,12 @@ def get_contract_iv_history(db_path: str, expiry_date: str, strike: float,
                               right: str, days: int = 30) -> list:
     """
     IV time-series for a specific option contract over the last N days.
+    Drives the 'Selected-Strike IV' chart in the dashboard.
 
-    This is the query that drives the "selected strike IV" chart — showing
-    the IV of the actual contracts you'd trade, not the floating ATM proxy.
+    right: 'C' or 'P' (not 'CALL'/'PUT').
+    IVs are in decimal form — app.py multiplies by 100 at the load boundary.
 
     Performance: uses idx_option_rows_contract_snap (covering index).
-    At 40M+ rows/year, this is a fast indexed scan, not a table scan.
     """
     with managed_conn(db_path) as conn:
         return conn.execute(
@@ -727,10 +530,12 @@ def get_atm_iv_history(db_path: str, expiry_date: str,
                         days: int = 30) -> list:
     """
     ATM IV history for a specific expiry over the last N days.
-    Primary query for term structure charts and IV percentile input.
+    Primary query for term structure charts and range stats.
+
+    IVs are in decimal form — app.py multiplies by 100 at the load boundary.
 
     Performance: uses idx_atm_iv_expiry_snap. Scans ~3,150 rows per 30 days
-    rather than scanning option_rows directly (which would be ~4.8M rows).
+    rather than scanning option_rows directly (~4.8M rows).
     """
     with managed_conn(db_path) as conn:
         return conn.execute(
@@ -754,10 +559,7 @@ def get_atm_iv_history(db_path: str, expiry_date: str,
 
 
 def get_term_structure(db_path: str, snapshot_id: int) -> list:
-    """
-    All expiries for a given snapshot, ordered by DTE ascending.
-    Used to render the IV term structure curve at a single point in time.
-    """
+    """All expiries for a given snapshot, ordered by DTE ascending."""
     with managed_conn(db_path) as conn:
         return conn.execute(
             """
@@ -774,16 +576,7 @@ def get_iv_spread_history(db_path: str, front_expiry: str, back_expiry: str,
     """
     Front-vs-back IV spread history for the IV percentile engine.
     Returns one row per COMPLETE snapshot where both expiries are present.
-
-    Primary input to the 180-day IV spread percentile calculation:
-      front_iv      → ATM IV of the front expiry
-      back_iv       → ATM IV of the back expiry
-      iv_spread     → back_iv - front_iv  (absolute term structure spread)
-      iv_ratio      → back_iv / front_iv  (ratio; handles inversions better
-                      than absolute spread alone)
-
-    Example use: "current iv_spread is at the 88th percentile of the
-    last 180 days of iv_spread values" = strong entry signal.
+    Used for 'current IV spread is at the Nth percentile of last 180 days'.
     """
     with managed_conn(db_path) as conn:
         return conn.execute(
@@ -815,12 +608,7 @@ def get_iv_spread_history(db_path: str, front_expiry: str, back_expiry: str,
 
 def get_gaps(db_path: str, start: str, end: str,
               exclude_reasons: list[str] | None = None) -> list:
-    """
-    Collection gaps within a date range.
-
-    Pass exclude_reasons=['MARKET_CLOSED', 'HOLIDAY'] to suppress expected
-    gaps so the dashboard only surfaces unintentional data losses.
-    """
+    """Collection gaps within a date range."""
     with managed_conn(db_path) as conn:
         if exclude_reasons:
             placeholders = ",".join("?" * len(exclude_reasons))
@@ -847,11 +635,7 @@ def get_gaps(db_path: str, start: str, end: str,
 def update_snapshot_notes(db_path: str, snapshot_id: int, notes: str) -> None:
     """
     Update the notes field on a snapshot record.
-
-    This is the ONLY write operation permitted from app.py on the new schema.
-    All other new-schema writes are collector.py's exclusive domain.
-    The narrow scope (one field, keyed by snapshot_id) makes this safe
-    to allow from app.py without risking write conflicts with the collector.
+    The only write operation permitted from app.py on this schema.
     """
     with managed_conn(db_path) as conn:
         conn.execute(
