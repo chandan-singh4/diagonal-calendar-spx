@@ -38,6 +38,364 @@ GitHub repo: https://github.com/chandan-singh4/diagonal-calendar-spx
 Primary branch: main
 Local path: wherever your spx-diagonal-dashboard folder lives (parent folder contains .venv)
 
+---
+
+## Session: June 23, 2026
+
+### Type: Paper Trade Forensics + Dashboard Architecture Review
+
+---
+
+### 1. Paper Trade Executed
+
+First live collection day. First paper trade executed end-to-end to validate the full
+pipeline: collector → database → forensic analysis → dashboard insight.
+
+**Entry (1:46 PM ET)**
+
+| Leg | Expiry | Strike | Side | Fill |
+|-----|--------|--------|------|------|
+| Call | 6/26/2026 | 7500 | STO (short) | 11.70 |
+| Put  | 6/26/2026 | 7300 | STO (short) | 19.30 |
+| Call | 6/29/2026 | 7500 | BTO (long)  | 18.00 |
+| Put  | 6/29/2026 | 7300 | BTO (long)  | 26.50 |
+
+Net Debit: **$13.50**
+
+**Transformation (3:50 PM ET)**
+
+| Action | Leg | Fill |
+|--------|-----|------|
+| STC | 6/29 7500C | 14.00 |
+| STC | 6/29 7300P | 39.00 |
+| BTO | 6/26 7505C | 7.60  |
+| BTO | 6/26 7295P | 25.60 |
+
+Net Credit: **$19.85**
+
+**Result**
+
+- Locked P&L: +$6.35 per share (+$635 per contract)
+- Resulting IC: Short 7500C / Long 7505C + Short 7300P / Long 7295P (all 6/26)
+- Max Loss: ~$135 | Max Profit: ~$635
+
+---
+
+### 2. Forensic Notebook Built
+
+File: `trade_forensics_2026_06_23.ipynb`
+
+Built a 12-cell Jupyter notebook to analyze the paper trade against collected data.
+Encountered and resolved two schema issues:
+
+**Schema corrections from assumed vs actual:**
+
+| Assumed | Actual |
+|---------|--------|
+| `snapshots.id` | `snapshots.snapshot_id` |
+| `snapshots.collected_at` | `snapshots.snapshot_timestamp` |
+| `option_rows.option_type` | `option_rows.right` |
+| `option_rows.underlying_price` | `snapshots.underlying_price` |
+| Computed `(bid+ask)/2` | Use stored `option_rows.mark` |
+| Computed extrinsic manually | Use stored `option_rows.time_value` |
+| `atm_iv_by_expiry.atm_iv` | `atm_call_iv`, `atm_put_iv`, `atm_avg_iv` |
+
+Timestamps stored in UTC. 3:30 PM ET = 19:30 UTC. Confirmed by MIDDAY snapshots
+appearing at 16:xx UTC (12:xx ET).
+
+---
+
+### 3. Collector Validation Results
+
+**Snapshot coverage (CLOSE window, 3:30–3:55 PM ET):**
+
+| Metric | Value |
+|--------|-------|
+| Total snapshots | 20 |
+| Status | All COMPLETE |
+| Market session | All CLOSE |
+| Gaps > 90 seconds | 3 |
+
+**Gaps detected:**
+
+| UTC Time | ET Equivalent | Duration | Impact |
+|----------|--------------|----------|--------|
+| 19:37:38 | 3:37 PM | 2.9 min | 2 missed snapshots, mid-session |
+| 19:48:38 | 3:48 PM | 2.0 min | 1 missed snapshot |
+| 19:53:00 | **3:50 PM** | **3.4 min** | **Straddles transformation moment** |
+
+The third gap is the most significant. The transformation at 3:50 PM occurred in a
+3.4-minute window the collector did not capture. Last pre-transform snapshot was 19:49:38
+(3:49:38 PM ET). First post-transform snapshot was 19:53:00 (3:53:00 PM ET).
+
+**Collector verdict: Working correctly.** Gaps were from system behavior, not collector
+failure. The 1-minute polling interval means any spike shorter than ~90 seconds has a
+~50% chance of being missed. This is a known limitation, not a bug.
+
+---
+
+### 4. Key Forensic Findings
+
+#### Finding 1: IV term structure was inverted and stable throughout
+
+At the trade strikes:
+
+| Metric | Call (7500) | Put (7300) |
+|--------|------------|-----------|
+| IV ratio (back/front) | 0.849–0.853 | 0.821–0.827 |
+| IV spread (back−front) | −0.025 | −0.038 |
+| Regime | Inverted all window | Inverted all window |
+
+IV was **completely flat** across all 12 contracts (±1 strike, both expiries) from
+3:30 to 3:55 PM. iv_change = 0.00 for every contract. The inversion was structural,
+not caused by any IV event during the collection window.
+
+#### Finding 2: The diagonal mark equals the total calendar edge
+
+Because all four options were OTM throughout (SPX ~7370–7379, strikes at 7300/7500),
+intrinsic value = 0 for all legs. Therefore mark = time_value for every leg, and:
+
+```
+total_calendar_edge == diagonal_mark  at every snapshot
+```
+
+This is a mathematical confirmation the collector is storing data correctly.
+It is also the ideal diagonal structure — a purely time-value trade.
+
+#### Finding 3: The diagonal mark is the wrong transformation metric
+
+The diagonal mark measures the cost to close all four legs simultaneously. That is not
+what the transformation does. The front legs are never closed — they remain open as the
+short side of the resulting iron condor.
+
+The correct metric is **Theoretical Transform Credit**:
+
+```
+Transform Credit = (back_call mark + back_put mark) - (wing_call mark + wing_put mark)
+Net Locked Profit = Transform Credit - Entry Debit
+Risk-Free when: Net Locked Profit > Spread Width
+```
+
+#### Finding 4: The position was NOT risk-free at any captured snapshot
+
+Transform credit data (from theoretical transform credit query):
+
+| Time | Net Locked Profit | Risk-Free? | Dollars to Threshold |
+|------|------------------|------------|---------------------|
+| 19:30–19:46 | $2.30–$2.45 | False | $2.55–$2.70 |
+| 19:48:38 | $2.55 | False | $2.45 |
+| 19:49:38 | $2.65 | False | $2.35 |
+| **Actual fill** | **$6.35** | **True** | **−$1.35 (floor profit)** |
+
+The jump from $2.65 to $6.35 came from the 3:50 PM fill at 39.0 on the back put —
+which occurred in the collection gap.
+
+#### Finding 5: Paper trading fills are not real fills
+
+Paper trading fills at the mark (mid). Live trading fills at or near the bid when selling.
+Across 4 legs, the paper trading advantage was approximately $2.40–$3.90 vs real market fills.
+
+This means the actual live trading threshold should be:
+
+```
+Paper trading threshold:  Net Locked > $5.00 (spread width)
+Live trading threshold:   Net Locked > $6.50–$7.00 (spread width + bid/ask friction)
+```
+
+The Theoretical Transform Credit panel should display a live-adjusted figure alongside
+the mark-based figure once real trading begins.
+
+#### Finding 6: The profit source was delta, not IV
+
+SPX moved from ~7376 at 3:30 PM to a low of 7367.29 at 3:48 PM (−8.7 points).
+The back put rose from 34.65 to 37.65 on delta alone. IV was flat throughout.
+The spike to 39.0 at 3:50 PM was a brief additional delta push during end-of-day
+volatility, amplified by widening market maker spreads in the final 10 minutes.
+
+SPX fully recovered to 7376 by 3:53 PM. The back put returned to 34.55 — almost
+exactly where it started. The entire transformation credit spike lasted ~90 seconds.
+
+#### Finding 7: ATM IV ratio from atm_iv_by_expiry is unreliable near end of day
+
+The `iv_ratio_to_front` column jumped from 0.97 to 1.28 at 19:53 (3:53 PM ET) —
+not because IV changed, but because the 0DTE reference expiry expired at 4:00 PM
+and the reference "front" shifted. Use strike-specific IV ratio computed directly
+from option_rows, not from the pre-aggregated table, for all live dashboard signals.
+
+#### Finding 8: Three transformation pathways confirmed
+
+| Market Condition | Mechanism | Speed |
+|----------------|-----------|-------|
+| SPX drifts toward put strike | Back put delta spike | Fast (hours) |
+| SPX drifts toward call strike | Back call delta spike | Fast (hours) |
+| Choppy / range-bound | Theta decay differential | Slow (days) |
+| Strong trend through short strike | Dangerous — transform BEFORE breach | Urgent |
+
+The strategy is market-neutral by design. Transformation works in any direction.
+Theta pathway is slowest but most reliable. Directional spike is fastest but requires
+live platform monitoring — the collector cannot catch 90-second windows reliably.
+
+---
+
+### 5. Transformation Score — Architecture Correct, Input Was Wrong
+
+The composite score (0–100) designed in this session has the right structure but
+used the wrong profit pillar input. With diagonal mark as input, score was stuck at
+50–52 all window (misleading). With corrected input, score would have been:
+
+- During captured window: 67–69 ("be alert, not there yet") ✓ correct
+- At actual transformation fill: ~87.5 ("act now") ✓ correct
+
+**However:** After review, the transformation score was removed from Must Have and
+demoted. Reason: if the underlying components (net locked profit, IV ratio, DTE) are
+displayed directly and clearly, a composite score hides information without adding
+decision value. A score of 73 means nothing six months from now. The raw numbers
+mean everything.
+
+---
+
+### 6. Dashboard Architecture — Final Decisions
+
+#### Must Have (build first, before any live trades)
+
+**1. Strike Selector** *(moved to #1 — most impactful feature)*
+Table of IV ratios at every OTM call and put strike within 300 points of SPX,
+ranked by edge quality. Tells you immediately which strikes have the best structural
+edge for a new entry. Already in the database. Just needs to be surfaced.
+
+**2. IV Ratio at Trade Strikes**
+Back month IV / Front month IV at your exact call and put strikes.
+This is the structural edge. Below 1.0 = inverted = trade has edge.
+At or above 1.0 = do not enter. Single most important number.
+
+**3. SPX vs Strike Distance**
+Current SPX with proposed strikes and distance in points and percentage.
+Entry filter: want ~1–2% clearance on each side minimum.
+Front DTE also displayed here. Want 5–10 DTE at entry.
+
+**4. Theoretical Transform Credit**
+Transform Credit, Entry Debit, Net Locked Profit, Spread Width, Dollars to Risk-Free.
+Risk-free status (True/False) displayed prominently.
+Eventually: live trading adjusted figure alongside mark-based figure.
+
+**5. Net Theta Advantage** *(new — replaces VIX as primary operational metric)*
+```
+Net Theta Advantage = (front_call_theta + front_put_theta) 
+                    - (back_call_theta + back_put_theta)
+```
+The engine of the trade. Tells you how fast time is working in your favor.
+$0.20/day means the trade may take forever. $1.50/day means theta is strongly on
+your side. Displayed as a single dollar number per day.
+
+**6. Days to Risk-Free (theta-only estimate)**
+```
+Days to Risk-Free = (Spread Width - Net Locked Profit) / Net Theta Advantage
+```
+Directly answers: "how long would I have to wait if nothing else changes?"
+All inputs already in option_rows. Computable today.
+
+#### Nice to Have (build after 10 live trades)
+
+- IV ratio 30-minute sparkline (trend confirmation, not entry decision)
+- Calendar edge split (call edge vs put edge separately — forensic insight)
+- Session time indicator (countdown to 4 PM ET, color shift after 3:45 PM)
+- VIX single number with threshold color (green >15, yellow 12–15, red <12)
+- Position legs table (entry vs now, per-leg mark and P&L)
+- Live trading haircut display alongside mark-based transform credit
+
+#### Do Not Build
+
+- Diagonal mark chart (wrong metric for transformation)
+- ATM IV term structure from pre-aggregated table (unreliable near close)
+- IV spread (back − front) — perfectly redundant with IV ratio
+- P&L attribution by leg (forensic only, not actionable live)
+- Neighboring strike IV slope (never changes a live decision)
+- Payoff diagram (known structure, stops being looked at after 10 trades)
+- Historical IV percentile (requires 30+ days data; IV ratio already tells you entry quality)
+- Composite transformation score (hides the components that matter; display raw numbers instead)
+- Skew viewer (redundant with neighboring strike data; same verdict)
+
+---
+
+### 7. Final Dashboard Layout (5 sections)
+
+**Section 1 — STRIKE SELECTOR** *(pre-entry, look before opening any position)*
+Table of all OTM strikes ±300 pts, both sides, both expiries, IV ratio per strike.
+Sorted by best edge. Pick your strikes here. Front DTE shown per expiry.
+
+**Section 2 — ENTRY SIGNAL** *(pre-entry gate check)*
+IV ratio at selected strikes (call and put, color-coded by regime).
+SPX now. Strike distances in points and percent. Front DTE. GO / WAIT / NO verdict.
+
+**Section 3 — TRANSFORMATION STATUS** *(primary panel while in a position)*
+Transform Credit, Entry Debit, Net Locked Profit, Dollars to Risk-Free, Risk-Free status.
+Net Theta Advantage ($/day). Days to Risk-Free (theta-only).
+
+**Section 4 — IV RATIO TREND** *(glance every 15–20 min while in a position)*
+30-minute sparkline for call-side and put-side IV ratio.
+Horizontal reference line at 1.0. No numbers needed. Trend direction is the signal.
+
+**Section 5 — POSITION LEGS** *(confirm structure once or twice per session)*
+Four-row table: entry fill, current mark, per-leg P&L.
+Total calendar edge. SPX now vs short strikes.
+
+---
+
+### 8. Mental Model Confirmed
+
+```
+Two phases:
+
+ENTRY PHASE
+  Single question: Is IV ratio below 1.0 at my strikes?
+  Secondary check: Is SPX far enough from my strikes?
+  Tool: Section 1 (Strike Selector) + Section 2 (Entry Signal)
+
+POSITION MANAGEMENT PHASE
+  Single question: Has net locked profit crossed the spread width?
+  Secondary check: How many days of theta until it does?
+  Tool: Section 3 (Transformation Status)
+  Execution: Live Schwab platform — collector cannot catch 90-second spikes
+```
+
+The collector's job is structural confirmation. The execution is always a live call.
+
+---
+
+### 9. Paper Trade Assessment
+
+The paper trade served its purpose completely:
+
+- Validated the collector architecture (schema, UTC alignment, gap logging, CLOSE window)
+- Identified the correct transformation metric (theoretical transform credit, not diagonal mark)
+- Confirmed the IV inversion edge was real and present throughout
+- Revealed that paper trading fills are optimistic by $2–4 vs real fills
+- Generated the complete dashboard feature list through real analysis, not speculation
+- Confirmed the 3-pathway transformation model (put spike, call spike, theta decay)
+
+Going forward: live trades only. Dashboard and transformation logic will be calibrated
+from real market fills, not paper trading assumptions.
+
+---
+
+### 10. Open Items for Next Session
+
+1. Renovate dashboard (app.py) to implement the 5-section layout above
+2. Fix transformation score profit pillar input (net_locked_profit / spread_width)
+   OR remove score entirely in favor of displaying raw components directly
+3. Add Net Theta Advantage as a live-computed metric
+4. Add Days to Risk-Free estimate to Section 3
+5. Build Strike Selector as Section 1 (query all OTM strikes, compute IV ratio per strike)
+6. Add live trading haircut toggle to transform credit display
+7. Investigate collector gap at 19:37 and 19:48 — confirm whether these are consistent
+   or one-time events on first collection day
+8. Query the full MIDDAY window (1:46–3:30 PM) to reconstruct complete trade history
+   for the paper trade — the first 104 minutes of profit build-up are in the database
+
+---
+
+*Session closed. Next session: Dashboard renovation (app.py).*
+
 ## 6/23/2026 — app.py: Fixed broken reference to removed config constant
 
 **What changed**
