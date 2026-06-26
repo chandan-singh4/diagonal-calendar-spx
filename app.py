@@ -6,20 +6,30 @@ No Schwab API calls.  No DB writes.
 (pinned_pairs.json stores user preferences only — not market data.)
 
 Data sources (all read from dashboard.db):
-  snapshots         → SPX price, VIX, intraday price series
+  snapshots         → SPX price, VIX, intraday price series, prior-session close
   option_rows       → current option chain; per-strike IV; GEX
   atm_iv_by_expiry  → ATM IV history for charts, range stats, pair scanner
 
 Layout (top to bottom):
-  1. Header          — SPX + daily change (pts/%), VIX, Max|GEX| Strike, staleness
-  2. Controls        — Front/Back expiry, Call/Put strike, Max Gap (days)
-  3. SPX Intraday    — Dynamic green/red price line for today's session
+  1. Header         — SPX price + daily change + MINI intraday sparkline,
+                      pts/% toggle, VIX, Max|GEX| Strike, staleness
+  2. Controls       — Front/Back expiry, Call/Put strike  (4 columns — no Max Gap here)
+  3. IV Structure   — Front vs Back IV chart at selected strikes; period radio above it
   4. Historical Stats — Today / 5D / 10D / 20D ratio range bars
-  5. Pinned Pairs    — Persisted pair watchlist (pinned_pairs.json)
-  6. Pair Scanner    — All valid (front, back) pairs, sortable, pinnable
-  7. IV Structure    — Selected-strike IV chart (per-contract)
-  8. Calendar Edge   — ATM IV chart + ratio metrics + day-change
-  9. Transform Credit — Trade quality score (very bottom)
+  5. Pinned Pairs   — Persisted pair watchlist (pinned_pairs.json)
+  6. Pair Scanner   — All valid (front, back) pairs; filter row has Min DTE / Max DTE / Max Gap
+  7. Calendar Edge  — ATM IV chart + ratio metrics + day-change
+  8. Transform Credit — Trade quality score (very bottom)
+
+DAILY CHANGE
+  change = current SPX price − last COMPLETE snapshot from the PRIOR session
+  (≈ yesterday's official close).  Falls back to first intraday snapshot
+  if no prior-session data exists (first ever collection day).
+
+MAX GAP
+  Lives in the Pair Scanner filter row (not the Controls Row).
+  Calendar days between front and back expiry dates.
+  Mon→Tue = 1, Fri→Mon = 3.
 
 IV SCALE NOTE
   option_rows and atm_iv_by_expiry store IVs as decimals (0.18 = 18%).
@@ -59,7 +69,6 @@ _TABLE_DISPLAY_COLS = ["Front", "Back", "Ratio", "Day Chg", "Drop%", "Rise%", "C
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _load_pinned() -> list[dict]:
-    """Load pinned pairs from JSON.  Returns [] on any error."""
     try:
         if PINNED_PAIRS_FILE.exists():
             return json.loads(PINNED_PAIRS_FILE.read_text())
@@ -69,7 +78,6 @@ def _load_pinned() -> list[dict]:
 
 
 def _save_pinned(pairs: list[dict]) -> None:
-    """Persist pinned pairs list to JSON."""
     try:
         PINNED_PAIRS_FILE.write_text(json.dumps(pairs, indent=2))
     except Exception as e:
@@ -81,7 +89,6 @@ def _save_pinned(pairs: list[dict]) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _sparkline(values: list[float], width: int = 10) -> str:
-    """Encode a float series as a fixed-width unicode bar-chart string."""
     if not values:
         return "─"
     step = max(1, len(values) // width)
@@ -95,21 +102,17 @@ def _sparkline(values: list[float], width: int = 10) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Helper — ATM IV history (for charts and range stats)
+# Helper — ATM IV history
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _load_atm_hist(expiry: str, days: int) -> pd.DataFrame:
-    """
-    ATM IV history for one expiry over the last N days.
-    Returns DataFrame with columns: timestamp (tz-aware ET), atm_iv (% form).
-    """
     rows = db.get_atm_iv_history(config.DB_PATH, expiry, days)
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame([dict(r) for r in rows])
     df = df.rename(columns={"snapshot_timestamp": "timestamp",
                              "atm_avg_iv": "atm_iv"})
-    df["atm_iv"] = df["atm_iv"] * 100          # decimal → percentage
+    df["atm_iv"] = df["atm_iv"] * 100
     df["timestamp"] = (
         pd.to_datetime(df["timestamp"], format="ISO8601", utc=True)
         .dt.tz_convert(config.DISPLAY_TIMEZONE)
@@ -118,16 +121,11 @@ def _load_atm_hist(expiry: str, days: int) -> pd.DataFrame:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Helper — per-contract IV history (for Selected-Strike chart)
+# Helper — per-contract IV history
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _load_contract_hist(expiry: str, strike: float,
                          side: str, days: int) -> pd.DataFrame:
-    """
-    Per-contract IV history for one leg over the last N days.
-    side: 'CALL' or 'PUT'.
-    Returns DataFrame with columns: timestamp (tz-aware ET), iv (% form).
-    """
     right_char = "C" if side == "CALL" else "P"
     rows = db.get_contract_iv_history(
         config.DB_PATH, expiry, strike, right_char, days
@@ -135,7 +133,7 @@ def _load_contract_hist(expiry: str, strike: float,
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame([dict(r) for r in rows])
-    df["iv"] = df["iv"] * 100                  # decimal → percentage
+    df["iv"] = df["iv"] * 100
     df["timestamp"] = (
         pd.to_datetime(df["snapshot_timestamp"], format="ISO8601", utc=True)
         .dt.tz_convert(config.DISPLAY_TIMEZONE)
@@ -152,36 +150,19 @@ def _compute_pair_scanner(session_date: str) -> pd.DataFrame:
     Build the IV-ratio scanner DataFrame for the given trading session.
 
     session_date: 'YYYY-MM-DD' UTC date string derived from the latest
-    snapshot's timestamp.  Using the snapshot's own date (not date('now'))
-    means the scanner shows data even when called after-hours or pre-open,
-    when no snapshots exist for the current UTC calendar day.
-
-    One row per (front, back) expiry pair containing:
-      Front, Back             — display strings with DTE suffix
-      front_expiry, back_expiry — raw YYYY-MM-DD strings (for pin/unpin logic)
-      front_dte, back_dte, gap  — integer day counts
-      Ratio                   — current front/back ATM IV ratio
-      Day Chg                 — ratio change since first snapshot of session
-      Drop%                   — drop from session high (≤ 0)
-      Rise%                   — rise from session low  (≥ 0)
-      Chart                   — unicode sparkline of ratio series
-      snapshots               — number of data points in ratio series
-
-    No filters applied here — DTE and gap filtering happens at display time
-    so the full dataset is available for Pinned Pairs regardless of filters.
+    snapshot's timestamp so the scanner shows data even after-hours.
     """
     rows = db.get_all_expiry_atm_iv_today(config.DB_PATH, session_date)
     if not rows:
         return pd.DataFrame()
 
     df = pd.DataFrame([dict(r) for r in rows])
-    df["atm_avg_iv"] = df["atm_avg_iv"] * 100      # decimal → %
+    df["atm_avg_iv"] = df["atm_avg_iv"] * 100
     df = df[df["atm_avg_iv"].notna() & (df["atm_avg_iv"] > 0)]
 
     if df.empty:
         return pd.DataFrame()
 
-    # Pivot: rows = snapshot timestamps, columns = expiry dates
     pivot = df.pivot_table(
         index="snapshot_timestamp",
         columns="expiry_date",
@@ -191,7 +172,6 @@ def _compute_pair_scanner(session_date: str) -> pd.DataFrame:
     if pivot.empty:
         return pd.DataFrame()
 
-    # Most recent DTE per expiry
     dte_map = (
         df.sort_values("snapshot_timestamp")
         .groupby("expiry_date")["dte"]
@@ -215,9 +195,8 @@ def _compute_pair_scanner(session_date: str) -> pd.DataFrame:
             back_dte  = dte_map.get(back, 0)
 
             if front_dte < 0 or back_dte < 0:
-                continue    # skip expirations already in the past
+                continue
 
-            # Ratio series — NaN where either leg is missing
             ratio_s = (
                 pivot[front] / pivot[back]
             ).replace(
@@ -232,15 +211,8 @@ def _compute_pair_scanner(session_date: str) -> pd.DataFrame:
             today_high    = max(vals)
             today_low     = min(vals)
             day_change    = current_ratio - vals[0]
-
-            drop_pct = (
-                (current_ratio - today_high) / today_high * 100
-                if today_high != 0 else 0.0
-            )
-            rise_pct = (
-                (current_ratio - today_low) / today_low * 100
-                if today_low != 0 else 0.0
-            )
+            drop_pct = (current_ratio - today_high) / today_high * 100 if today_high != 0 else 0.0
+            rise_pct = (current_ratio - today_low)  / today_low  * 100 if today_low  != 0 else 0.0
 
             results.append({
                 "Front":        f"{front} ({front_dte}d)",
@@ -260,10 +232,6 @@ def _compute_pair_scanner(session_date: str) -> pd.DataFrame:
 
     return pd.DataFrame(results) if results else pd.DataFrame()
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Shared column config for Pinned Pairs and Pair Scanner tables
-# ─────────────────────────────────────────────────────────────────────────────
 
 def _table_col_config() -> dict:
     return {
@@ -312,16 +280,15 @@ if latest_snap is None:
 snapshot_id   = latest_snap["snapshot_id"]
 spx_price     = latest_snap["underlying_price"]
 vix_value     = latest_snap["vix_value"]
-snap_ts_str   = latest_snap["snapshot_timestamp"]   # UTC 'YYYY-MM-DD HH:MM:SS'
+snap_ts_str   = latest_snap["snapshot_timestamp"]
 
 snap_dt = datetime.strptime(snap_ts_str[:19], "%Y-%m-%d %H:%M:%S").replace(
     tzinfo=timezone.utc
 )
 snap_age_secs = (datetime.now(timezone.utc) - snap_dt).total_seconds()
 
-# Derive session date from the snapshot's own timestamp rather than using
-# the current UTC clock.  This ensures the pair scanner shows data even when
-# the dashboard is opened after-hours or on days before the market has opened.
+# Session date derived from the snapshot's own timestamp (not UTC clock)
+# so the scanner works after-hours and pre-open.
 session_date = snap_ts_str[:10]   # 'YYYY-MM-DD' UTC
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -339,7 +306,7 @@ if not chain_rows:
 chain_df = pd.DataFrame([dict(r) for r in chain_rows])
 chain_df = chain_df.rename(columns={"expiry_date": "expiry"})
 chain_df["side"] = chain_df["right"].map({"C": "CALL", "P": "PUT"})
-chain_df["iv"]   = chain_df["iv"] * 100             # decimal → percentage
+chain_df["iv"]   = chain_df["iv"] * 100
 
 available_expiries = sorted(chain_df["expiry"].unique())
 if len(available_expiries) < 2:
@@ -350,7 +317,7 @@ if len(available_expiries) < 2:
     st.stop()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SPX intraday price series (most recent trading session)
+# SPX intraday price series + daily change vs prior session close
 # ─────────────────────────────────────────────────────────────────────────────
 
 _intraday_rows = db.get_spx_intraday_today(config.DB_PATH, session_date)
@@ -365,21 +332,28 @@ if not spx_intraday.empty:
             spx_intraday["snapshot_timestamp"], format="ISO8601", utc=True
         ).dt.tz_convert(config.DISPLAY_TIMEZONE)
     )
-    open_price    = float(spx_intraday["underlying_price"].iloc[0])
-    daily_chg_pts = spx_price - open_price
-    daily_chg_pct = (daily_chg_pts / open_price * 100) if open_price else 0.0
-    day_color     = "#2ecc71" if daily_chg_pts >= 0 else "#e74c3c"
-    day_arrow     = "▲" if daily_chg_pts >= 0 else "▼"
+
+# Daily change: current price vs prior session's last COMPLETE snapshot.
+# Falls back to first intraday snapshot only if no prior data exists.
+prev_close = db.get_prior_session_close(config.DB_PATH, session_date)
+
+if prev_close is not None:
+    ref_price   = prev_close
+    ref_label   = f"Prev Close {prev_close:,.0f}"
+elif not spx_intraday.empty:
+    ref_price   = float(spx_intraday["underlying_price"].iloc[0])
+    ref_label   = f"Session Open {ref_price:,.0f}"
 else:
-    open_price    = spx_price
-    daily_chg_pts = 0.0
-    daily_chg_pct = 0.0
-    day_color     = "#aaaaaa"
-    day_arrow     = "─"
+    ref_price   = spx_price
+    ref_label   = ""
+
+daily_chg_pts = spx_price - ref_price
+daily_chg_pct = (daily_chg_pts / ref_price * 100) if ref_price else 0.0
+day_color     = "#2ecc71" if daily_chg_pts >= 0 else "#e74c3c"
+day_arrow     = "▲" if daily_chg_pts >= 0 else "▼"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GEX — Max |Net GEX| strike, call vs put dominated
-# gamma and open_interest are already in chain_df (option_rows schema)
+# GEX
 # ─────────────────────────────────────────────────────────────────────────────
 
 gex_label = "N/A"
@@ -395,8 +369,7 @@ if (
         gex_work["net_gex"] = (
             gex_work["gamma"]
             * gex_work["open_interest"]
-            * 100
-            * spx_price
+            * 100 * spx_price
             * gex_work["right"].map({"C": 1, "P": -1})
         )
         gex_by_strike = gex_work.groupby("strike")["net_gex"].sum()
@@ -416,6 +389,7 @@ if "show_pct" not in st.session_state:
 
 # ═════════════════════════════════════════════════════════════════════════════
 # SECTION 1 — HEADER
+# Left column: SPX price + daily change + mini intraday sparkline
 # ═════════════════════════════════════════════════════════════════════════════
 
 sign = "+" if daily_chg_pts >= 0 else ""
@@ -432,30 +406,55 @@ elif snap_age_secs < 3600:
 else:
     staleness = f"🔴 {snap_age_secs / 3600:.1f}h ago — collector offline?"
 
-h1, h2, h3, h4, h5 = st.columns([5, 1, 2, 2, 4])
+h_spx, h_btn, h_vix, h_gex, h_status = st.columns([4, 1, 2, 2, 4])
 
-with h1:
+with h_spx:
+    # SPX price + change text
     st.markdown(
-        f"<h2 style='margin:0;padding:0;color:{day_color};'>"
+        f"<h2 style='margin:0;padding:0;color:{day_color};line-height:1.1;'>"
         f"SPX {spx_price:,.2f} "
         f"<span style='font-size:0.65em;font-weight:400;'>"
         f"{day_arrow} {chg_display}</span></h2>",
         unsafe_allow_html=True,
     )
+    # Mini intraday sparkline embedded in header
+    if not spx_intraday.empty:
+        mini_fig = go.Figure()
+        mini_fig.add_trace(go.Scatter(
+            x=spx_intraday["ts_et"],
+            y=spx_intraday["underlying_price"],
+            mode="lines",
+            line=dict(color=day_color, width=1.5),
+            showlegend=False,
+            hoverinfo="skip",
+        ))
+        mini_fig.update_layout(
+            height=60,
+            margin=dict(l=0, r=0, t=4, b=0),
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            xaxis=dict(visible=False),
+            yaxis=dict(visible=False),
+        )
+        st.plotly_chart(
+            mini_fig, use_container_width=True,
+            config={"displayModeBar": False}, key="mini_spx_chart"
+        )
 
-with h2:
+with h_btn:
+    st.write("")   # vertical alignment spacer
     if st.button("pts ↔ %", key="toggle_chg"):
         st.session_state["show_pct"] = not st.session_state["show_pct"]
         st.rerun()
 
-with h3:
+with h_vix:
     vix_str = f"{vix_value:.2f}" if vix_value else "N/A"
     st.metric("VIX", vix_str)
 
-with h4:
+with h_gex:
     st.metric("Max |GEX| Strike", gex_label)
 
-with h5:
+with h_status:
     st.caption(
         f"{staleness}  |  {snap_ts_str} UTC  |  "
         f"Refresh: {poll_interval}s"
@@ -466,57 +465,37 @@ st.divider()
 
 # ═════════════════════════════════════════════════════════════════════════════
 # SECTION 2 — CONTROLS ROW
-# Front/Back Expiry, Call/Put Strike, Max Gap — always visible near the top
+# 4 columns: Front/Back Expiry, Call/Put Strike
+# Max Gap lives in the Pair Scanner filter row — not here
 # ═════════════════════════════════════════════════════════════════════════════
 
-c1, c2, c3, c4, c5 = st.columns(5)
+c1, c2, c3, c4 = st.columns(4)
 
 with c1:
     front_expiry = st.selectbox(
-        "Front Expiry",
-        available_expiries,
-        index=0,
-        key="front_expiry_select",
+        "Front Expiry", available_expiries, index=0, key="front_expiry_select"
     )
-
 with c2:
     back_expiry = st.selectbox(
-        "Back Expiry",
-        available_expiries,
+        "Back Expiry", available_expiries,
         index=min(1, len(available_expiries) - 1),
         key="back_expiry_select",
     )
-
 with c3:
     default_call = float(round(spx_price / 5) * 5)
     call_strike = st.number_input(
-        "Call Strike",
-        min_value=1000.0, max_value=15000.0,
+        "Call Strike", min_value=1000.0, max_value=15000.0,
         value=default_call, step=5.0, format="%.0f",
         key="call_strike_input",
         help="Sell front CALL / Buy back CALL",
     )
-
 with c4:
     default_put = float(round((spx_price - 100) / 5) * 5)
     put_strike = st.number_input(
-        "Put Strike",
-        min_value=1000.0, max_value=15000.0,
+        "Put Strike", min_value=1000.0, max_value=15000.0,
         value=default_put, step=5.0, format="%.0f",
         key="put_strike_input",
         help="Sell front PUT / Buy back PUT",
-    )
-
-with c5:
-    max_gap = st.number_input(
-        "Max Gap (days)",
-        min_value=1, max_value=30,
-        value=1, step=1,
-        key="max_gap_input",
-        help=(
-            "Maximum calendar days between front and back expiry.\n"
-            "SPX daily expirations: Mon→Tue = 1d, Fri→Mon = 3d."
-        ),
     )
 
 if back_expiry <= front_expiry:
@@ -526,7 +505,7 @@ front_dte = int(chain_df[chain_df["expiry"] == front_expiry]["dte"].iloc[0])
 back_dte  = int(chain_df[chain_df["expiry"] == back_expiry]["dte"].iloc[0])
 strikes_set = call_strike > 0 and put_strike > 0
 
-# Live per-strike contract data
+# Live per-strike contract data beneath controls
 if strikes_set:
     lc1, lc2 = st.columns(2)
     for col, side, strike, label in [
@@ -537,13 +516,10 @@ if strikes_set:
         bc = iv_engine.strike_contract(chain_df, back_expiry,  strike, side)
         if not fc.found_exact:
             with col:
-                st.warning(
-                    f"{label} {strike:.0f} not in chain — "
-                    f"showing nearest {fc.strike:.0f}"
-                )
-        f_iv_s  = f"{fc.iv:.2f}%" if fc.iv else "N/A"
-        b_iv_s  = f"{bc.iv:.2f}%" if bc.iv else "N/A"
-        rat_s   = f"{fc.iv / bc.iv:.4f}" if (fc.iv and bc.iv) else "N/A"
+                st.warning(f"{label} {strike:.0f} not in chain — nearest {fc.strike:.0f}")
+        f_iv_s = f"{fc.iv:.2f}%" if fc.iv else "N/A"
+        b_iv_s = f"{bc.iv:.2f}%" if bc.iv else "N/A"
+        rat_s  = f"{fc.iv / bc.iv:.4f}" if (fc.iv and bc.iv) else "N/A"
         with col:
             st.caption(
                 f"**{label} {strike:.0f}** — "
@@ -553,55 +529,97 @@ if strikes_set:
 st.divider()
 
 # ═════════════════════════════════════════════════════════════════════════════
-# SECTION 3 — SPX INTRADAY CHART
+# Period selector (placed here; controls both IV Structure and Calendar Edge)
 # ═════════════════════════════════════════════════════════════════════════════
 
-st.subheader("SPX Intraday")
+period_label = st.radio(
+    "Chart Range",
+    ["Today", "5D", "10D", "20D"],
+    horizontal=True,
+    label_visibility="collapsed",
+    key="period_radio",
+)
+period_days = {"Today": 1, "5D": 5, "10D": 10, "20D": 20}[period_label]
 
-if not spx_intraday.empty:
-    fig_spx = go.Figure()
-    fig_spx.add_trace(go.Scatter(
-        x=spx_intraday["ts_et"],
-        y=spx_intraday["underlying_price"],
-        mode="lines",
-        line=dict(color=day_color, width=2),
-        name="SPX",
-        hovertemplate="%{x|%H:%M ET}<br><b>%{y:,.2f}</b><extra></extra>",
-    ))
-    fig_spx.add_hline(
-        y=open_price,
-        line_dash="dot",
-        line_color="#666666",
-        opacity=0.7,
-        annotation_text=f"Open {open_price:,.0f}",
-        annotation_position="bottom right",
-    )
-    fig_spx.update_layout(
-        height=200,
-        margin=dict(l=0, r=90, t=10, b=10),
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        xaxis=dict(showgrid=False, zeroline=False, tickformat="%H:%M"),
-        yaxis=dict(
-            showgrid=True,
-            gridcolor="rgba(128,128,128,0.15)",
-            zeroline=False,
-        ),
-        showlegend=False,
-        hovermode="x unified",
-    )
-    st.plotly_chart(fig_spx, use_container_width=True)
+# ═════════════════════════════════════════════════════════════════════════════
+# SECTION 3 — IV STRUCTURE PER STRIKE  (main chart — moved up from Section 7)
+# Front vs back IV at the selected trade strikes; ratio on right axis.
+# This is the primary "is now a good time to enter?" visual.
+# ═════════════════════════════════════════════════════════════════════════════
+
+st.subheader("IV Structure per Strike")
+st.caption(
+    "IV of your actual trade contracts — "
+    "not floating ATM; reflects the diagonal legs precisely."
+)
+
+if strikes_set:
+    fch = _load_contract_hist(front_expiry, call_strike, "CALL", period_days)
+    bch = _load_contract_hist(back_expiry,  call_strike, "CALL", period_days)
+    fph = _load_contract_hist(front_expiry, put_strike,  "PUT",  period_days)
+    bph = _load_contract_hist(back_expiry,  put_strike,  "PUT",  period_days)
+
+    call_ready = not fch.empty and not bch.empty
+    put_ready  = not fph.empty and not bph.empty
+
+    if call_ready or put_ready:
+        fig_str = go.Figure()
+
+        if call_ready:
+            cm = pd.merge(
+                fch[["timestamp", "iv"]].rename(columns={"iv": "f_call"}),
+                bch[["timestamp", "iv"]].rename(columns={"iv": "b_call"}),
+                on="timestamp", how="inner",
+            )
+            cm["call_ratio"] = cm["f_call"] / cm["b_call"]
+            fig_str.add_trace(go.Scatter(x=cm["timestamp"], y=cm["f_call"],
+                name=f"Front {call_strike:.0f}C",
+                line=dict(color="#2ecc71", width=1.5), yaxis="y1"))
+            fig_str.add_trace(go.Scatter(x=cm["timestamp"], y=cm["b_call"],
+                name=f"Back  {call_strike:.0f}C",
+                line=dict(color="#3498db", width=1.5), yaxis="y1"))
+            fig_str.add_trace(go.Scatter(x=cm["timestamp"], y=cm["call_ratio"],
+                name="Call Ratio (F/B)",
+                line=dict(color="#e74c3c", width=1.5), yaxis="y2"))
+
+        if put_ready:
+            pm = pd.merge(
+                fph[["timestamp", "iv"]].rename(columns={"iv": "f_put"}),
+                bph[["timestamp", "iv"]].rename(columns={"iv": "b_put"}),
+                on="timestamp", how="inner",
+            )
+            pm["put_ratio"] = pm["f_put"] / pm["b_put"]
+            fig_str.add_trace(go.Scatter(x=pm["timestamp"], y=pm["f_put"],
+                name=f"Front {put_strike:.0f}P",
+                line=dict(color="#2ecc71", width=1.5, dash="dot"), yaxis="y1"))
+            fig_str.add_trace(go.Scatter(x=pm["timestamp"], y=pm["b_put"],
+                name=f"Back  {put_strike:.0f}P",
+                line=dict(color="#3498db", width=1.5, dash="dot"), yaxis="y1"))
+            fig_str.add_trace(go.Scatter(x=pm["timestamp"], y=pm["put_ratio"],
+                name="Put Ratio (F/B)",
+                line=dict(color="#e74c3c", width=1.5, dash="dot"), yaxis="y2"))
+
+        fig_str.update_layout(
+            height=360,
+            margin=dict(l=20, r=20, t=10, b=20),
+            yaxis=dict(title="IV %", side="left"),
+            yaxis2=dict(title="Ratio", side="right", overlaying="y", showgrid=False),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+            hovermode="x unified",
+        )
+        st.plotly_chart(fig_str, use_container_width=True)
+    else:
+        st.info(
+            f"No per-strike history for {call_strike:.0f}C / {put_strike:.0f}P "
+            f"in the selected range. Try 'Today'."
+        )
 else:
-    st.caption(
-        "No intraday SPX data for today's session yet. "
-        "Check that collector.py is running."
-    )
+    st.caption("Enter call and put strikes in the Controls row above.")
 
 st.divider()
 
 # ═════════════════════════════════════════════════════════════════════════════
 # SECTION 4 — HISTORICAL STATISTICS  (always Today / 5D / 10D / 20D)
-# Shows where the current ATM IV ratio sits in its historical range.
 # ═════════════════════════════════════════════════════════════════════════════
 
 front_iv_atm = iv_engine.atm_iv(chain_df, front_expiry, spx_price)
@@ -658,7 +676,6 @@ scanner_snaps   = (
 
 # ═════════════════════════════════════════════════════════════════════════════
 # SECTION 5 — PINNED PAIRS
-# Shown regardless of DTE/gap filters so always-tracked pairs stay visible.
 # ═════════════════════════════════════════════════════════════════════════════
 
 pinned = _load_pinned()
@@ -668,47 +685,34 @@ if pinned and not full_scanner_df.empty:
     pinned_keys = {(p["front_expiry"], p["back_expiry"]) for p in pinned}
     pinned_df = full_scanner_df[
         full_scanner_df.apply(
-            lambda r: (r["front_expiry"], r["back_expiry"]) in pinned_keys,
-            axis=1,
+            lambda r: (r["front_expiry"], r["back_expiry"]) in pinned_keys, axis=1
         )
     ].copy()
 
     if not pinned_df.empty:
         pin_event = st.dataframe(
             pinned_df[_TABLE_DISPLAY_COLS],
-            use_container_width=True,
-            hide_index=True,
-            on_select="rerun",
-            selection_mode="multi-row",
-            key="pinned_table",
-            column_config=_table_col_config(),
+            use_container_width=True, hide_index=True,
+            on_select="rerun", selection_mode="multi-row",
+            key="pinned_table", column_config=_table_col_config(),
         )
         sel_pinned = (
-            pin_event.selection.rows
-            if hasattr(pin_event, "selection") else []
+            pin_event.selection.rows if hasattr(pin_event, "selection") else []
         )
         if sel_pinned:
-            to_remove_df   = pinned_df.iloc[sel_pinned]
-            remove_keys    = set(
-                zip(to_remove_df["front_expiry"], to_remove_df["back_expiry"])
-            )
-            if st.button(
-                f"🗑️ Unpin {len(sel_pinned)} Selected", key="unpin_btn"
-            ):
-                _save_pinned(
-                    [p for p in pinned
-                     if (p["front_expiry"], p["back_expiry"]) not in remove_keys]
-                )
+            to_remove_df = pinned_df.iloc[sel_pinned]
+            remove_keys  = set(zip(to_remove_df["front_expiry"], to_remove_df["back_expiry"]))
+            if st.button(f"🗑️ Unpin {len(sel_pinned)} Selected", key="unpin_btn"):
+                _save_pinned([p for p in pinned
+                              if (p["front_expiry"], p["back_expiry"]) not in remove_keys])
                 st.rerun()
     else:
         st.caption(
-            "Pinned pairs have no data for today's session "
+            "Pinned pairs have no data for the current session "
             "(may have expired or collector hasn't run yet)."
         )
-
 elif pinned:
-    st.caption("No scanner data yet for today's session.")
-
+    st.caption("No scanner data yet for this session.")
 else:
     st.caption(
         "No pinned pairs yet. "
@@ -719,7 +723,7 @@ st.divider()
 
 # ═════════════════════════════════════════════════════════════════════════════
 # SECTION 6 — PAIR SCANNER
-# All (front, back) pairs for today's session.  Sortable, pinnable.
+# Filter row: Min DTE | Max DTE | Max Gap  ← Max Gap lives here, not in Controls
 # ═════════════════════════════════════════════════════════════════════════════
 
 sc_hdr, sc_meta = st.columns([3, 2])
@@ -727,11 +731,10 @@ with sc_hdr:
     st.subheader("🔍 Pair Scanner")
 with sc_meta:
     st.caption(
-        f"{scanner_total} pairs  ·  {scanner_snaps} snapshots today  "
-        f"·  Max Gap: {int(max_gap)}d"
+        f"{scanner_total} pairs  ·  {scanner_snaps} snapshots today"
     )
 
-sf1, sf2, sf3 = st.columns([2, 2, 1])
+sf1, sf2, sf3, sf4 = st.columns([2, 2, 2, 1])
 with sf1:
     min_dte = st.number_input(
         "Min DTE", min_value=0, max_value=60, value=0, step=1, key="min_dte"
@@ -741,7 +744,16 @@ with sf2:
         "Max DTE", min_value=1, max_value=60, value=20, step=1, key="max_dte"
     )
 with sf3:
-    st.button("↺ Rescan", key="rescan_btn")   # any click = fresh rerun
+    max_gap = st.number_input(
+        "Max Gap (days)", min_value=1, max_value=30, value=1, step=1,
+        key="max_gap_input",
+        help=(
+            "Maximum calendar days between front and back expiry.\n"
+            "SPX daily expirations: Mon→Tue = 1d, Fri→Mon = 3d."
+        ),
+    )
+with sf4:
+    st.button("↺ Rescan", key="rescan_btn")
 
 if not full_scanner_df.empty:
     filtered_df = full_scanner_df[
@@ -750,41 +762,31 @@ if not full_scanner_df.empty:
         & (full_scanner_df["gap"] <= max_gap)
     ].copy()
 
-    # Default sort: biggest intraday drop first (most negative Drop%)
     filtered_df = filtered_df.sort_values("Drop%", ascending=True)
 
     if not filtered_df.empty:
         scan_event = st.dataframe(
             filtered_df[_TABLE_DISPLAY_COLS],
-            use_container_width=True,
-            hide_index=True,
-            on_select="rerun",
-            selection_mode="multi-row",
-            key="scanner_table",
-            column_config=_table_col_config(),
+            use_container_width=True, hide_index=True,
+            on_select="rerun", selection_mode="multi-row",
+            key="scanner_table", column_config=_table_col_config(),
         )
         sel_scan = (
-            scan_event.selection.rows
-            if hasattr(scan_event, "selection") else []
+            scan_event.selection.rows if hasattr(scan_event, "selection") else []
         )
         if sel_scan:
             to_pin_df           = filtered_df.iloc[sel_scan]
             current_pinned      = _load_pinned()
             current_pinned_keys = {
-                (p["front_expiry"], p["back_expiry"])
-                for p in current_pinned
+                (p["front_expiry"], p["back_expiry"]) for p in current_pinned
             }
             new_entries = [
-                {"front_expiry": r["front_expiry"],
-                 "back_expiry":  r["back_expiry"]}
+                {"front_expiry": r["front_expiry"], "back_expiry": r["back_expiry"]}
                 for _, r in to_pin_df.iterrows()
-                if (r["front_expiry"], r["back_expiry"])
-                not in current_pinned_keys
+                if (r["front_expiry"], r["back_expiry"]) not in current_pinned_keys
             ]
             if new_entries:
-                if st.button(
-                    f"📌 Pin {len(new_entries)} New", key="pin_btn"
-                ):
+                if st.button(f"📌 Pin {len(new_entries)} New", key="pin_btn"):
                     _save_pinned(current_pinned + new_entries)
                     st.rerun()
             else:
@@ -796,125 +798,19 @@ if not full_scanner_df.empty:
         )
 else:
     st.caption(
-        "No scanner data for today's session yet. "
+        "No scanner data for this session yet. "
         "Make sure collector.py is running and has completed at least one cycle."
     )
 
 st.divider()
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Period selector — shared by Sections 7 and 8
-# ═════════════════════════════════════════════════════════════════════════════
-
-period_label = st.radio(
-    "Chart Range",
-    ["Today", "5D", "10D", "20D"],
-    horizontal=True,
-    label_visibility="collapsed",
-    key="period_radio",
-)
-period_days = {"Today": 1, "5D": 5, "10D": 10, "20D": 20}[period_label]
-
-# ═════════════════════════════════════════════════════════════════════════════
-# SECTION 7 — IV STRUCTURE PER STRIKE
-# Front vs back IV for the specific contract legs of the diagonal.
-# ═════════════════════════════════════════════════════════════════════════════
-
-st.subheader("IV Structure per Strike")
-st.caption(
-    "IV of your actual trade contracts — "
-    "not floating ATM; reflects the diagonal legs precisely."
-)
-
-if strikes_set:
-    fch = _load_contract_hist(front_expiry, call_strike, "CALL", period_days)
-    bch = _load_contract_hist(back_expiry,  call_strike, "CALL", period_days)
-    fph = _load_contract_hist(front_expiry, put_strike,  "PUT",  period_days)
-    bph = _load_contract_hist(back_expiry,  put_strike,  "PUT",  period_days)
-
-    call_ready = not fch.empty and not bch.empty
-    put_ready  = not fph.empty and not bph.empty
-
-    if call_ready or put_ready:
-        fig_str = go.Figure()
-
-        if call_ready:
-            cm = pd.merge(
-                fch[["timestamp", "iv"]].rename(columns={"iv": "f_call"}),
-                bch[["timestamp", "iv"]].rename(columns={"iv": "b_call"}),
-                on="timestamp", how="inner",
-            )
-            cm["call_ratio"] = cm["f_call"] / cm["b_call"]
-            fig_str.add_trace(go.Scatter(
-                x=cm["timestamp"], y=cm["f_call"],
-                name=f"Front {call_strike:.0f}C",
-                line=dict(color="#2ecc71", width=1.5), yaxis="y1",
-            ))
-            fig_str.add_trace(go.Scatter(
-                x=cm["timestamp"], y=cm["b_call"],
-                name=f"Back  {call_strike:.0f}C",
-                line=dict(color="#3498db", width=1.5), yaxis="y1",
-            ))
-            fig_str.add_trace(go.Scatter(
-                x=cm["timestamp"], y=cm["call_ratio"],
-                name="Call Ratio (F/B)",
-                line=dict(color="#e74c3c", width=1.5), yaxis="y2",
-            ))
-
-        if put_ready:
-            pm_data = pd.merge(
-                fph[["timestamp", "iv"]].rename(columns={"iv": "f_put"}),
-                bph[["timestamp", "iv"]].rename(columns={"iv": "b_put"}),
-                on="timestamp", how="inner",
-            )
-            pm_data["put_ratio"] = pm_data["f_put"] / pm_data["b_put"]
-            fig_str.add_trace(go.Scatter(
-                x=pm_data["timestamp"], y=pm_data["f_put"],
-                name=f"Front {put_strike:.0f}P",
-                line=dict(color="#2ecc71", width=1.5, dash="dot"), yaxis="y1",
-            ))
-            fig_str.add_trace(go.Scatter(
-                x=pm_data["timestamp"], y=pm_data["b_put"],
-                name=f"Back  {put_strike:.0f}P",
-                line=dict(color="#3498db", width=1.5, dash="dot"), yaxis="y1",
-            ))
-            fig_str.add_trace(go.Scatter(
-                x=pm_data["timestamp"], y=pm_data["put_ratio"],
-                name="Put Ratio (F/B)",
-                line=dict(color="#e74c3c", width=1.5, dash="dot"), yaxis="y2",
-            ))
-
-        fig_str.update_layout(
-            height=340,
-            margin=dict(l=20, r=20, t=10, b=20),
-            yaxis=dict(title="IV %", side="left"),
-            yaxis2=dict(title="Ratio", side="right",
-                        overlaying="y", showgrid=False),
-            legend=dict(orientation="h", yanchor="bottom",
-                        y=1.02, xanchor="left", x=0),
-            hovermode="x unified",
-        )
-        st.plotly_chart(fig_str, use_container_width=True)
-
-    else:
-        st.info(
-            f"No per-strike history for {call_strike:.0f}C / {put_strike:.0f}P "
-            f"in the selected range. Try 'Today'."
-        )
-
-else:
-    st.caption("Enter call and put strikes in the Controls row above.")
-
-st.divider()
-
-# ═════════════════════════════════════════════════════════════════════════════
-# SECTION 8 — CALENDAR EDGE
+# SECTION 7 — CALENDAR EDGE
 # ATM IV chart + ratio metrics + day-change for the selected pair.
 # ═════════════════════════════════════════════════════════════════════════════
 
 st.subheader("Calendar Edge")
 
-# Current-moment metric strip
 iv_index = float(chain_df.groupby("expiry")["iv"].mean().mean())
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("ATM IV Ratio (F/B)", f"{ts_now.ratio:.4f}")
@@ -924,48 +820,32 @@ m4.metric("IV Index (avg)",     f"{iv_index:.2f}%")
 
 st.info(iv_engine.interpret_curve(ts_now))
 
-# ATM IV time-series chart
 front_hist = _load_atm_hist(front_expiry, period_days)
 back_hist  = _load_atm_hist(back_expiry,  period_days)
 
 atm_merged = pd.DataFrame()
 if not front_hist.empty and not back_hist.empty:
     atm_merged = pd.merge(
-        front_hist[["timestamp", "atm_iv"]].rename(
-            columns={"atm_iv": "front_iv"}
-        ),
-        back_hist[["timestamp", "atm_iv"]].rename(
-            columns={"atm_iv": "back_iv"}
-        ),
+        front_hist[["timestamp", "atm_iv"]].rename(columns={"atm_iv": "front_iv"}),
+        back_hist [["timestamp", "atm_iv"]].rename(columns={"atm_iv": "back_iv"}),
         on="timestamp", how="inner",
     )
     atm_merged["iv_ratio"] = atm_merged["front_iv"] / atm_merged["back_iv"]
 
 if not atm_merged.empty:
     fig_atm = go.Figure()
-    fig_atm.add_trace(go.Scatter(
-        x=atm_merged["timestamp"], y=atm_merged["front_iv"],
-        name="Front ATM IV",
-        line=dict(color="#2ecc71", width=1.5), yaxis="y1",
-    ))
-    fig_atm.add_trace(go.Scatter(
-        x=atm_merged["timestamp"], y=atm_merged["back_iv"],
-        name="Back ATM IV",
-        line=dict(color="#3498db", width=1.5), yaxis="y1",
-    ))
-    fig_atm.add_trace(go.Scatter(
-        x=atm_merged["timestamp"], y=atm_merged["iv_ratio"],
-        name="IV Ratio (F/B)",
-        line=dict(color="#e74c3c", width=1.5), yaxis="y2",
-    ))
+    fig_atm.add_trace(go.Scatter(x=atm_merged["timestamp"], y=atm_merged["front_iv"],
+        name="Front ATM IV", line=dict(color="#2ecc71", width=1.5), yaxis="y1"))
+    fig_atm.add_trace(go.Scatter(x=atm_merged["timestamp"], y=atm_merged["back_iv"],
+        name="Back ATM IV",  line=dict(color="#3498db", width=1.5), yaxis="y1"))
+    fig_atm.add_trace(go.Scatter(x=atm_merged["timestamp"], y=atm_merged["iv_ratio"],
+        name="IV Ratio (F/B)", line=dict(color="#e74c3c", width=1.5), yaxis="y2"))
     fig_atm.update_layout(
         height=300,
         margin=dict(l=20, r=20, t=10, b=20),
         yaxis=dict(title="IV %", side="left"),
-        yaxis2=dict(title="Ratio", side="right",
-                    overlaying="y", showgrid=False),
-        legend=dict(orientation="h", yanchor="bottom",
-                    y=1.02, xanchor="left", x=0),
+        yaxis2=dict(title="Ratio", side="right", overlaying="y", showgrid=False),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         hovermode="x unified",
     )
     st.plotly_chart(fig_atm, use_container_width=True)
@@ -973,14 +853,11 @@ if not atm_merged.empty:
     samp_warn = iv_engine.sample_size_warning(atm_merged["iv_ratio"])
     if samp_warn:
         st.warning(samp_warn)
-
 else:
     st.caption(
-        f"No ATM IV history for {front_expiry} / {back_expiry} "
-        f"in the selected range."
+        f"No ATM IV history for {front_expiry} / {back_expiry} in the selected range."
     )
 
-# Day-change metrics for the selected pair
 dc1, dc2 = st.columns(2)
 for col, label, exp, dte in [
     (dc1, "Front", front_expiry, front_dte),
@@ -994,27 +871,20 @@ for col, label, exp, dte in [
                 (latest_rows[0]["atm_avg_iv"] - latest_rows[1]["atm_avg_iv"]) * 100
                 if len(latest_rows) == 2 else 0.0
             )
-            st.metric(
-                f"{label} ATM IV  ({dte} DTE)",
-                f"{lat_iv:.2f}%",
-                f"{chg_iv:+.2f}%",
-            )
+            st.metric(f"{label} ATM IV  ({dte} DTE)", f"{lat_iv:.2f}%", f"{chg_iv:+.2f}%")
         else:
             st.metric(f"{label} ATM IV  ({dte} DTE)", "N/A")
 
 st.divider()
 
 # ═════════════════════════════════════════════════════════════════════════════
-# SECTION 9 — TRANSFORM CREDIT  (very bottom)
-# Trade quality score — evaluates entry edge at a glance.
+# SECTION 8 — TRANSFORM CREDIT  (very bottom)
 # ═════════════════════════════════════════════════════════════════════════════
 
 st.subheader("Transform Credit")
 
 near_front = chain_df[chain_df["expiry"] == front_expiry]
-atm_row    = near_front.iloc[
-    (near_front["strike"] - spx_price).abs().argsort()[:1]
-]
+atm_row    = near_front.iloc[(near_front["strike"] - spx_price).abs().argsort()[:1]]
 liquidity  = iv_engine.liquidity_score(
     atm_row["volume"].fillna(0).mean(),
     atm_row["open_interest"].fillna(0).mean(),
@@ -1023,7 +893,7 @@ iv_pct = (
     iv_engine.percentile_rank(atm_merged["iv_ratio"], ts_now.ratio)
     if not atm_merged.empty else 50
 )
-theta_adv = 50      # placeholder — Phase 3
+theta_adv = 50
 score     = iv_engine.trade_quality_score(iv_pct, liquidity, theta_adv)
 
 s1, s2, s3, s4 = st.columns(4)

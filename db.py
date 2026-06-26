@@ -633,7 +633,35 @@ def get_gaps(db_path: str, start: str, end: str,
         ).fetchall()
 
 
-def get_spx_intraday_today(db_path: str, session_date: str | None = None) -> list:
+def get_prior_session_close(db_path: str, session_date: str) -> float | None:
+    """
+    Underlying price of the last COMPLETE snapshot BEFORE session_date.
+
+    Used by app.py to compute the daily SPX change:
+        change = current_spx_price - get_prior_session_close(...)
+
+    session_date: 'YYYY-MM-DD' UTC date string of the current session.
+    The query returns the last snapshot from the PREVIOUS trading session
+    (typically 3:58–3:59 PM ET the day before), which is the closest
+    available approximation of the prior day's official close.
+
+    Returns None if no prior-session data exists (first ever collection day).
+    """
+    with managed_conn(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT underlying_price FROM snapshots
+            WHERE status              = 'COMPLETE'
+              AND snapshot_timestamp  < ?
+            ORDER BY snapshot_timestamp DESC
+            LIMIT 1
+            """,
+            (session_date,)
+        ).fetchone()
+        return float(row["underlying_price"]) if row and row["underlying_price"] else None
+
+
+
     """
     SPX price at every COMPLETE snapshot on the given session date.
 
