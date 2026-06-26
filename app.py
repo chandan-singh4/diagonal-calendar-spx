@@ -58,6 +58,19 @@ st.set_page_config(
     layout="wide",
 )
 
+# ─── v3 compaction: tighter top padding + section rhythm (not crushed) ─────────
+st.markdown(
+    """
+    <style>
+      .block-container { padding-top: 1.2rem; padding-bottom: 2rem; }
+      div[data-testid="stVerticalBlock"] { gap: 0.6rem; }
+      hr { margin: 0.4rem 0; opacity: 0.18; }
+      div[data-testid="stMetricLabel"] { opacity: 0.78; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 # ─── Constants ────────────────────────────────────────────────────────────────
 PINNED_PAIRS_FILE = Path(__file__).parent / "pinned_pairs.json"
 _SPARK_BARS = "▁▂▃▄▅▆▇█"
@@ -309,6 +322,16 @@ chain_df["side"] = chain_df["right"].map({"C": "CALL", "P": "PUT"})
 chain_df["iv"]   = chain_df["iv"] * 100
 
 available_expiries = sorted(chain_df["expiry"].unique())
+
+# Map expiry → DTE for dropdown labels, e.g. "2026-06-29  (3D)"
+dte_by_expiry = chain_df.groupby("expiry")["dte"].first().astype(int).to_dict()
+
+
+def _exp_label(expiry: str) -> str:
+    d = dte_by_expiry.get(expiry)
+    return f"{expiry}  ({d}D)" if d is not None else expiry
+
+
 if len(available_expiries) < 2:
     st.warning(
         "Fewer than 2 expirations in the latest snapshot. "
@@ -406,7 +429,7 @@ elif snap_age_secs < 3600:
 else:
     staleness = f"🔴 {snap_age_secs / 3600:.1f}h ago — collector offline?"
 
-h_spx, h_btn, h_vix, h_gex, h_status = st.columns([4, 1, 2, 2, 4])
+h_spx, h_vix, h_gex, h_status = st.columns([5, 2, 2, 4])
 
 with h_spx:
     # SPX price + change text
@@ -417,32 +440,7 @@ with h_spx:
         f"{day_arrow} {chg_display}</span></h2>",
         unsafe_allow_html=True,
     )
-    # Mini intraday sparkline embedded in header
-    if not spx_intraday.empty:
-        mini_fig = go.Figure()
-        mini_fig.add_trace(go.Scatter(
-            x=spx_intraday["ts_et"],
-            y=spx_intraday["underlying_price"],
-            mode="lines",
-            line=dict(color=day_color, width=1.5),
-            showlegend=False,
-            hoverinfo="skip",
-        ))
-        mini_fig.update_layout(
-            height=60,
-            margin=dict(l=0, r=0, t=4, b=0),
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
-            xaxis=dict(visible=False),
-            yaxis=dict(visible=False),
-        )
-        st.plotly_chart(
-            mini_fig, use_container_width=True,
-            config={"displayModeBar": False}, key="mini_spx_chart"
-        )
-
-with h_btn:
-    st.write("")   # vertical alignment spacer
+    # Toggle sits directly beneath the change value for quick clicking
     if st.button("pts ↔ %", key="toggle_chg"):
         st.session_state["show_pct"] = not st.session_state["show_pct"]
         st.rerun()
@@ -473,13 +471,14 @@ c1, c2, c3, c4 = st.columns(4)
 
 with c1:
     front_expiry = st.selectbox(
-        "Front Expiry", available_expiries, index=0, key="front_expiry_select"
+        "Front Expiry", available_expiries, index=0,
+        format_func=_exp_label, key="front_expiry_select"
     )
 with c2:
     back_expiry = st.selectbox(
         "Back Expiry", available_expiries,
         index=min(1, len(available_expiries) - 1),
-        key="back_expiry_select",
+        format_func=_exp_label, key="back_expiry_select",
     )
 with c3:
     default_call = float(round(spx_price / 5) * 5)
@@ -538,17 +537,10 @@ back_iv_atm  = iv_engine.atm_iv(chain_df, back_expiry,  spx_price)
 ts_now       = iv_engine.term_structure(front_iv_atm, back_iv_atm)
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Period selector — controls both IV Structure and Calendar Edge charts
+# Period selector (Today / 5D / 10D / 20D) now lives on the RIGHT, above the
+# Selected-Strike IV chart (rendered inside right_col below). It is SHARED:
+# the same selection drives both the Selected-Strike IV and Calendar Edge charts.
 # ═════════════════════════════════════════════════════════════════════════════
-
-period_label = st.radio(
-    "Chart Range",
-    ["Today", "5D", "10D", "20D"],
-    horizontal=True,
-    label_visibility="collapsed",
-    key="period_radio",
-)
-period_days = {"Today": 1, "5D": 5, "10D": 10, "20D": 20}[period_label]
 
 # ═════════════════════════════════════════════════════════════════════════════
 # SECTION 3 — EXPIRY DETAIL + STRIKE DETAIL  (left)
@@ -583,7 +575,7 @@ with left_col:
             chg_arrow = "↑" if atm_chg >= 0 else "↓"
             st.markdown(
                 f"<p style='margin:0;font-size:0.8em;color:#aaa;'>"
-                f"{exp_label} ({dte_val} DTE)</p>"
+                f"{exp_label} · {exp_date} · {dte_val} DTE</p>"
                 f"<p style='margin:0;font-size:1.6em;font-weight:600;'>"
                 f"{atm_now:.2f}%</p>"
                 f"<p style='margin:0 0 10px 0;font-size:0.85em;color:{chg_color};'>"
@@ -593,7 +585,7 @@ with left_col:
         else:
             st.markdown(
                 f"<p style='margin:0;font-size:0.8em;color:#aaa;'>"
-                f"{exp_label} ({dte_val} DTE)</p>"
+                f"{exp_label} · {exp_date} · {dte_val} DTE</p>"
                 f"<p style='margin:0 0 10px 0;color:#666;'>N/A</p>",
                 unsafe_allow_html=True,
             )
@@ -637,6 +629,18 @@ with left_col:
 
 # ── Right panel — IV Structure chart ─────────────────────────────────────────
 with right_col:
+    # Shared period selector, right-aligned above the chart
+    _rsp_spacer, _rsp_sel = st.columns([3, 2])
+    with _rsp_sel:
+        period_label = st.radio(
+            "Chart Range",
+            ["Today", "5D", "10D", "20D"],
+            horizontal=True,
+            label_visibility="collapsed",
+            key="period_radio",
+        )
+    period_days = {"Today": 1, "5D": 5, "10D": 10, "20D": 20}[period_label]
+
     st.subheader("Selected-Strike IV")
     st.caption("Front vs back IV at your trade strikes — ratio on right axis.")
 
@@ -710,7 +714,15 @@ st.divider()
 # ATM IV chart (floating ATM, macro context) + ratio metrics.
 # ═════════════════════════════════════════════════════════════════════════════
 
-st.subheader("Calendar Edge")
+_ce_title, _ce_range = st.columns([3, 1])
+with _ce_title:
+    st.subheader("Calendar Edge")
+with _ce_range:
+    st.markdown(
+        f"<p style='text-align:right;margin:0;padding-top:0.6em;"
+        f"font-size:0.85em;color:#aaa;'>Range: <b>{period_label}</b></p>",
+        unsafe_allow_html=True,
+    )
 
 iv_index = float(chain_df.groupby("expiry")["iv"].mean().mean())
 m1, m2, m3, m4 = st.columns(4)

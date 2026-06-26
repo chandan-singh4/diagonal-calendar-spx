@@ -40,7 +40,71 @@ Local path: wherever your spx-diagonal-dashboard folder lives (parent folder con
 Newest entries begins from here - 
 
 
-## 2026-06-26 — Trade Journal: pages/journal.py + db.py trades table
+## 2026-06-26 — Dashboard v3: layout compaction + header/expiry/selector refinements
+
+**Changed (all in `app.py`):**
+
+1. **Compaction CSS** — New `st.markdown(<style>)` block injected immediately after
+   `set_page_config`. Reduces `.block-container` top padding (1.2rem), tightens the
+   global vertical-block `gap` to 0.6rem, thins `hr` dividers, and dims metric labels.
+   Tuned for "compact but not congested." This is the main fix for the excessive
+   scrolling / wasted top whitespace called out in the v3 review video.
+
+2. **Removed the header mini intraday sparkline.** The 60px Plotly line chart
+   (`mini_fig`) under the SPX price is deleted. `spx_intraday` is still loaded because
+   `get_prior_session_close` falls back to the first intraday snapshot; only the chart
+   render is gone. Reviewer didn't like the line chart aesthetically and it cost
+   vertical space.
+
+3. **`pts ↔ %` toggle moved next to the change value.** The dedicated `h_btn` header
+   column is removed; the toggle button now renders inside `h_spx` directly beneath the
+   price/change line. Header columns went from `[4,1,2,2,4]` to `[5,2,2,4]`.
+
+4. **DTE in expiry dropdowns.** New `dte_by_expiry` map + `_exp_label()` helper render
+   each option as `"2026-06-29  (3D)"` via `format_func` on both Front/Back selectboxes.
+   The selectbox value is still the raw date string, so nothing downstream changed.
+
+5. **Expiry Detail now shows date AND DTE.** Label changed from `"Front (0 DTE)"` to
+   `"Front · 2026-06-26 · 0 DTE"` in both the data and N/A branches.
+
+6. **Period selector (Today/5D/10D/20D) moved to the right, shared.** Previously a
+   standalone full-width radio above the left/right column split. Now rendered
+   right-aligned at the top of `right_col`, directly above the Selected-Strike IV chart.
+   It remains a **single shared** control: `period_days`/`period_label` are defined inside
+   `right_col` (which executes before Calendar Edge) and drive both charts. Calendar Edge
+   gets a right-aligned read-only `Range: <label>` indicator above its chart instead of a
+   duplicate widget (Streamlit can't bind one widget to two render points).
+
+**Why:** Direct implementation of the v3 review video. Decisions confirmed with Chandan:
+(A) shared period selector, not independent; (B) **GEX left untouched.**
+
+**Impact:**
+- Pure UI/layout changes. No DB reads/writes, no schema, no `iv_engine` math touched.
+- `collector.py` untouched. Reader/writer split preserved.
+- `period_days` now defined inside `right_col`; verified it precedes every use
+  (Selected-Strike IV chart at lines 648–651, Calendar Edge `_load_atm_hist` at 736–737).
+  Historical Stats uses its own loop `days`, unaffected.
+- `app.py` passes `python -m py_compile`. No stale refs to `mini_fig`/`h_btn`.
+
+**Deliberately NOT changed (per review):**
+- **Max |GEX| Strike — not made "live."** Confirmed it already recomputes every refresh
+  from the latest snapshot; it looks frozen intraday because GEX is OI-dominated and OI
+  is a once-daily figure (updated overnight by OCC). The strike flips only when 0DTE
+  gamma explodes near the close — correct gamma-wall behavior, not a freshness bug.
+  Chandan elected to leave it alone for now. A volume-weighted intraday "flow" variant
+  remains available as a future option if he later wants an intraday-responsive number.
+- VIX, the Front/Back/Strike control panels, and the contango/favorability info banner —
+  left as-is per the review.
+
+**Open questions / follow-ups:**
+- The unused `spx_intraday["ts_et"]` column assignment (left over from the removed
+  sparkline) still computes each run. Harmless and cheap; can be pruned in a later pass.
+- `dc1/dc2` ATM IV metrics at the bottom of Calendar Edge still show only `(N DTE)` not
+  the date — left for consistency-vs-scope reasons; trivially addable if wanted.
+
+---
+
+
 
 **Changed:**
 

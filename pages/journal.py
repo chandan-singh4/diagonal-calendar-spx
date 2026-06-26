@@ -22,6 +22,9 @@ IC MARK PRICE MATH
 
 from __future__ import annotations
 
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
 import json
 from datetime import date, datetime, timedelta
 
