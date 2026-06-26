@@ -10,8 +10,6 @@ Log every change here. Format:
 **Open questions / follow-ups:** anything left unresolved
 ```
 
-Newest entries at the top.
-
 ---
 
 ## HOW TO START A NEW CHAT SESSION IF REPO IS PRIVATE
@@ -37,6 +35,71 @@ Newest entries at the top.
 GitHub repo: https://github.com/chandan-singh4/diagonal-calendar-spx
 Primary branch: main
 Local path: wherever your spx-diagonal-dashboard folder lives (parent folder contains .venv)
+
+--Newest entries starts from here--
+
+## 2026-06-25 — Dashboard v2: Pair Scanner, Pinned Pairs, SPX Intraday Chart, GEX, Layout Reorganization
+
+**Changed:**
+
+**`app.py`** — Complete replacement (~380 lines). Full layout restructure and five new capabilities:
+
+*Layout changes (top to bottom):*
+- **Section 1 — Header:** SPX price + daily change (pts or %, toggle button), VIX, Max|GEX| Strike, staleness badge.  2-column layout removed; single linear flow throughout.
+- **Section 2 — Controls Row:** Five-column row: Front Expiry, Back Expiry, Call Strike, Put Strike, Max Gap (new). Live per-strike contract data (Front IV / Back IV / Ratio) shown directly below controls.
+- **Section 3 — SPX Intraday Chart:** Green line if day positive, red if negative. Dotted horizontal reference line at today's open price (first snapshot of the day). Labeled "Open XXXX" at right edge.
+- **Section 4 — Historical Statistics:** Always shows Today / 5D / 10D / 20D range bars (removed 15D and 1M). No longer controlled by the period radio — always fixed windows. Ratio range bars for the selected front/back pair.
+- **Section 5 — Pinned Pairs:** Persistent pair watchlist from `pinned_pairs.json`. Shown regardless of DTE/gap filters. Row selection + "Unpin Selected" button.
+- **Section 6 — Pair Scanner:** All valid (front, back) expiry combinations from today's session data. Min DTE / Max DTE controls + Rescan button. Default sort: Drop% ascending (biggest intraday drop first). Row selection + "Pin Selected" button. Native column-header sorting for ad-hoc sorts.
+- **Period selector radio** (Today / 5D / 10D / 20D — 15D and 1M removed) placed above Section 7, controls only the IV charts in Sections 7 and 8.
+- **Section 7 — IV Structure per Strike:** Moved lower (was above scanner).
+- **Section 8 — Calendar Edge:** Moved lower. ATM IV chart + metric strip + day-change metrics unchanged.
+- **Section 9 — Transform Credit:** Very bottom. Trade quality score unchanged.
+
+*New features:*
+- **Max Gap control:** `st.number_input` in the Controls Row. Default = 1. Filters Pair Scanner (not Pinned Pairs). Note: Fri→Mon = 3 calendar days for SPX dailies.
+- **SPX intraday chart:** Reads from `db.get_spx_intraday_today()`. Open price = first COMPLETE snapshot of the UTC calendar day. Day color = green/red/grey (no data).
+- **pts ↔ % toggle:** Session-state button in the header. Toggles between `+X.X pts` and `+X.XX%` for daily SPX change.
+- **GEX computation:** Computed from `chain_df` (gamma and open_interest already in `option_rows`). Per-strike net GEX = gamma × OI × 100 × SPX × ±1. Max |net GEX| strike and call/put dominance displayed in header. No schema change required.
+- **Pair Scanner:** `_compute_pair_scanner()` calls `db.get_all_expiry_atm_iv_today()`, pivots to (snapshot × expiry) matrix, computes ratio series for every (front, back) pair. Columns: Front, Back, Ratio, Day Chg, Drop%, Rise%, Chart (unicode sparkline), snapshots. Scanner DF computed once, shared by both Pinned Pairs (Section 5) and Pair Scanner (Section 6).
+- **Pinned Pairs:** Persisted in `pinned_pairs.json` (project root). Always visible regardless of filters. Pin via row selection in Scanner. Unpin via row selection in Pinned table.
+- **Unicode sparklines:** `_sparkline()` helper encodes up to 10 sampled ratio values as ▁▂▃▄▅▆▇█ string.
+
+**`db.py`** — Two new read functions added before `update_snapshot_notes`:
+
+- **`get_spx_intraday_today(db_path)`:** Returns `(snapshot_timestamp, underlying_price)` for all COMPLETE snapshots where `snapshot_timestamp >= date('now')` (UTC calendar day). Used for the intraday price chart and open-price daily change reference.
+- **`get_all_expiry_atm_iv_today(db_path)`:** Returns `(snapshot_timestamp, expiry_date, dte, atm_avg_iv)` joining `atm_iv_by_expiry` + `snapshots` for all COMPLETE snapshots today. Used by `_compute_pair_scanner()`. At 5-min polling × 20 expiries × 6.5 market hours ≈ 1,560 rows/day — trivially fast.
+
+Both functions use `date('now')` as the UTC day boundary — no timezone library needed because the collector only runs 13:30–20:00 UTC (within one UTC calendar day).
+
+Module docstring updated to include the two new functions in the reader split.
+
+**`pinned_pairs.json`** — New file written at runtime. Format: `[{"front_expiry": "YYYY-MM-DD", "back_expiry": "YYYY-MM-DD"}, ...]`. Add to `.gitignore` to avoid committing user-specific preferences.
+
+**Why:**
+The primary session goal was a major dashboard restructure that moves from a static pair selector to a live pair scanner — showing all valid (front, back) combinations across today's session and ranking by intraday ratio movement. The scanner answers "what's moving?" without requiring the user to manually try combinations. Pinned Pairs adds persistence so the specific pair under active management stays visible without re-selecting it.
+
+Secondary goals: SPX intraday chart and GEX give market context (where is price relative to the open, what strike has the highest dealer exposure) without leaving the dashboard.
+
+**Schema finding this session:** `gamma` IS stored in `option_rows` — confirmed from `db.py` review. GEX is therefore computable from `chain_df` with zero schema changes. This was discovered live during `db.py` inspection.
+
+**Impact:**
+- Old 2-column layout is gone. Single linear flow eliminates the "scroll left vs scroll right" problem.
+- Historical Stats are now always a fixed 4-window view (Today/5D/10D/20D) rather than period-radio-controlled, giving a stable context strip regardless of chart zoom.
+- The period radio now only controls the IV structure and Calendar Edge charts — a cleaner conceptual split.
+- `db.py` collector write contract is unchanged — no collector.py changes required.
+- `iv_engine.py` unchanged.
+- `pinned_pairs.json` must be added to `.gitignore` to avoid committing pair selections between sessions.
+
+**Open questions / follow-ups:**
+- `pinned_pairs.json` should be added to `.gitignore` manually: `echo "pinned_pairs.json" >> .gitignore && git add .gitignore && git commit -m "ignore pinned pairs json"`.
+- `st.dataframe(on_select="rerun")` requires Streamlit ≥ 1.29. If an older version is installed, pin/unpin buttons will not appear (no crash — the `hasattr(event, "selection")` guard handles it silently). Upgrade with `pip install --upgrade streamlit`.
+- GEX is computed from the latest snapshot chain only (±300pt strike window). This is sufficient for identifying the dominant GEX strike near SPX but does not cover the full SPX open-interest distribution.
+- `_compute_pair_scanner()` has no caching (`@st.cache_data` deliberately omitted). At ~1,560 rows/day the pivot completes in <10ms. If profiling ever shows this as a bottleneck, add `@st.cache_data(ttl=300)`.
+- Net Theta Advantage ($/day) and Days to Risk-Free are still not built — both remain on the Must Have list from the June 23 session. Next build session should add those to Section 9 (Transform Credit).
+
+---
+
 
 ## 2026-06-25 — Audit Pass v1.1: Retracted Regime Favorability, Removed Theta ETA, Fixed Terminology
 
