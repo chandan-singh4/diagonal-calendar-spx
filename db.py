@@ -662,6 +662,7 @@ def get_prior_session_close(db_path: str, session_date: str) -> float | None:
 
 
 
+def get_spx_intraday_today(db_path: str, session_date: str | None = None) -> list:
     """
     SPX price at every COMPLETE snapshot on the given session date.
 
