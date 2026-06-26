@@ -10,33 +10,86 @@ Log every change here. Format:
 **Open questions / follow-ups:** anything left unresolved
 ```
 
+Newest entries at the top.
+
+
+## 2026-06-26 — Dashboard v2 Bug Fixes + Layout Refinements (session closed)
+
+**Changed:**
+
+**`db.py`** — Three new read functions added to the end of the Read Operations section:
+
+- **`get_prior_session_close(db_path, session_date)`** — Returns `underlying_price` from the last COMPLETE snapshot strictly before `session_date`. Used by app.py to compute `daily_change = current_spx − prior_session_close` (≈ yesterday's closing price). Falls back to the first intraday snapshot only when no prior-session data exists (first ever collection day).
+- **`get_spx_intraday_today(db_path, session_date=None)`** — Returns `(snapshot_timestamp, underlying_price)` for all COMPLETE snapshots on `session_date`. Used for the mini intraday sparkline in the header. Parameter is a 'YYYY-MM-DD' string derived from the latest snapshot's own timestamp.
+- **`get_all_expiry_atm_iv_today(db_path, session_date=None)`** — Returns `(snapshot_timestamp, expiry_date, dte, atm_avg_iv)` for all COMPLETE snapshots on `session_date`. Powers the Pair Scanner's intraday IV ratio computation.
+
+**Root-cause fix: `get_spx_intraday_today` missing `def` line.** A prior `str_replace` operation consumed the function definition line while inserting `get_prior_session_close`. The function body was present but the module attribute was invisible to Python. Caught by `AttributeError: module 'db' has no attribute 'get_spx_intraday_today'` on first run. Fixed by restoring the `def` line.
+
+**Root-cause fix: Pair Scanner showing 0 pairs.** Original implementation used SQLite `date('now')` as the session boundary. `date('now')` returns the current UTC calendar day. When the dashboard is opened after market hours or before the next session, the current UTC date has no snapshots, so the scanner returned empty. Fix: derive `session_date = snap_ts_str[:10]` from the latest snapshot's own timestamp (not the UTC clock) and pass it as a parameter to both `get_spx_intraday_today` and `get_all_expiry_atm_iv_today`. Dashboard now always shows the most recent session's data regardless of when it is opened.
+
+**`app.py`** — Major layout revision (v2 final state):
+
+*Daily change fixed:*
+- Previous: `open_price = first intraday snapshot of the day` → `daily_change = current - open`
+- Corrected: `prev_close = db.get_prior_session_close(...)` → `daily_change = current - prev_close` (previous trading session's last COMPLETE snapshot ≈ official close). Reference line in the mini chart updated to say "Prev Close XXXX" instead of "Open XXXX".
+
+*Max Gap moved from Controls Row to Pair Scanner filter row:*
+- Controls Row reduced from 5 columns to 4: Front Expiry, Back Expiry, Call Strike, Put Strike. Max Gap is not a "trade setup" input; it is a scanner filter. Moved to the Pair Scanner filter row alongside Min DTE and Max DTE, consistent with the FLUX reference design.
+
+*Header: mini SPX sparkline embedded:*
+- Full-width SPX Intraday chart removed from main layout.
+- A compact 60px Plotly line chart (no axes, no hover, no mode bar) embedded in the left column of the header row, directly below the SPX price text. Green if positive day, red if negative. Gives quick visual price context without consuming page space.
+
+*IV Structure per Strike promoted to main chart area:*
+- Previously at the bottom (Section 7). Now the first full chart below the Controls Row — the primary "is now a good time to enter?" visual.
+- Shown in a `st.columns([1, 3])` layout: left column = Expiry Detail + Strike Detail, right column = the IV chart.
+
+*Expiry Detail + Strike Detail panel restored:*
+- Present in v1 of the dashboard; removed in the initial v2 rewrite. Brought back.
+- **Expiry Detail:** shows ATM IV % and tick-change (↑/↓ with color) for both front and back expiries. Source: `db.get_latest_atm_iv_snapshots(n=2)`.
+- **Strike Detail:** for each leg, shows `IV → F x.xx% / B x.xx% · Ratio x.xxxx` and `Mark → F $x.xx / B $x.xx`. Dollar mark is the new addition not previously in the v1 layout; sourced from `StrikeContract.mark`.
+
+*Calendar Edge moved up:*
+- Previously the second-to-last section (before Transform Credit). Now sits directly below the 2-column IV chart section, above Historical Statistics and Pair Scanner. Rationale: the ATM IV chart + regime interpretation text is pre-entry macro context; it should be visible before scrolling to the scanner.
+
+*`ts_now` computation moved earlier:*
+- Calendar Edge uses `ts_now` (ATM IV ratio). Historical Stats also uses it. Since Calendar Edge is now above Historical Stats, `ts_now` is computed once right after controls (before both sections). No functional change; just moved to satisfy the new dependency order.
+
+**Final v2 section order (top to bottom):**
+1. Header — SPX price + mini sparkline, pts/% toggle, VIX, Max|GEX| Strike, staleness
+2. Controls Row — Front/Back Expiry, Call/Put Strike (4 cols)
+3. Period radio — Today / 5D / 10D / 20D (controls Sections 3 and 4 charts)
+4. [2-col] Expiry Detail + Strike Detail (left) | Selected-Strike IV chart (right)
+5. Calendar Edge — ATM IV chart, metric strip (Ratio/Front IV/Back IV/IV Index), day-change metrics
+6. Historical Statistics — Today / 5D / 10D / 20D ratio range bars
+7. Pinned Pairs — persistent watchlist from `pinned_pairs.json`
+8. Pair Scanner — Min DTE / Max DTE / Max Gap / Rescan; table sorted by Drop% ascending
+9. Transform Credit — Trade Quality Score (placeholder pending Phase 3)
+
+**Why:**
+The v2 rewrite was delivered in one session, then iteratively corrected across multiple feedback cycles:
+1. Scanner empty → `session_date` fix (fundamental design error: relying on UTC clock instead of snapshot's own date)
+2. `def` line missing → pure `str_replace` tooling error (old_str consumed the first line of the next function)
+3. Daily change wrong → prior session close is the correct reference, not the first intraday snapshot
+4. Max Gap location → user flagged against the FLUX reference design
+5. Mini chart, Expiry/Strike Detail → user flagged against the previous v1 dashboard's feature set
+
+**Impact:**
+- Dashboard v2 is now closed at this feature set. No further changes planned until v3.
+- `pinned_pairs.json` must remain in `.gitignore` (user preference data, not code).
+- `collector.py` and `iv_engine.py` were not touched in this session.
+- All `db.py` new functions are pure reads; the writer/reader split is preserved.
+
+**Open questions / follow-ups (carry to v3):**
+- `trades` table + trade logging not yet implemented (approved in DOCUMENTATION.md §10.1 — build task for v3).
+- Net Theta Advantage ($/day) and Days to Risk-Free are still placeholders in Transform Credit — Phase 3.
+- Live transform threshold (~$6.50–$7.00) still needs calibration from real fills.
+- GEX computation uses ±300pt strike window (collector's fetch width), not the full SPX open-interest distribution. Good enough for identifying the dominant strike near spot; not a complete GEX surface.
+- `st.dataframe(on_select="rerun")` requires Streamlit ≥ 1.29. If pin/unpin buttons don't appear, upgrade Streamlit.
+
+
 ---
 
-## HOW TO START A NEW CHAT SESSION IF REPO IS PRIVATE
-*(Read this every time before opening a new Claude chat)*
-
-1. **Push any unsaved local changes first:**
-   ```bash
-   git add .
-   git commit -m "brief description of what changed"
-   git push
-   ```
-2. **Open a new Claude chat under the same Project.**
-3. **Paste the full contents of this DEV_JOURNAL.md** into the first message.
-   - This is the single file that tells Claude everything: what's been built,
-     what bugs were fixed, what decisions were made, and what's next.
-   - The repo is private so Claude cannot fetch it directly — pasting the journal
-     is the handshake that gets Claude up to speed instantly.
-4. **If Claude needs to see a specific file** (e.g. to debug app.py), paste that
-   file's contents into the chat on request. No need to paste all files upfront.
-5. **At the end of each session**, push again before closing the chat so the
-   journal and any changed files are always current on GitHub.
-
-GitHub repo: https://github.com/chandan-singh4/diagonal-calendar-spx
-Primary branch: main
-Local path: wherever your spx-diagonal-dashboard folder lives (parent folder contains .venv)
-
---Newest entries starts from here--
 
 ## 2026-06-25 — Dashboard v2: Pair Scanner, Pinned Pairs, SPX Intraday Chart, GEX, Layout Reorganization
 
@@ -98,8 +151,34 @@ Secondary goals: SPX intraday chart and GEX give market context (where is price 
 - `_compute_pair_scanner()` has no caching (`@st.cache_data` deliberately omitted). At ~1,560 rows/day the pivot completes in <10ms. If profiling ever shows this as a bottleneck, add `@st.cache_data(ttl=300)`.
 - Net Theta Advantage ($/day) and Days to Risk-Free are still not built — both remain on the Must Have list from the June 23 session. Next build session should add those to Section 9 (Transform Credit).
 
+
 ---
 
+---
+
+## HOW TO START A NEW CHAT SESSION IF REPO IS PRIVATE
+*(Read this every time before opening a new Claude chat)*
+
+1. **Push any unsaved local changes first:**
+   ```bash
+   git add .
+   git commit -m "brief description of what changed"
+   git push
+   ```
+2. **Open a new Claude chat under the same Project.**
+3. **Paste the full contents of this DEV_JOURNAL.md** into the first message.
+   - This is the single file that tells Claude everything: what's been built,
+     what bugs were fixed, what decisions were made, and what's next.
+   - The repo is private so Claude cannot fetch it directly — pasting the journal
+     is the handshake that gets Claude up to speed instantly.
+4. **If Claude needs to see a specific file** (e.g. to debug app.py), paste that
+   file's contents into the chat on request. No need to paste all files upfront.
+5. **At the end of each session**, push again before closing the chat so the
+   journal and any changed files are always current on GitHub.
+
+GitHub repo: https://github.com/chandan-singh4/diagonal-calendar-spx
+Primary branch: main
+Local path: wherever your spx-diagonal-dashboard folder lives (parent folder contains .venv)
 
 ## 2026-06-25 — Audit Pass v1.1: Retracted Regime Favorability, Removed Theta ETA, Fixed Terminology
 

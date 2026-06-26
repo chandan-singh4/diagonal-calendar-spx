@@ -36,6 +36,7 @@
 |---------|------|--------|--------------------|
 | 1.0 | 2026-06-25 | Chandan Singh | Initial documentation through Dashboard v1 (IV Structure, Calendar Edge, Transform Credit panels). |
 | 1.1 | 2026-06-25 | Chandan Singh | **Critical audit corrections.** (1) Retracted the claim that IV ratio < 1.0 is "favorable" / "maximizes transformation credit" — it rested on a single paper trade and Black-Scholes analysis suggests the reverse; demoted to an unvalidated `HYPOTHESIS` with neutral framing. (2) Fixed inverted/contango terminology to standard conventions. (3) Corrected the transformation workflow (keep shorts, close backs, add front-expiry wings). (4) Fixed expiry collection (20 expirations by count, not within 20 DTE). (5) Reframed 100-pt strike width as an example, not a rule. (6) Removed the Theta ETA metric (assumption-based). (7) "Risk-free" → "risk-reduced." (8) Flagged Greeks-sign, Trade-Quality-direction, liquidity-threshold, and IV-Index claims as unvalidated. (9) Added approved trade-logging schema to the roadmap as the validation mechanism. Authority statement softened to exclude HYPOTHESIS blocks. |
+| 1.2 | 2026-06-26 | Chandan Singh | **Dashboard v2 — complete layout rewrite.** (1) Replaced single-pair static layout with a Pair Scanner showing all valid (front, back) expiry combinations from the current session, ranked by intraday Drop%. (2) Added Pinned Pairs persistent watchlist (`pinned_pairs.json`). (3) Added GEX display (Max \|Net GEX\| strike + call/put dominated) computed from `option_rows.gamma` — no schema change required. (4) SPX daily change corrected to use prior session's last COMPLETE snapshot (`get_prior_session_close`) rather than the first intraday snapshot. (5) Mini SPX intraday sparkline embedded in the header. (6) Expiry Detail + Strike Detail panel restored (ATM IV + tick-change per expiry; per-leg IV + mark price at selected strikes). (7) Calendar Edge moved above Historical Statistics — now immediately follows the IV chart. (8) Max Gap filter moved from Controls Row to the Pair Scanner filter row. (9) Three new DB read functions added: `get_prior_session_close`, `get_spx_intraday_today`, `get_all_expiry_atm_iv_today`. (10) Section 5 of this document fully rewritten for v2. |
 
 ---
 
@@ -253,81 +254,135 @@ Minimum Transform Credit at which transformation is considered viable. **$5.00 p
 
 ## 5. Dashboard Reference
 
-### 5.1 Header Strip
-SPX price, VIX, data-staleness indicator, snapshot timestamp, refresh rate.
-Source: `snapshots.underlying_price`, `snapshots.vix_value`, `snapshots.snapshot_timestamp`.
-Staleness: 🟢 <10 min, 🟡 10–60 min, 🔴 >60 min. **Limitation:** values are as of the last snapshot, not truly real-time.
+> **Version note:** this section describes Dashboard v2 (current). The v1 layout (two-column with sidebar panels) is retired. The v2 layout is a single linear flow — all sections are full-width or use an explicit 2-column split.
 
-### 5.2 Selector Row
-Front expiry, back expiry, call strike, put strike. Same call strike applies to both front and back call legs; same for puts. Defaults are convenience values, **not recommendations** (see §3.1 Strike Selection).
+### 5.1 Header
 
-### 5.3 IV Structure Panel
-Per-strike IV ratio + **neutral** regime label + 30-minute sparkline, for call and put sides independently.
+| Element | Source | Notes |
+|---------|--------|-------|
+| SPX price | `snapshots.underlying_price` | Latest COMPLETE snapshot |
+| Daily change (pts or %) | `current − get_prior_session_close()` | Previous session's last COMPLETE snapshot ≈ official close. Toggle between points and % with the pts↔% button. Falls back to first intraday snapshot if no prior-session data exists. |
+| Mini sparkline | `get_spx_intraday_today()` | 60px Plotly chart, no axes, green/red line, embedded in the SPX price column. |
+| VIX | `snapshots.vix_value` | |
+| Max \|GEX\| Strike | Computed from `option_rows.gamma × option_rows.open_interest × 100 × SPX_price × ±1` | Aggregated by strike across all expirations in the chain. Shows the strike with largest absolute net GEX and whether it is call-dominated or put-dominated. Computed from the ±300pt strike window only. |
+| Staleness | `(now − snapshot_timestamp).seconds` | 🟢 <10 min, 🟡 10–60 min, 🔴 >60 min |
 
-| Element | Formula | Source |
+### 5.2 Controls Row
+
+Four columns: **Front Expiry**, **Back Expiry**, **Call Strike**, **Put Strike**.
+
+Same call/put strike applies to both front and back legs. Defaults are convenience values, not recommendations. A brief per-leg summary line appears below the controls: `IV → F x.xx% / B x.xx% · Ratio x.xxxx`.
+
+> **Max Gap is not here.** It lives in the Pair Scanner filter row (§5.8). It is a scanner parameter, not a trade-setup parameter.
+
+### 5.3 Period Radio
+
+Range selector: **Today / 5D / 10D / 20D**. Controls the time window for both the Selected-Strike IV chart (§5.4) and the Calendar Edge ATM chart (§5.5). Historical Statistics (§5.6) always displays all four windows independently and is not affected by this control.
+
+### 5.4 Expiry Detail + Strike Detail / Selected-Strike IV Chart
+
+Two-column section (`[1, 3]` ratio).
+
+**Left — Expiry Detail:**
+
+For each of Front and Back expiry:
+- ATM IV % (large, prominent)
+- Tick change ↑/↓ vs previous snapshot, color-coded green/red
+
+Source: `db.get_latest_atm_iv_snapshots(n=2)` → `atm_iv_by_expiry.atm_avg_iv × 100`.
+
+**Left — Strike Detail:**
+
+For each leg (Call, Put):
+
+| Row | Formula | Source |
+|-----|---------|--------|
+| `IV → F x.xx% / B x.xx%` | `option_rows.iv × 100` for front and back | Front IV / Back IV at the selected strike |
+| `Ratio x.xxxx` | `Front_IV / Back_IV` | Dimensionless |
+| `Mark → F $x.xx / B $x.xx` | `StrikeContract.mark` (`option_rows.mark`, fallback `(bid+ask)/2`) | Dollar mid-price per contract |
+
+**Right — Selected-Strike IV Chart:**
+
+Dual-axis Plotly chart showing:
+- Front IV % (solid green), Back IV % (solid blue) for the call strike — left Y axis
+- Call IV Ratio F/B (solid red) — right Y axis
+- Put legs as dotted lines of the same colors
+- Blank until per-strike history exists in `option_rows` at those specific strikes
+
+Source: `db.get_contract_iv_history()` over `period_days`.
+
+### 5.5 Calendar Edge
+
+Full-width section. The ATM IV chart — macro context for the overall term-structure shape, distinct from the specific-strike view in §5.4.
+
+**Metric strip (4 columns):**
+- ATM IV Ratio (F/B)
+- Front ATM IV %
+- Back ATM IV %
+- IV Index (mean of per-expiry mean IVs — informational; see §9 limitation)
+
+**Interpret-curve text box:** neutral description of the term-structure shape (backwardation / flat / contango) with no favorability claim.
+
+**ATM IV chart:** `atm_iv_by_expiry.atm_avg_iv × 100` for front and back expiry over `period_days`, plus IV Ratio on the right axis.
+
+**Day-change strip (2 columns):** `st.metric` for Front and Back ATM IV showing latest value and the per-snapshot tick change.
+
+> **Known limitation:** ATM ratio is unreliable near EOD when a 0DTE expiry expires and the nearest-strike reference shifts. Prefer the per-strike view (§5.4) in the final hour.
+
+### 5.6 Historical Statistics
+
+Always shows **Today / 5 Days / 10 Days / 20 Days** — four range bars, one per column. Not controlled by the period radio.
+
+Each bar shows: `[low ──●── high]` where ● is the current ATM IV ratio position within the range. Formula: `(current − low) / (high − low) × 100` (see §6.10). **Descriptive only** — a position near an extreme is not labeled good or bad.
+
+Source: `db.get_atm_iv_history()` for front and back, merged on timestamp, ratio computed in-app.
+
+### 5.7 Pinned Pairs
+
+Persistent watchlist of specific (front, back) expiry pairs. Stored in `pinned_pairs.json` in the project root (`pinned_pairs.json` must be in `.gitignore`).
+
+Displayed from the same scanner DataFrame as §5.8 — no additional DB query. Always shown regardless of the DTE/gap filters active in the Pair Scanner. If a pinned pair's expiry has lapsed, it is silently omitted from the table.
+
+**Pin:** select rows in the Pair Scanner (§5.8) → click "Pin N New."  
+**Unpin:** select rows in this table → click "Unpin N Selected."
+
+### 5.8 Pair Scanner
+
+All valid (front, back) expiry combinations from the current session's `atm_iv_by_expiry` data, computed via `_compute_pair_scanner(session_date)` which pivots the session's ATM IV rows into a (timestamp × expiry) matrix.
+
+**Filter row:** Min DTE | Max DTE | **Max Gap (days)** | Rescan button.
+
+- **Max Gap:** maximum calendar days between front and back expiry dates. Mon→Tue = 1 day. Fri→Mon = 3 days. Default 1.
+- Rescan button forces a fresh re-read from the DB.
+
+**Table columns:**
+
+| Column | Definition |
+|--------|-----------|
+| Front | Front expiry date + DTE |
+| Back | Back expiry date + DTE |
+| Ratio | Current `Front_ATM_IV / Back_ATM_IV` for this session |
+| Day Chg | Ratio change from first to last snapshot of the session |
+| Drop% | `(current − session_high) / session_high × 100` ≤ 0 |
+| Rise% | `(current − session_low) / session_low × 100` ≥ 0 |
+| Chart | Unicode bar sparkline of the ratio series (▁▂▃▄▅▆▇█), 10 sampled points |
+
+Default sort: Drop% ascending (biggest intraday drop first). Click any column header to re-sort client-side.
+
+> **Session boundary:** `session_date = snap_ts_str[:10]` — the date of the latest snapshot, not the current UTC clock. This ensures the scanner populates after market hours without returning 0 rows.
+
+### 5.9 Transform Credit
+
+Bottom panel. Placeholder pending Phase 3.
+
+| Element | Formula | Status |
 |---------|---------|--------|
-| IV Ratio | `Front_Strike_IV / Back_Strike_IV` | `option_rows.iv × 100` |
-| Regime label | Neutral descriptor (below) | `_neutral_regime()` in app.py |
-| Front/Back IV % | `option_rows.iv × 100` | `option_rows` |
-| 30-min sparkline | Ratio history, last 30 min | `option_rows` via `db.get_contract_iv_history()` |
+| Overall Score | `0.45×IV_Edge_Pct + 0.30×Liquidity + 0.25×Theta_Adv` | Non-authoritative (§5.10 caveat applies) |
+| IV Edge (percentile) | Percentile rank of current ATM ratio vs `period_days` history | Direction unvalidated — see §9.4 |
+| Liquidity | `min(Vol/500,1)×50 + min(OI/2000,1)×50` | Thresholds unvalidated — see §6.7 |
+| Theta Adv. | 50 (fixed placeholder) | Will be `Net Theta Advantage` in Phase 3 |
 
-**Neutral regime labels (v1.1 — no good/bad encoding):**
-
-| IV Ratio | Label | Standard term |
-|----------|-------|---------------|
-| ≥ 1.10 | FRONT-ELEVATED ↑↑ | strong backwardation |
-| 1.02–1.10 | FRONT-ELEVATED ↑ | backwardation |
-| 0.98–1.02 | FLAT | flat |
-| 0.90–0.98 | BACK-ELEVATED ↓ | contango |
-| < 0.90 | BACK-ELEVATED ↓↓ | strong contango |
-
-Colors are non-valenced accents (periwinkle / slate-teal / grey). **No regime is colored as good or bad.**
-
-**Limitations:** nearest-strike fallback if the exact strike is absent (with a warning); sparkline shows "30m history building..." until ≥2 matching timestamps exist.
-
-### 5.4 Calendar Edge Panel
-Per-side `Front_IV − Back_IV` with a neutral directional label and today's trend sparkline. Positive = front-elevated; negative = back-elevated. **No favorability implied.** Separating call and put sides surfaces asymmetric structure. Sparkline color is the same neutral accent as the value.
-
-### 5.5 Transform Credit Panel
-Primary monitoring tool. Inputs (sidebar): Entry Debit, Transform Threshold (persist in session; reset per trade).
-
-Calculation: `Back_Legs_Value − Close_Cost − Entry_Debit` (see §6.5).
-Sources: back legs use `option_rows.mark` (fallback `(bid+ask)/2`); front legs use `option_rows.ask` (true cost to buy back shorts).
-
-Status icons (these ARE valenced — they track realized dollar profit vs. a dollar threshold, which is legitimately good/bad, unlike the IV regime):
-- ✅ green: Credit ≥ Threshold
-- ⏳ amber: 0 < Credit < Threshold
-- ⛔ red: Credit ≤ 0
-
-> **Theta ETA REMOVED (v1.1).** The previous rough "time to threshold" estimate (`close_cost / front_dte × 6.5`) ignored back-leg theta, vega, delta, and gamma. It is removed per the audit. A proper time-to-viability metric is deferred to Phase 3, to be built from stored per-leg Greeks.
-
-**Limitations:** mid-price marks may overstate back-leg exit value; theoretical credit excludes slippage (§9.1).
-
-### 5.6 ATM Term Structure Strip
-ATM IV ratio (floating nearest strike), front/back ATM IV %, IV Index, and a **neutral** ATM regime badge.
-
-> **IV Index — flagged (v1.1):** mean of per-expiry mean IV. Its value for either decision gate is **unestablished**; candidate for removal under §8.1. Treat as general context only.
-
-**Known limitation:** ATM ratio is unreliable near EOD when 0DTE options expire and the nearest-strike reference shifts. Prefer the per-strike IV Structure panel in the final hour.
-
-### 5.7 Selected-Strike IV Chart
-Front/back IV and ratio at the chosen strikes over the selected range. Source: `db.get_contract_iv_history()`. Blank until matching history exists.
-
-### 5.8 ATM IV Chart
-Floating-ATM front/back IV and ratio (macro context). Source: `atm_iv_by_expiry.atm_avg_iv × 100`.
-
-### 5.9 Historical Range Stats
-Five range bars (Today/5D/10D/15D/1M) showing where the current ATM ratio sits within each period's range. Position formula in §6.10. **Descriptive only** — a position near an extreme is not labeled good or bad.
-
-### 5.10 Trade Quality Score
-> **Direction flagged as unresolved (v1.1).** Because regime favorability is unvalidated (§3.1), the IV-ratio percentile component **has no justified direction**. The composite previously rewarded higher ratio, contradicting v1.0's own (now-retracted) favorability claim.
->
-> **Current treatment:** the three components are shown but the IV component should be read as **neutral context, not a score input**, consistent with §8.3's rejection of composite scores. Net Theta Advantage is a Phase-3 placeholder. Do not use the overall number as an entry trigger.
-
-Liquidity component: `min(Volume/500,1)×50 + min(OI/2000,1)×50` — thresholds are **estimates, not calibrated** (§6.7).
-
-### 5.11 Options Chain Table
-Front-expiry chain reference: strike, side, bid, ask, mark, iv (×100), volume, OI, delta, dte. Sorted by strike then side.
+Full transform credit calculator (back-leg value − wing cost − entry debit) deferred to Phase 3 once per-leg Greeks are confirmed reliable.
 
 ---
 
@@ -408,16 +463,25 @@ app.py (Streamlit; pure reader; analytics in iv_engine.py)
 
 **`snapshots`** — one row per collection cycle: `snapshot_id` (PK), `snapshot_timestamp` (UTC ISO8601), `underlying_price`, `vix_value`.
 
-**`option_rows`** — one row per contract per snapshot: `snapshot_id` (FK), `expiry_date`, `strike`, `right` ('C'/'P'), `bid`, `ask`, `mark`, `iv` (**decimal** — ×100 for display), `volume`, `open_interest`, `delta`, `dte`, `time_value`, `intrinsic_value`.
+**`option_rows`** — one row per contract per snapshot: `snapshot_id` (FK), `expiry_date`, `strike`, `right` ('C'/'P'), `bid`, `ask`, `mark`, `iv` (**decimal** — ×100 for display), `volume`, `open_interest`, `delta`, **`gamma`** (stored; used for GEX computation in app.py), `theta`, `vega`, `dte`, `time_value`, `intrinsic_value`.
 Critical index: `idx_option_rows_contract_snap` on `(expiry_date, strike, right, snapshot_id)`.
 
 **`atm_iv_by_expiry`** — `snapshot_id` (FK), `expiry_date`, `atm_call_iv`, `atm_put_iv`, `atm_avg_iv` (all **decimal**).
 
 **`collection_gaps`** — `gap_start`, `gap_end`, `gap_seconds`, `reason`.
 
+**`pinned_pairs.json`** — not a DB table; a JSON file in the project root managed by `app.py`. Format: `[{"front_expiry": "YYYY-MM-DD", "back_expiry": "YYYY-MM-DD"}, ...]`. Must be in `.gitignore`.
+
 > **Planned (v1.1):** a `trades` table for the validation mechanism — see §10.1.
 
 **IV scale rule:** every IV column is stored as a decimal. `app.py` multiplies ×100 at the load boundary; `iv_engine.py` functions always receive percentage-form IV.
+
+**New read functions added in v1.2:**
+- `get_prior_session_close(db_path, session_date)` — last COMPLETE snapshot price before `session_date`; used for SPX daily change.
+- `get_spx_intraday_today(db_path, session_date)` — intraday SPX price series for the current session.
+- `get_all_expiry_atm_iv_today(db_path, session_date)` — ATM IV for all expiries across the session; powers the Pair Scanner pivot.
+
+All three use `session_date = snap_ts_str[:10]` (date of latest snapshot) rather than `date('now')`, so they return data regardless of when the dashboard is opened.
 
 ### 7.3 Data Lineage Examples
 
@@ -446,8 +510,8 @@ Every metric must serve one of the two decisions (§2.1) or be validated context
 - **Regime favorability coloring (removed v1.1):** green/red good-bad encoding implied a validated edge that does not exist.
 
 ### 8.4 Must Have / Nice To Have / Do Not Build
-**Must Have (built):** per-strike IV ratio with neutral regime label; per-side calendar edge; Transform Credit with leg breakdown; ATM term-structure strip; historical range stats; chain table.
-**Must Have (planned):** Net Theta Advantage ($/day, Phase 3); proper time-to-viability (Phase 3); `trades` logging + favorability validation (§10.1).
+**Must Have (built in v1–v2):** per-strike IV ratio with neutral regime label; selected-strike IV chart; ATM Calendar Edge chart; Expiry Detail + Strike Detail panel (ATM IV per expiry + per-leg IV and mark price); Pair Scanner (all valid front/back pairs from current session, intraday Drop%/Rise%/sparkline); Pinned Pairs watchlist; GEX (max |net GEX| strike + dominance); SPX daily change vs prior session close; mini intraday SPX sparkline; Historical range stats (Today/5D/10D/20D); Transform Credit scaffold.
+**Must Have (planned — v3):** Net Theta Advantage ($/day, Phase 3); proper time-to-viability (Phase 3); `trades` logging + favorability validation (§10.1).
 **Nice To Have:** payoff diagrams; IV percentile with adequate history; mean-reversion estimate (in engine, not surfaced).
 **Do Not Build:** composite Transformation Score; automatic event triggering; SaaS/multi-user; in-dashboard execution; **valenced regime coloring until favorability is validated.**
 
@@ -536,4 +600,4 @@ Analysis enabled once ~20+ trades exist: correlate `entry_*_ratio` with `outcome
 
 ---
 
-*End of DOCUMENTATION.md — Version 1.1 — 2026-06-25*
+*End of DOCUMENTATION.md — Version 1.2 — 2026-06-26*
