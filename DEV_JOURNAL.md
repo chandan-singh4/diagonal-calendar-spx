@@ -40,7 +40,48 @@ Local path: wherever your spx-diagonal-dashboard folder lives (parent folder con
 Newest entries begins from here - 
 
 
-## 2026-06-26 — v3 follow-up: smooth multi-day IV charts (collapse non-trading time)
+## 2026-06-26 — v3 follow-up 2: continuous multi-day line (drop NaN breaks, collapse holidays)
+
+**Request:** After the rangebreaks fix, the 5D view looked right but showed a small break
+between each session's close and the next session's open. Make the line continuous.
+
+**Changed (all in `app.py`, charts only):**
+
+1. **Removed `_session_breaks()` and all three calls** (`atm_merged`, `cm`, `pm`). That
+   helper inserted a NaN between sessions specifically to break the line; removing it lets
+   the line connect across the gap. Because `_SESSION_RANGEBREAKS` already collapses the
+   empty time, the across-session connector is a short continuous segment, not a long
+   diagonal — so the result is one continuous, smooth line.
+
+2. **Added holidays to `_SESSION_RANGEBREAKS`:** `dict(values=sorted(config.MARKET_HOLIDAYS))`.
+   Now that sessions are joined, a holiday sitting inside a 10D/20D window would otherwise
+   reintroduce a diagonal (the line would connect across a data-less weekday that
+   rangebreaks didn't collapse). Collapsing full-day holidays keeps that connector short
+   too. Weekends, overnight, and holidays are now all collapsed; the line is continuous
+   across every one of them.
+
+3. **Reverted the `.dropna()`** on the `sample_size_warning` call — no NaN breakers are
+   inserted anymore, so it's back to the original `atm_merged["iv_ratio"]`.
+
+**Net effect:** Continuous line across sessions on all multi-day views; "Today" view
+unchanged. All expected non-trading time (weekend/overnight/holiday) collapsed, so no
+diagonal ramps anywhere.
+
+**Impact:** Pure charting change. No DB, schema, collector, or `iv_engine` math touched.
+`config.MARKET_HOLIDAYS` is now consumed by the dashboard for the first time (previously
+collector-only); confirmed it loads as a 9-element set of 'YYYY-MM-DD' strings, which is
+the exact format Plotly `rangebreaks.values` expects. `python -m py_compile` clean.
+
+**Known residual edge case (intentional):** A *mid-session* collector outage (data hole
+during 9:30–16:00 that isn't a holiday) is neither broken nor collapsed, so it would draw
+a straight connector across the hole. This is rare and arguably useful as a visible
+data-quality signal. If it ever becomes a nuisance, reintroduce a high-threshold
+gap-break (e.g. only break holes > 60 min) — but that reopens the break-vs-join tradeoff,
+so left as-is for now.
+
+---
+
+
 
 **Problem (from review):** On 5D/10D/20D views, the Calendar Edge and Selected-Strike
 IV charts drew long diagonal lines between sessions. Cause: the collector is offline
