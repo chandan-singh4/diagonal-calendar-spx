@@ -76,6 +76,16 @@ PINNED_PAIRS_FILE = Path(__file__).parent / "pinned_pairs.json"
 _SPARK_BARS = "▁▂▃▄▅▆▇█"
 _TABLE_DISPLAY_COLS = ["Front", "Back", "Ratio", "Day Chg", "Drop%", "Rise%", "Chart"]
 
+# Collapse non-trading time on multi-day time-series charts so sessions sit
+# adjacent instead of being separated by huge empty overnight/weekend bands.
+# Bounds are in DISPLAY_TIMEZONE (America/New_York), so they are DST-safe.
+#   - weekends:  Sat 00:00 → Mon 00:00
+#   - overnight: 16:00 → 09:30 ET each trading day
+_SESSION_RANGEBREAKS = [
+    dict(bounds=["sat", "mon"]),
+    dict(bounds=[16, 9.5], pattern="hour"),
+]
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper — pinned pairs persistence
@@ -117,6 +127,34 @@ def _sparkline(values: list[float], width: int = 10) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper — ATM IV history
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _session_breaks(df: pd.DataFrame, ts_col: str = "timestamp",
+                    max_gap_minutes: int = 30) -> pd.DataFrame:
+    """Insert NaN rows where the time gap between consecutive points exceeds
+    ``max_gap_minutes``. This makes Plotly *break* the line across overnight,
+    weekend, holiday, or collector-outage gaps instead of drawing one long
+    diagonal connector. Normal intraday polling tops out at 5 min, so a 30-min
+    threshold never breaks a continuous session. Combined with
+    ``_SESSION_RANGEBREAKS`` (which collapses the empty time), each session
+    renders as a clean, uniform segment.
+    """
+    if df.empty or len(df) < 2:
+        return df
+    df = df.sort_values(ts_col).reset_index(drop=True)
+    gap = df[ts_col].diff() > pd.Timedelta(minutes=max_gap_minutes)
+    if not gap.any():
+        return df
+    value_cols = [c for c in df.columns if c != ts_col]
+    prev_ts = (df[ts_col].shift(1)[gap] + pd.Timedelta(minutes=1)).reset_index(drop=True)
+    breakers = pd.DataFrame({ts_col: prev_ts})
+    for c in value_cols:
+        breakers[c] = float("nan")
+    return (
+        pd.concat([df, breakers], ignore_index=True)
+        .sort_values(ts_col)
+        .reset_index(drop=True)
+    )
+
 
 def _load_atm_hist(expiry: str, days: int) -> pd.DataFrame:
     rows = db.get_atm_iv_history(config.DB_PATH, expiry, days)
@@ -663,6 +701,7 @@ with right_col:
                     on="timestamp", how="inner",
                 )
                 cm["call_ratio"] = cm["f_call"] / cm["b_call"]
+                cm = _session_breaks(cm)
                 fig_str.add_trace(go.Scatter(x=cm["timestamp"], y=cm["f_call"],
                     name=f"Front {call_strike:.0f}C",
                     line=dict(color="#2ecc71", width=1.5), yaxis="y1"))
@@ -680,6 +719,7 @@ with right_col:
                     on="timestamp", how="inner",
                 )
                 pm["put_ratio"] = pm["f_put"] / pm["b_put"]
+                pm = _session_breaks(pm)
                 fig_str.add_trace(go.Scatter(x=pm["timestamp"], y=pm["f_put"],
                     name=f"Front {put_strike:.0f}P",
                     line=dict(color="#2ecc71", width=1.5, dash="dot"), yaxis="y1"))
@@ -693,6 +733,7 @@ with right_col:
             fig_str.update_layout(
                 height=360,
                 margin=dict(l=20, r=20, t=10, b=20),
+                xaxis=dict(rangebreaks=_SESSION_RANGEBREAKS),
                 yaxis=dict(title="IV %", side="left"),
                 yaxis2=dict(title="Ratio", side="right", overlaying="y", showgrid=False),
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
@@ -746,6 +787,7 @@ if not front_hist.empty and not back_hist.empty:
     atm_merged["iv_ratio"] = atm_merged["front_iv"] / atm_merged["back_iv"]
 
 if not atm_merged.empty:
+    atm_merged = _session_breaks(atm_merged)
     fig_atm = go.Figure()
     fig_atm.add_trace(go.Scatter(x=atm_merged["timestamp"], y=atm_merged["front_iv"],
         name="Front ATM IV", line=dict(color="#2ecc71", width=1.5), yaxis="y1"))
@@ -756,6 +798,7 @@ if not atm_merged.empty:
     fig_atm.update_layout(
         height=300,
         margin=dict(l=20, r=20, t=10, b=20),
+        xaxis=dict(rangebreaks=_SESSION_RANGEBREAKS),
         yaxis=dict(title="IV %", side="left"),
         yaxis2=dict(title="Ratio", side="right", overlaying="y", showgrid=False),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
@@ -763,7 +806,7 @@ if not atm_merged.empty:
     )
     st.plotly_chart(fig_atm, use_container_width=True)
 
-    samp_warn = iv_engine.sample_size_warning(atm_merged["iv_ratio"])
+    samp_warn = iv_engine.sample_size_warning(atm_merged["iv_ratio"].dropna())
     if samp_warn:
         st.warning(samp_warn)
 else:

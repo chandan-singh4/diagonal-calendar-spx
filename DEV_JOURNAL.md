@@ -40,7 +40,65 @@ Local path: wherever your spx-diagonal-dashboard folder lives (parent folder con
 Newest entries begins from here - 
 
 
-## 2026-06-26 — Dashboard v3: layout compaction + header/expiry/selector refinements
+## 2026-06-26 — v3 follow-up: smooth multi-day IV charts (collapse non-trading time)
+
+**Problem (from review):** On 5D/10D/20D views, the Calendar Edge and Selected-Strike
+IV charts drew long diagonal lines between sessions. Cause: the collector is offline
+outside 9:30–16:00 ET, so there are no points overnight/weekends; Plotly connected the
+last point of one session straight across the empty hours to the first point of the next.
+The dead time also consumed huge horizontal space ("time is huge on a scale"). "Today"
+view looked fine because it is a single continuous session.
+
+**Changed (all in `app.py`, charts only):**
+
+1. **`_SESSION_RANGEBREAKS` constant** — Plotly `xaxis.rangebreaks` that collapse
+   non-trading time: weekends (`bounds=["sat","mon"]`) and overnight
+   (`bounds=[16, 9.5], pattern="hour"`). Bounds are in `DISPLAY_TIMEZONE`
+   (America/New_York), so they are DST-safe. Applied to both the Selected-Strike IV
+   chart (`fig_str`) and the Calendar Edge chart (`fig_atm`).
+
+2. **`_session_breaks()` helper** — Inserts a single NaN row wherever the gap between
+   consecutive points exceeds 30 min, so Plotly *breaks* the line across
+   overnight/weekend/holiday/outage gaps instead of connecting them. Normal intraday
+   polling tops out at 5 min (`POLL_INTERVAL_NORMAL=300`), so a continuous session is
+   never broken. Applied to `atm_merged` (Calendar Edge) and to `cm`/`pm`
+   (Selected-Strike calls/puts) right before plotting.
+
+   Implementation note: the breaker timestamps must stay tz-aware — using
+   `Series.values` strips the timezone and makes the subsequent `sort_values` raise
+   "Cannot compare tz-naive and tz-aware". Fixed by keeping the tz-aware Series
+   (`.shift(1)[gap] + 1min`) instead of `.values`.
+
+3. **`sample_size_warning`** now receives `atm_merged["iv_ratio"].dropna()` so the
+   inserted NaN breakers don't inflate the sample count.
+
+**Net effect:** Within a session the line is continuous and smooth (unchanged from
+before). Between sessions the line breaks cleanly and the empty time is collapsed, so
+days sit adjacent — no diagonal ramps, no giant empty bands. "Today" view is
+pixel-identical (no gaps to break, nothing outside one session to collapse).
+
+**Why this approach over alternatives:** NaN-only would have left big blank vertical
+bands (still "huge on scale"). Rangebreaks-only would leave short connectors that can
+misread as smooth overnight moves and would still draw a diagonal across a holiday with
+no data. Combining the two is robust to weekends, holidays, and collector outages alike
+without hardcoding the holiday calendar.
+
+**Impact:** Pure charting change. No DB, schema, collector, or `iv_engine` math touched.
+Logic validated on a synthetic two-session series (correct breaker count/placement,
+no within-session breaks, single-session input unchanged, dropna count intact).
+`python -m py_compile` clean.
+
+**Open questions / follow-ups:**
+- 30-min break threshold is a constant in `_session_breaks`. If a future high-resolution
+  mode ever polls slower than 30 min midday it would false-break; not a concern at
+  current intervals.
+- `MARKET_HOLIDAYS` exists in `config.py` but is intentionally *not* wired into
+  rangebreaks — the gap-break handles holidays generically. Could switch to explicit
+  holiday `values` rangebreaks later if a fully gapless axis is preferred.
+
+---
+
+
 
 **Changed (all in `app.py`):**
 
