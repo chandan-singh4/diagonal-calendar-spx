@@ -741,3 +741,340 @@ def update_snapshot_notes(db_path: str, snapshot_id: int, notes: str) -> None:
             "UPDATE snapshots SET notes = ? WHERE snapshot_id = ?",
             (notes, snapshot_id)
         )
+
+"""
+APPEND THIS ENTIRE FILE TO THE BOTTOM OF db.py
+───────────────────────────────────────────────
+Adds the trades table, all CRUD operations, live IC mark-price queries,
+and the T-001 seed record.  All new functions follow the same conventions
+as the rest of db.py (managed_conn, _utcnow, logger).
+"""
+
+import json as _json  # local alias — only used in seed_t001
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Trades Table DDL
+# ─────────────────────────────────────────────────────────────────────────────
+
+_TRADES_DDL = """
+-- ── trades ────────────────────────────────────────────────────────────────────
+-- One row per Diagonal Calendar → Iron Condor trade.
+-- All monetary values stored per-share unless suffixed _contract.
+-- Leg data stored as JSON arrays so the schema stays flat.
+CREATE TABLE IF NOT EXISTS trades (
+    trade_id               TEXT    PRIMARY KEY,
+    entry_date             TEXT    NOT NULL,      -- YYYY-MM-DD
+    entry_time             TEXT    NOT NULL,      -- HH:MM ET
+    day_of_week            TEXT,
+    spx_at_entry           REAL,
+    status                 TEXT    NOT NULL DEFAULT 'Open'
+                               CHECK(status IN ('Open','Transformed','Expired','Closed')),
+    contracts              INTEGER NOT NULL DEFAULT 1,
+    commissions            REAL,                  -- total $ across all legs
+    initial_legs           TEXT    NOT NULL,      -- JSON: [{expiry,type,action,strike,fill}]
+    total_debit            REAL    NOT NULL,      -- per share
+    -- Transformation (null until transformed)
+    transform_date         TEXT,
+    transform_time         TEXT,
+    transform_minutes      INTEGER,
+    spx_at_transform       REAL,
+    transform_legs         TEXT,                  -- JSON
+    credit_received        REAL,                  -- per share
+    profit_locked_in       REAL,                  -- per share = credit - debit
+    -- Iron Condor structure (null until transformed)
+    ic_expiry_date         TEXT,                  -- YYYY-MM-DD (front expiry)
+    ic_short_call          REAL,
+    ic_long_call           REAL,
+    ic_short_put           REAL,
+    ic_long_put            REAL,
+    ic_call_wing           REAL,                  -- points
+    ic_put_wing            REAL,                  -- points
+    ic_max_profit          REAL,                  -- per contract $
+    ic_worst_case          REAL,                  -- per contract $; positive = guaranteed profit
+    ic_risk_free           INTEGER DEFAULT 0,     -- 1 if ic_max_profit > max_ic_loss
+    -- Expiration results (null until expired)
+    result_date            TEXT,
+    spx_at_expiry          REAL,
+    final_pl               REAL,                  -- per contract $
+    expired_inside_wings   INTEGER,               -- 1 if ic_long_put < SPX < ic_long_call
+    expired_between_shorts INTEGER,               -- 1 if ic_short_put <= SPX <= ic_short_call
+    outcome                TEXT,
+    -- Metadata
+    notes                  TEXT,
+    created_at             TEXT    NOT NULL,
+    updated_at             TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_trades_status     ON trades(status);
+CREATE INDEX IF NOT EXISTS idx_trades_entry_date ON trades(entry_date);
+"""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Schema Init (called from journal.py, NOT from init_db)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def init_trades_table(db_path: str) -> None:
+    """
+    Create the trades table and indexes if they don't exist.
+    Safe to call on every journal.py startup — all DDL uses IF NOT EXISTS.
+    Intentionally separate from init_db() so the main dashboard schema path
+    and version number are unaffected.
+    """
+    with managed_conn(db_path) as conn:
+        conn.executescript(_TRADES_DDL)
+    logger.info("Trades table verified at %s", db_path)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Write Operations (journal.py only)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_next_trade_id(db_path: str) -> str:
+    """Return the next sequential trade ID string, e.g. 'T-004'."""
+    with managed_conn(db_path) as conn:
+        row = conn.execute("SELECT COUNT(*) AS n FROM trades").fetchone()
+        return f"T-{row['n'] + 1:03d}"
+
+
+def insert_trade(db_path: str, trade: dict) -> None:
+    """
+    Insert a new trade. Pass a dict whose keys match trades table columns.
+    'created_at' and 'updated_at' are always overwritten to UTC now.
+    """
+    now = _utcnow()
+    columns = [
+        'trade_id','entry_date','entry_time','day_of_week','spx_at_entry',
+        'status','contracts','commissions','initial_legs','total_debit',
+        'transform_date','transform_time','transform_minutes','spx_at_transform',
+        'transform_legs','credit_received','profit_locked_in',
+        'ic_expiry_date','ic_short_call','ic_long_call','ic_short_put','ic_long_put',
+        'ic_call_wing','ic_put_wing','ic_max_profit','ic_worst_case','ic_risk_free',
+        'result_date','spx_at_expiry','final_pl',
+        'expired_inside_wings','expired_between_shorts','outcome','notes',
+    ]
+    col_str = ", ".join(columns + ['created_at', 'updated_at'])
+    val_str = ", ".join(f":{c}" for c in columns) + ", :created_at, :updated_at"
+    with managed_conn(db_path) as conn:
+        conn.execute(
+            f"INSERT INTO trades ({col_str}) VALUES ({val_str})",
+            {**{c: trade.get(c) for c in columns}, 'created_at': now, 'updated_at': now}
+        )
+
+
+def update_trade(db_path: str, trade_id: str, **fields) -> None:
+    """
+    Update specific columns on a trade. Pass column=value keyword args.
+    'updated_at' is always set to UTC now automatically.
+    """
+    if not fields:
+        return
+    fields['updated_at'] = _utcnow()
+    set_clause = ", ".join(f"{k} = :{k}" for k in fields)
+    with managed_conn(db_path) as conn:
+        conn.execute(
+            f"UPDATE trades SET {set_clause} WHERE trade_id = :trade_id",
+            {**fields, 'trade_id': trade_id}
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Read Operations
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_all_trades(db_path: str) -> list:
+    """All trades, newest entry date first."""
+    with managed_conn(db_path) as conn:
+        return conn.execute(
+            "SELECT * FROM trades ORDER BY entry_date DESC, entry_time DESC"
+        ).fetchall()
+
+
+def get_trade(db_path: str, trade_id: str) -> "sqlite3.Row | None":
+    """Single trade by ID. Returns None if not found."""
+    with managed_conn(db_path) as conn:
+        return conn.execute(
+            "SELECT * FROM trades WHERE trade_id = ?", (trade_id,)
+        ).fetchone()
+
+
+def get_eod_spx(db_path: str, date_str: str) -> "float | None":
+    """
+    Last COMPLETE snapshot underlying_price on or before date_str (YYYY-MM-DD).
+    Used by journal.py to auto-suggest SPX close when recording expiration.
+    """
+    with managed_conn(db_path) as conn:
+        row = conn.execute("""
+            SELECT underlying_price FROM snapshots
+            WHERE status             = 'COMPLETE'
+              AND snapshot_timestamp <= ?
+            ORDER BY snapshot_timestamp DESC
+            LIMIT 1
+        """, (date_str + " 23:59:59",)).fetchone()
+        return float(row["underlying_price"]) if row and row["underlying_price"] else None
+
+
+def get_ic_marks(
+    db_path: str,
+    ic_expiry_date: str,
+    short_call: float,
+    long_call: float,
+    short_put: float,
+    long_put: float,
+    eod_date: "str | None" = None,
+) -> "dict | None":
+    """
+    Retrieve bid/ask/mark prices for the four Iron Condor legs from option_rows.
+
+    Default (eod_date=None): uses the most recent COMPLETE snapshot in the DB.
+    eod_date='YYYY-MM-DD':   uses the LAST COMPLETE snapshot on that date,
+                             enabling 'end-of-day unrealized P&L' for a past session.
+
+    Returns a dict:
+        snapshot_ts        — ISO8601 UTC timestamp of the snapshot used
+        spx                — SPX underlying price at that snapshot
+        short_call_mark/bid/ask
+        long_call_mark/bid/ask
+        short_put_mark/bid/ask
+        long_put_mark/bid/ask
+        cost_to_close      — (short_call + short_put - long_call - long_put) per share
+                             Positive = IC has remaining value; subtract from
+                             profit_locked_in to get unrealized P&L per share.
+
+    Returns None if the option data is not available for these strikes/expiry.
+
+    IC cost-to-close math:
+        To close the IC we BUY BACK short legs and SELL TO CLOSE long legs.
+        cost = mark(short_call) + mark(short_put) - mark(long_call) - mark(long_put)
+        unrealized_per_sh = profit_locked_in - cost_to_close
+        unrealized_per_contract = unrealized_per_sh * 100 * contracts
+    """
+    with managed_conn(db_path) as conn:
+        if eod_date:
+            snap = conn.execute("""
+                SELECT snapshot_id, snapshot_timestamp, underlying_price
+                FROM snapshots
+                WHERE status             = 'COMPLETE'
+                  AND snapshot_timestamp <= ?
+                ORDER BY snapshot_timestamp DESC
+                LIMIT 1
+            """, (eod_date + " 23:59:59",)).fetchone()
+        else:
+            snap = conn.execute("""
+                SELECT snapshot_id, snapshot_timestamp, underlying_price
+                FROM snapshots
+                WHERE status = 'COMPLETE'
+                ORDER BY snapshot_timestamp DESC
+                LIMIT 1
+            """).fetchone()
+
+        if not snap:
+            return None
+
+        rows = conn.execute("""
+            SELECT strike, right, bid, ask, mark
+            FROM option_rows
+            WHERE snapshot_id = ?
+              AND expiry_date  = ?
+              AND (
+                  (strike = ? AND right = 'C') OR
+                  (strike = ? AND right = 'C') OR
+                  (strike = ? AND right = 'P') OR
+                  (strike = ? AND right = 'P')
+              )
+        """, (snap["snapshot_id"], ic_expiry_date,
+              short_call, long_call, short_put, long_put)).fetchall()
+
+        if not rows:
+            return None
+
+        leg_map = {}
+        for r in rows:
+            leg_map[(float(r["strike"]), r["right"])] = {
+                "bid":  r["bid"]  or 0.0,
+                "ask":  r["ask"]  or 0.0,
+                "mark": r["mark"] or 0.0,
+            }
+
+        sc = leg_map.get((float(short_call), "C"))
+        lc = leg_map.get((float(long_call),  "C"))
+        sp = leg_map.get((float(short_put),  "P"))
+        lp = leg_map.get((float(long_put),   "P"))
+
+        if not all([sc, lc, sp, lp]):
+            return None
+
+        cost = sc["mark"] + sp["mark"] - lc["mark"] - lp["mark"]
+
+        return {
+            "snapshot_ts":       snap["snapshot_timestamp"],
+            "spx":               snap["underlying_price"],
+            "short_call_mark":   sc["mark"], "short_call_bid": sc["bid"], "short_call_ask": sc["ask"],
+            "long_call_mark":    lc["mark"], "long_call_bid":  lc["bid"], "long_call_ask":  lc["ask"],
+            "short_put_mark":    sp["mark"], "short_put_bid":  sp["bid"], "short_put_ask":  sp["ask"],
+            "long_put_mark":     lp["mark"], "long_put_bid":   lp["bid"], "long_put_ask":   lp["ask"],
+            "cost_to_close":     cost,
+        }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# T-001 Seed (first live trade, entered before journal was built)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def seed_t001(db_path: str) -> None:
+    """
+    Insert T-001 if the trades table is empty or T-001 does not exist.
+    No-op if T-001 already exists. Call from journal.py on every startup.
+    """
+    with managed_conn(db_path) as conn:
+        if conn.execute(
+            "SELECT trade_id FROM trades WHERE trade_id = 'T-001'"
+        ).fetchone():
+            return
+
+        now = _utcnow()
+        initial = _json.dumps([
+            {"expiry": "2026-06-30", "type": "Call", "action": "Sell to Open", "strike": 7380, "fill": 24.10},
+            {"expiry": "2026-06-30", "type": "Put",  "action": "Sell to Open", "strike": 7320, "fill": 66.65},
+            {"expiry": "2026-07-02", "type": "Call", "action": "Buy to Open",  "strike": 7400, "fill": 32.95},
+            {"expiry": "2026-07-02", "type": "Put",  "action": "Buy to Open",  "strike": 7300, "fill": 70.70},
+        ])
+        transform = _json.dumps([
+            {"expiry": "2026-07-02", "type": "Call", "action": "Sell to Close", "strike": 7400, "fill": 37.01},
+            {"expiry": "2026-07-02", "type": "Put",  "action": "Sell to Close", "strike": 7300, "fill": 58.34},
+            {"expiry": "2026-06-30", "type": "Call", "action": "Buy to Open",   "strike": 7385, "fill": 25.92},
+            {"expiry": "2026-06-30", "type": "Put",  "action": "Buy to Open",   "strike": 7315, "fill": 50.53},
+        ])
+        notes = (
+            "First live trade. Entry-to-transformation in 13 minutes — unusually fast "
+            "due to an immediate favorable SPX move. Back-month call gained +$4.06 "
+            "during hold. 5-point wings (7380/7385C, 7315/7320P) created a fully "
+            "risk-free structure. Locked net credit $5.90/sh > $5.00/sh max IC loss "
+            "→ guaranteed $90 floor, $590 ceiling if SPX closes inside 7320–7380. "
+            "First real-fill calibration point: $5–6 net credit achievable intraday. "
+            "Paper benchmark of $5.00 confirmed directionally correct."
+        )
+        conn.execute("""
+            INSERT INTO trades (
+                trade_id, entry_date, entry_time, day_of_week, spx_at_entry,
+                status, contracts, commissions, initial_legs, total_debit,
+                transform_date, transform_time, transform_minutes, spx_at_transform,
+                transform_legs, credit_received, profit_locked_in,
+                ic_expiry_date, ic_short_call, ic_long_call, ic_short_put, ic_long_put,
+                ic_call_wing, ic_put_wing, ic_max_profit, ic_worst_case, ic_risk_free,
+                result_date, spx_at_expiry, final_pl,
+                expired_inside_wings, expired_between_shorts, outcome,
+                notes, created_at, updated_at
+            ) VALUES (
+                'T-001','2026-06-26','09:34','Friday',NULL,
+                'Transformed',1,NULL,?,13.00,
+                '2026-06-26','09:47',13,NULL,
+                ?,18.90,5.90,
+                '2026-06-30',7380.0,7385.0,7320.0,7315.0,
+                5.0,5.0,590.0,90.0,1,
+                NULL,NULL,NULL,NULL,NULL,NULL,
+                ?,?,?
+            )
+        """, (initial, transform, notes, now, now))
+        logger.info("T-001 seeded into trades table.")

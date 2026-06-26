@@ -10,7 +10,84 @@ Log every change here. Format:
 **Open questions / follow-ups:** anything left unresolved
 ```
 
-Newest entries at the top.
+---
+
+## HOW TO START A NEW CHAT SESSION IF REPO IS PRIVATE
+*(Read this every time before opening a new Claude chat)*
+
+1. **Push any unsaved local changes first:**
+   ```bash
+   git add .
+   git commit -m "brief description of what changed"
+   git push
+   ```
+2. **Open a new Claude chat under the same Project.**
+3. **Paste the full contents of this DEV_JOURNAL.md** into the first message.
+   - This is the single file that tells Claude everything: what's been built,
+     what bugs were fixed, what decisions were made, and what's next.
+   - The repo is private so Claude cannot fetch it directly — pasting the journal
+     is the handshake that gets Claude up to speed instantly.
+4. **If Claude needs to see a specific file** (e.g. to debug app.py), paste that
+   file's contents into the chat on request. No need to paste all files upfront.
+5. **At the end of each session**, push again before closing the chat so the
+   journal and any changed files are always current on GitHub.
+
+GitHub repo: https://github.com/chandan-singh4/diagonal-calendar-spx
+Primary branch: main
+Local path: wherever your spx-diagonal-dashboard folder lives (parent folder contains .venv)
+
+
+Newest entries begins from here - 
+
+
+## 2026-06-26 — Trade Journal: pages/journal.py + db.py trades table
+
+**Changed:**
+
+**`db.py`** — Appended new section (from `db_additions.py`) containing:
+
+- **`_TRADES_DDL`** — `trades` table + two indexes (`idx_trades_status`, `idx_trades_entry_date`). All monetary values stored per-share. Leg data as JSON text columns to keep schema flat. Separate from the main `_DDL` constant so `SCHEMA_VERSION` and `init_db()` are unaffected.
+- **`init_trades_table(db_path)`** — Idempotent DDL executor for the trades table. Called by `journal.py` on every page load; never called by `init_db()` or `collector.py`.
+- **`get_next_trade_id(db_path)`** — Returns the next sequential ID string (`T-001`, `T-002`, ...) based on COUNT(*).
+- **`insert_trade(db_path, trade_dict)`** — Inserts a new trade; auto-populates `created_at`/`updated_at`.
+- **`update_trade(db_path, trade_id, **fields)`** — Updates arbitrary columns dynamically; auto-sets `updated_at`.
+- **`get_all_trades(db_path)`** — All trades newest-first.
+- **`get_trade(db_path, trade_id)`** — Single trade by ID.
+- **`get_eod_spx(db_path, date_str)`** — Last COMPLETE snapshot `underlying_price` on or before `date_str`. Used by the Mark Expired form to auto-suggest SPX close.
+- **`get_ic_marks(db_path, ic_expiry_date, sc, lc, sp, lp, eod_date=None)`** — Queries `option_rows` for bid/ask/mark on the 4 IC legs from the latest COMPLETE snapshot. If `eod_date` is set, returns marks from the last snapshot of that date (enables EOD unrealized P&L for past sessions). Returns `cost_to_close = mark(sc) + mark(sp) - mark(lc) - mark(lp)`; caller computes `unrealized = profit_locked_in - cost_to_close`.
+- **`seed_t001(db_path)`** — Inserts T-001 (first live trade, 2026-06-26) if not already present. No-op if T-001 exists.
+
+**`pages/journal.py`** — New Streamlit page discovered automatically by Streamlit's multi-page mechanism. Navigate via the sidebar after `streamlit run app.py`.
+
+Five modes (sidebar radio):
+
+- **📊 Overview** — Strategy Statistics (14 KPIs in 5×3 grid) + Master Log table + Trade Detail for selected trade. Detail view has 5 tabs: Initial Position · Transformation · Iron Condor · Expiration · Notes. Iron Condor tab pulls live marks from `option_rows` and computes current unrealized P&L; also shows EOD marks for the entry day when the trade spans multiple days.
+- **➕ New Trade** — 4-leg entry form. Day-of-week auto-computed from entry date.
+- **🔄 Record Transformation** — Select an Open trade; enter 4 transformation legs + credit received. IC structure (strikes, wings, max profit, worst case, risk-free flag) is auto-derived from initial + transformation legs via `derive_ic()`.
+- **⏰ Mark Expired** — Select an active trade; enter result date + SPX at expiry + final P&L. `expired_inside_wings`, `expired_between_shorts`, and `outcome` are auto-computed from SPX vs IC strikes. SPX close auto-suggested from `db.get_eod_spx()` if IC expiry date is in the past.
+- **✏️ Edit Notes** — Free-text notes editor for any trade.
+
+**Strategy Statistics (14 KPIs):**
+Total Trades · Win Rate · Average Winner · Average Loser · Profit Factor · Expectancy · Avg Entry Debit · Avg Transform Credit · Avg Holding Time (days) · Avg Time to Transform (minutes) · Avg Max Drawdown (placeholder — requires intraday marks) · Largest Winner · Largest Loser · Total Fees · Total Net Profit
+
+**T-001 auto-seeded** with full transformation data on first journal load.
+
+**Why:**
+User's question: "Is the trade journal automatic — can it pull mark prices from the collector and compute unrealized P&L?" Answer: yes, because `option_rows` already stores bid/ask/mark for every strike at every snapshot. The React browser artifact had no access to SQLite; the Streamlit page does. This replaces the browser-based artifact entirely for live data use. The React artifact remains available as a standalone offline/demo tool.
+
+**Impact:**
+- `db.py` writer/reader split preserved. `journal.py` is a pure reader for market data and a writer only for the `trades` table. `collector.py` never touches `trades`.
+- `init_db()` and `SCHEMA_VERSION` unchanged. Backward compatible.
+- The `trades` table schema includes all fields requested: SPX at entry, SPX at expiry, EOD unrealized P&L (computed on-demand, not stored), expired inside wings, expired between shorts, outcome, all 14 strategy stats.
+- Avg Max Drawdown is shown as `—` pending intraday mark history. Would require storing per-snapshot IC marks; flagged as a future enhancement.
+
+**Open questions / follow-ups:**
+- Avg Max Drawdown requires querying `option_rows` at every snapshot during the trade's life. Feasible but adds a slow query; defer to v4.
+- `pages/journal.py` should be renamed `pages/2_📒_Trade_Journal.py` for a cleaner sidebar label in Streamlit (optional, purely cosmetic).
+- Transformation threshold calibration from T-001: $5.90 net credit achieved in 13 minutes. Target range confirmed as $5–6 for real fills.
+
+---
+
 
 
 ## 2026-06-26 — Dashboard v2 Bug Fixes + Layout Refinements (session closed)
@@ -153,32 +230,6 @@ Secondary goals: SPX intraday chart and GEX give market context (where is price 
 
 
 ---
-
----
-
-## HOW TO START A NEW CHAT SESSION IF REPO IS PRIVATE
-*(Read this every time before opening a new Claude chat)*
-
-1. **Push any unsaved local changes first:**
-   ```bash
-   git add .
-   git commit -m "brief description of what changed"
-   git push
-   ```
-2. **Open a new Claude chat under the same Project.**
-3. **Paste the full contents of this DEV_JOURNAL.md** into the first message.
-   - This is the single file that tells Claude everything: what's been built,
-     what bugs were fixed, what decisions were made, and what's next.
-   - The repo is private so Claude cannot fetch it directly — pasting the journal
-     is the handshake that gets Claude up to speed instantly.
-4. **If Claude needs to see a specific file** (e.g. to debug app.py), paste that
-   file's contents into the chat on request. No need to paste all files upfront.
-5. **At the end of each session**, push again before closing the chat so the
-   journal and any changed files are always current on GitHub.
-
-GitHub repo: https://github.com/chandan-singh4/diagonal-calendar-spx
-Primary branch: main
-Local path: wherever your spx-diagonal-dashboard folder lives (parent folder contains .venv)
 
 ## 2026-06-25 — Audit Pass v1.1: Retracted Regime Favorability, Removed Theta ETA, Fixed Terminology
 
