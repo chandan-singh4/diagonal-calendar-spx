@@ -633,42 +633,46 @@ def get_gaps(db_path: str, start: str, end: str,
         ).fetchall()
 
 
-def get_spx_intraday_today(db_path: str) -> list:
+def get_spx_intraday_today(db_path: str, session_date: str | None = None) -> list:
     """
-    SPX price at every COMPLETE snapshot in today's UTC calendar date.
+    SPX price at every COMPLETE snapshot on the given session date.
 
     Used by app.py for:
       - The SPX intraday price chart (Section 3)
-      - Daily change calculation: current price vs first snapshot of the day
+      - Daily change calculation: current price vs first snapshot of the session
 
-    'Today' is bounded by SQLite's date('now') in UTC, which is reliable
-    here because the collector only runs during ET market hours (13:30–20:00 UTC)
-    — entirely within a single UTC calendar day. No timezone library required.
+    session_date: 'YYYY-MM-DD' string in UTC (e.g. '2026-06-25').
+    App derives this from the latest snapshot's own timestamp so the scanner
+    always shows data from the most recent session, not just the current UTC
+    calendar day (which would return 0 rows when called after-hours or pre-open).
 
     Returns rows with: snapshot_timestamp (TEXT), underlying_price (REAL).
     """
+    bound = session_date if session_date else datetime.now(timezone.utc).strftime("%Y-%m-%d")
     with managed_conn(db_path) as conn:
         return conn.execute(
             """
             SELECT snapshot_timestamp, underlying_price
             FROM snapshots
             WHERE status              = 'COMPLETE'
-              AND snapshot_timestamp >= date('now')
+              AND snapshot_timestamp >= ?
             ORDER BY snapshot_timestamp
-            """
+            """,
+            (bound,)
         ).fetchall()
 
 
-def get_all_expiry_atm_iv_today(db_path: str) -> list:
+def get_all_expiry_atm_iv_today(db_path: str, session_date: str | None = None) -> list:
     """
-    ATM IV for every expiry at every COMPLETE snapshot in today's UTC date.
+    ATM IV for every expiry at every COMPLETE snapshot on the given session date.
 
     Used by app.py's Pair Scanner to compute intraday IV ratios for all
-    possible (front, back) expiry combinations.  Queried once per dashboard
-    refresh; the pivot and ratio computation happen in Python.
+    possible (front, back) expiry combinations.
 
-    'Today' is bounded by date('now') in UTC — same rationale as
-    get_spx_intraday_today above.
+    session_date: 'YYYY-MM-DD' string in UTC. App derives this from the latest
+    snapshot's own timestamp so the scanner always shows the most recent session's
+    data rather than 0 rows when called after-hours or pre-open (when no snapshots
+    exist for the current UTC calendar day yet).
 
     Returns rows with:
       snapshot_timestamp  TEXT  — UTC 'YYYY-MM-DD HH:MM:SS'
@@ -679,6 +683,7 @@ def get_all_expiry_atm_iv_today(db_path: str) -> list:
     Performance: uses idx_atm_iv_expiry_snap; at 5-min polling across
     20 expirations for 6.5 market hours ≈ 1,560 rows/day — trivially fast.
     """
+    bound = session_date if session_date else datetime.now(timezone.utc).strftime("%Y-%m-%d")
     with managed_conn(db_path) as conn:
         return conn.execute(
             """
@@ -690,9 +695,10 @@ def get_all_expiry_atm_iv_today(db_path: str) -> list:
             FROM atm_iv_by_expiry a
             JOIN snapshots s ON s.snapshot_id = a.snapshot_id
             WHERE s.status              = 'COMPLETE'
-              AND s.snapshot_timestamp >= date('now')
+              AND s.snapshot_timestamp >= ?
             ORDER BY s.snapshot_timestamp, a.expiry_date
-            """
+            """,
+            (bound,)
         ).fetchall()
 
 

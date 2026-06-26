@@ -147,25 +147,30 @@ def _load_contract_hist(expiry: str, strike: float,
 # Helper — pair scanner computation
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _compute_pair_scanner() -> pd.DataFrame:
+def _compute_pair_scanner(session_date: str) -> pd.DataFrame:
     """
-    Build the IV-ratio scanner DataFrame for today's trading session.
+    Build the IV-ratio scanner DataFrame for the given trading session.
+
+    session_date: 'YYYY-MM-DD' UTC date string derived from the latest
+    snapshot's timestamp.  Using the snapshot's own date (not date('now'))
+    means the scanner shows data even when called after-hours or pre-open,
+    when no snapshots exist for the current UTC calendar day.
 
     One row per (front, back) expiry pair containing:
       Front, Back             — display strings with DTE suffix
       front_expiry, back_expiry — raw YYYY-MM-DD strings (for pin/unpin logic)
       front_dte, back_dte, gap  — integer day counts
       Ratio                   — current front/back ATM IV ratio
-      Day Chg                 — ratio change since first snapshot today
-      Drop%                   — drop from today's session high (≤ 0)
-      Rise%                   — rise from today's session low  (≥ 0)
+      Day Chg                 — ratio change since first snapshot of session
+      Drop%                   — drop from session high (≤ 0)
+      Rise%                   — rise from session low  (≥ 0)
       Chart                   — unicode sparkline of ratio series
       snapshots               — number of data points in ratio series
 
     No filters applied here — DTE and gap filtering happens at display time
     so the full dataset is available for Pinned Pairs regardless of filters.
     """
-    rows = db.get_all_expiry_atm_iv_today(config.DB_PATH)
+    rows = db.get_all_expiry_atm_iv_today(config.DB_PATH, session_date)
     if not rows:
         return pd.DataFrame()
 
@@ -314,6 +319,11 @@ snap_dt = datetime.strptime(snap_ts_str[:19], "%Y-%m-%d %H:%M:%S").replace(
 )
 snap_age_secs = (datetime.now(timezone.utc) - snap_dt).total_seconds()
 
+# Derive session date from the snapshot's own timestamp rather than using
+# the current UTC clock.  This ensures the pair scanner shows data even when
+# the dashboard is opened after-hours or on days before the market has opened.
+session_date = snap_ts_str[:10]   # 'YYYY-MM-DD' UTC
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Load option chain for latest snapshot
 # ─────────────────────────────────────────────────────────────────────────────
@@ -340,10 +350,10 @@ if len(available_expiries) < 2:
     st.stop()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SPX intraday price series (today's session, UTC calendar day)
+# SPX intraday price series (most recent trading session)
 # ─────────────────────────────────────────────────────────────────────────────
 
-_intraday_rows = db.get_spx_intraday_today(config.DB_PATH)
+_intraday_rows = db.get_spx_intraday_today(config.DB_PATH, session_date)
 spx_intraday = (
     pd.DataFrame([dict(r) for r in _intraday_rows])
     if _intraday_rows else pd.DataFrame()
@@ -639,7 +649,7 @@ st.divider()
 # PAIR SCANNER DATA — computed once, shared by Sections 5 and 6
 # ═════════════════════════════════════════════════════════════════════════════
 
-full_scanner_df = _compute_pair_scanner()
+full_scanner_df = _compute_pair_scanner(session_date)
 scanner_total   = len(full_scanner_df)
 scanner_snaps   = (
     int(full_scanner_df["snapshots"].max())
