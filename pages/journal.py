@@ -60,8 +60,12 @@ db.seed_t001(config.DB_PATH)
 # Session State Init
 # ─────────────────────────────────────────────────────────────────────────────
 
-if "page_mode_radio" not in st.session_state:
-    st.session_state["page_mode_radio"] = "📊 Overview"
+_NAV_OPTIONS = [
+    "📊 Overview", "📈 Regime Analysis", "➕ Log a Trade",
+    "🔄 Record Transformation", "⏰ Mark Expired", "✏️ Edit Notes",
+]
+if "_nav_page" not in st.session_state:
+    st.session_state["_nav_page"] = "📊 Overview"
 if "edit_trade_id" not in st.session_state:
     st.session_state["edit_trade_id"] = None
 if "confirm_delete_id" not in st.session_state:
@@ -370,11 +374,12 @@ with st.sidebar:
     st.divider()
 
     page_mode = st.radio(
-        "Navigation",
-        ["📊 Overview", "📈 Regime Analysis", "➕ Log a Trade", "🔄 Record Transformation", "⏰ Mark Expired", "✏️ Edit Notes"],
-        label_visibility="collapsed",
-        key="page_mode_radio",
+    "Navigation",
+    _NAV_OPTIONS,
+    index=_NAV_OPTIONS.index(st.session_state["_nav_page"]),
+    label_visibility="collapsed",
     )
+    st.session_state["_nav_page"] = page_mode
 
     if all_trades:
         st.divider()
@@ -513,7 +518,7 @@ if page_mode == "📊 Overview":
         if act_col2.button("✏️ Edit", use_container_width=True, key="btn_edit"):
             st.session_state["edit_trade_id"] = action_trade_id
             st.session_state["confirm_delete_id"] = None
-            st.session_state["page_mode_radio"] = "➕ Log a Trade"
+            st.session_state["_nav_page"] = "➕ Log a Trade"
             st.rerun()
 
         if act_col3.button("🗑️ Delete", use_container_width=True, key="btn_delete"):
@@ -776,7 +781,7 @@ elif page_mode == "➕ Log a Trade":
         )
         if cancel_col.button("← Cancel", key="cancel_edit"):
             st.session_state["edit_trade_id"] = None
-            st.session_state["page_mode_radio"] = "📊 Overview"
+            st.session_state["_nav_page"] = "📊 Overview"
             st.rerun()
     else:
         st.subheader("Log a Trade")
@@ -881,7 +886,7 @@ elif page_mode == "➕ Log a Trade":
                 if is_edit:
                     db.update_trade(config.DB_PATH, edit_id, **trade_fields)
                     st.session_state["edit_trade_id"] = None
-                    st.session_state["page_mode_radio"] = "📊 Overview"
+                    st.session_state["_nav_page"] = "📊 Overview"
                     st.session_state["_success_msg"] = "Changes saved successfully."
                 else:
                     trade_fields["trade_id"] = next_id
