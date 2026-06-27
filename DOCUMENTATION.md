@@ -28,6 +28,7 @@
 9. [Assumptions and Known Limitations](#9-assumptions-and-known-limitations)
 10. [Future Roadmap](#10-future-roadmap)
 11. [Dashboard v3 — Changes & New Analytics (detailed)](#11-dashboard-v3--changes--new-analytics-detailed)
+12. [Trade Journal — v3.1 Reference](#12-trade-journal--v31-reference)
 
 ---
 
