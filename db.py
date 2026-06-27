@@ -559,6 +559,97 @@ def get_atm_iv_history(db_path: str, expiry_date: str,
         ).fetchall()
 
 
+def get_entry_iv_context(db_path: str, entry_ts_utc: str,
+                         front_expiry: str, back_expiry: str,
+                         call_strike: float, put_strike: float) -> dict | None:
+    """
+    Reconstruct the IV term-structure context at a trade's entry moment from
+    stored snapshots — used by the Trade Journal "Regime Analysis" sub-tab so
+    the analysis works retroactively without any schema change.
+
+    Steps: (1) find the COMPLETE snapshot nearest in time to ``entry_ts_utc``
+    (a 'YYYY-MM-DD HH:MM:SS' UTC string); (2) pull the at-strike IV of the four
+    diagonal legs (front/back x call/put) from option_rows, averaging the two
+    legs per side; (3) also pull ATM avg IV for both expiries for macro context.
+
+    IVs are returned in DECIMAL form (DB convention); the caller multiplies by
+    100 at the load boundary, like the rest of app.py. Returns None if no
+    snapshot exists; individual IV fields may be None if a leg wasn't captured.
+    """
+    def _mean(vals):
+        present = [v for v in vals if v is not None]
+        return sum(present) / len(present) if present else None
+
+    def _ratio(f, b):
+        return (f / b) if (f and b) else None
+
+    def _level(f, b):
+        return ((f * b) ** 0.5) if (f and b and f > 0 and b > 0) else None
+
+    cs, ps = float(call_strike), float(put_strike)
+    with managed_conn(db_path) as conn:
+        snap = conn.execute(
+            """
+            SELECT snapshot_id, snapshot_timestamp,
+                   ABS(strftime('%s', snapshot_timestamp)
+                       - strftime('%s', ?)) AS dist
+            FROM snapshots
+            WHERE status = 'COMPLETE'
+            ORDER BY dist ASC
+            LIMIT 1
+            """,
+            (entry_ts_utc,),
+        ).fetchone()
+        if snap is None:
+            return None
+        sid = snap["snapshot_id"]
+
+        leg_rows = conn.execute(
+            """
+            SELECT expiry_date, strike, right, iv
+            FROM option_rows
+            WHERE snapshot_id = ?
+              AND ( (expiry_date = ? AND strike = ? AND right = 'C')
+                 OR (expiry_date = ? AND strike = ? AND right = 'P')
+                 OR (expiry_date = ? AND strike = ? AND right = 'C')
+                 OR (expiry_date = ? AND strike = ? AND right = 'P') )
+            """,
+            (sid, front_expiry, cs, front_expiry, ps,
+             back_expiry, cs, back_expiry, ps),
+        ).fetchall()
+
+        legs = {(r["expiry_date"], float(r["strike"]), r["right"]): r["iv"]
+                for r in leg_rows}
+        front_iv = _mean([legs.get((front_expiry, cs, "C")),
+                          legs.get((front_expiry, ps, "P"))])
+        back_iv = _mean([legs.get((back_expiry, cs, "C")),
+                         legs.get((back_expiry, ps, "P"))])
+
+        atm_rows = conn.execute(
+            """
+            SELECT expiry_date, atm_avg_iv
+            FROM atm_iv_by_expiry
+            WHERE snapshot_id = ? AND expiry_date IN (?, ?)
+            """,
+            (sid, front_expiry, back_expiry),
+        ).fetchall()
+        atm = {r["expiry_date"]: r["atm_avg_iv"] for r in atm_rows}
+        atm_front, atm_back = atm.get(front_expiry), atm.get(back_expiry)
+
+    return {
+        "snapshot_id": sid,
+        "snapshot_timestamp": snap["snapshot_timestamp"],
+        "front_iv": front_iv,          # at-strike, decimal form
+        "back_iv": back_iv,
+        "ratio": _ratio(front_iv, back_iv),
+        "level": _level(front_iv, back_iv),
+        "atm_front_iv": atm_front,     # ATM macro context, decimal form
+        "atm_back_iv": atm_back,
+        "atm_ratio": _ratio(atm_front, atm_back),
+        "atm_level": _level(atm_front, atm_back),
+    }
+
+
 def get_term_structure(db_path: str, snapshot_id: int) -> list:
     """All expiries for a given snapshot, ordered by DTE ascending."""
     with managed_conn(db_path) as conn:

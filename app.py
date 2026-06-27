@@ -43,6 +43,7 @@ from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
@@ -90,6 +91,19 @@ _SESSION_RANGEBREAKS = [
     dict(values=sorted(config.MARKET_HOLIDAYS)),
 ]
 
+# Regime bands for the IV Ratio (F/B). Colors are regime LABELS, not validated
+# favorability — green for ≥1 is requested visual shorthand for "backwardation",
+# not "enter". The <0.70 amber band is mostly the 0DTE end-of-day artifact, so it
+# reads as a caution zone, not a tradeable signal. Thresholds: 0.70 / 1.00 / 1.30.
+_RATIO_THRESHOLDS = [0.70, 1.00, 1.30]
+_RATIO_BANDS = [
+    # (low, high, color, label)
+    (1.30, float("inf"), "#1abc9c", "Strong backwardation (≥1.30)"),
+    (1.00, 1.30,         "#2ecc71", "Backwardation 1.00–1.30 (front rich)"),
+    (0.70, 1.00,         "#8e9bb5", "Contango 0.70–1.00 (normal)"),
+    (float("-inf"), 0.70, "#d98841", "Deep contango <0.70 (likely 0DTE/EOD)"),
+]
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper — pinned pairs persistence
@@ -131,6 +145,44 @@ def _sparkline(values: list[float], width: int = 10) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper — ATM IV history
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _banded_ratio_traces(x, y) -> list:
+    """Build a *continuous* multicolor line for the IV ratio, colored by regime
+    band. Where the series crosses a threshold (0.70 / 1.00 / 1.30) the exact
+    crossing point is interpolated and inserted, then each band emits one trace
+    that is non-None only inside its band — but boundary points belong to BOTH
+    adjacent bands (inclusive), so the colored segments touch and the line has
+    no gaps at crossings.
+    """
+    xs, ys = list(x), list(y)
+    ax, ay = [], []
+    for i in range(len(xs)):
+        ax.append(xs[i])
+        ay.append(ys[i])
+        if i + 1 < len(xs):
+            y0, y1, x0, x1 = ys[i], ys[i + 1], xs[i], xs[i + 1]
+            if pd.isna(y0) or pd.isna(y1) or y0 == y1:
+                continue
+            crossed = [t for t in _RATIO_THRESHOLDS
+                       if (y0 < t < y1) or (y1 < t < y0)]
+            crossed.sort(reverse=(y0 > y1))
+            for t in crossed:
+                frac = (t - y0) / (y1 - y0)
+                ax.append(x0 + (x1 - x0) * frac)
+                ay.append(t)
+    traces = []
+    for low, high, color, label in _RATIO_BANDS:
+        yb = [v if (v is not None and not pd.isna(v) and low <= v <= high)
+              else None for v in ay]
+        if any(v is not None for v in yb):
+            traces.append(go.Scatter(
+                x=ax, y=yb, mode="lines", name=label,
+                line=dict(color=color, width=2), connectgaps=False,
+                legendgroup=label,
+                hovertemplate="R=%{y:.4f}<extra></extra>",
+            ))
+    return traces
+
 
 def _load_atm_hist(expiry: str, days: int) -> pd.DataFrame:
     rows = db.get_atm_iv_history(config.DB_PATH, expiry, days)
@@ -782,6 +834,80 @@ if not atm_merged.empty:
     samp_warn = iv_engine.sample_size_warning(atm_merged["iv_ratio"])
     if samp_warn:
         st.warning(samp_warn)
+
+    # ── NEW (v3): stacked panel — Front/Back IV (same scale) + regime ratio ──
+    with st.expander("📊 Stacked view — Front/Back IV on one scale + regime-colored ratio",
+                     expanded=False):
+        fig_stack = make_subplots(
+            rows=2, cols=1, shared_xaxes=True,
+            row_heights=[0.62, 0.38], vertical_spacing=0.06,
+            subplot_titles=("Front vs Back ATM IV — same axis (the gap IS the spread)",
+                            "IV Ratio (F/B) — colored by regime"),
+        )
+        fig_stack.add_trace(go.Scatter(
+            x=atm_merged["timestamp"], y=atm_merged["front_iv"],
+            name="Front ATM IV", line=dict(color="#2ecc71", width=1.5)), row=1, col=1)
+        fig_stack.add_trace(go.Scatter(
+            x=atm_merged["timestamp"], y=atm_merged["back_iv"],
+            name="Back ATM IV", line=dict(color="#3498db", width=1.5)), row=1, col=1)
+        for tr in _banded_ratio_traces(atm_merged["timestamp"], atm_merged["iv_ratio"]):
+            fig_stack.add_trace(tr, row=2, col=1)
+        for thr, dash in [(1.00, "solid"), (0.70, "dot"), (1.30, "dot")]:
+            fig_stack.add_hline(y=thr, line=dict(color="#777", width=1, dash=dash),
+                                row=2, col=1)
+        fig_stack.update_xaxes(rangebreaks=_SESSION_RANGEBREAKS)
+        fig_stack.update_yaxes(title_text="IV %", row=1, col=1)
+        fig_stack.update_yaxes(title_text="Ratio", row=2, col=1)
+        fig_stack.update_layout(
+            height=520, margin=dict(l=20, r=20, t=40, b=20),
+            hovermode="x unified",
+            legend=dict(orientation="h", yanchor="bottom", y=-0.18,
+                        xanchor="left", x=0, font=dict(size=10)),
+        )
+        st.plotly_chart(fig_stack, use_container_width=True)
+        st.caption(
+            "Top: front and back ATM IV share one axis, so the vertical gap "
+            "between them is the term-structure spread. Bottom: the ratio crosses "
+            "into a new color at 0.70 / 1.00 / 1.30. Green (≥1) = backwardation "
+            "(front rich); amber (<0.70) is usually the front leg decaying into the "
+            "close, not a structural signal — read it as a caution zone."
+        )
+
+    # ── NEW (v3): Front-vs-Back scatter, colored by time of day ─────────────
+    with st.expander("🔵 Front vs Back IV scatter — intraday trajectory",
+                     expanded=False):
+        sc = atm_merged.copy()
+        sc["hod"] = sc["timestamp"].dt.hour + sc["timestamp"].dt.minute / 60.0
+        lo = float(min(sc["back_iv"].min(), sc["front_iv"].min()))
+        hi = float(max(sc["back_iv"].max(), sc["front_iv"].max()))
+        pad = (hi - lo) * 0.05 or 1.0
+        fig_sc = go.Figure()
+        fig_sc.add_trace(go.Scatter(
+            x=[lo - pad, hi + pad], y=[lo - pad, hi + pad], mode="lines",
+            name="R = 1  (Front = Back)", line=dict(color="#888", dash="dash")))
+        fig_sc.add_trace(go.Scatter(
+            x=sc["back_iv"], y=sc["front_iv"], mode="markers", name="snapshots",
+            marker=dict(size=6, color=sc["hod"], colorscale="Viridis",
+                        showscale=True, colorbar=dict(title="Hour ET"),
+                        line=dict(width=0)),
+            customdata=sc["iv_ratio"],
+            hovertemplate="Back %{x:.2f}%<br>Front %{y:.2f}%"
+                          "<br>R=%{customdata:.4f}<extra></extra>"))
+        fig_sc.update_layout(
+            height=420, margin=dict(l=20, r=20, t=10, b=20),
+            xaxis_title="Back ATM IV %", yaxis_title="Front ATM IV %",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+        )
+        st.plotly_chart(fig_sc, use_container_width=True)
+        st.caption(
+            "Each dot is one snapshot. Above the dashed line = backwardation "
+            "(front richer, R>1); below = contango. Distance from the line is the "
+            "spread; distance from the origin is the overall vol level. Color is "
+            "time of day: watch the cloud start high/above the line at the open and "
+            "spiral inward and downward as the front leg crushes faster than the "
+            "back. A cloud hugging one ray ⇒ ratio ≈ constant (adds little); a cloud "
+            "fanning across angles ⇒ ratio varies independently of level (adds info)."
+        )
 else:
     st.caption(
         f"No ATM IV history for {front_expiry} / {back_expiry} in the selected range."

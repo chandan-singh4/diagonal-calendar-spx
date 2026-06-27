@@ -40,7 +40,73 @@ Local path: wherever your spx-diagonal-dashboard folder lives (parent folder con
 Newest entries begins from here - 
 
 
-## 2026-06-26 — v3 follow-up 2: continuous multi-day line (drop NaN breaks, collapse holidays)
+## 2026-06-26 — v3 final: IV-ratio/level analytics (stacked panel, scatter, Regime Analysis sub-tab)
+
+Closes Dashboard v3. Three new analytics surfaces plus the supporting read helper
+and full DOCUMENTATION.md §11.
+
+**`app.py` (Calendar Edge — additive; existing dual-axis chart KEPT):**
+- `_RATIO_THRESHOLDS` / `_RATIO_BANDS` + `_banded_ratio_traces()` — builds a
+  *continuous* multicolor ratio line by interpolating the exact crossing point at
+  each threshold (0.70/1.00/1.30) and emitting one trace per band, with boundary
+  points shared between adjacent bands so segments touch (no gaps). Validated on a
+  synthetic series crossing all three thresholds both directions.
+- New collapsed expander **"Stacked view"**: `make_subplots` 2-row — top Front/Back
+  ATM IV on one axis (gap = spread), bottom the banded ratio with 1.00 solid +
+  0.70/1.30 dotted reference lines. `_SESSION_RANGEBREAKS` on the shared x-axis.
+- New collapsed expander **"Front vs Back scatter"**: x=Back IV, y=Front IV, y=x
+  line, colored by time of day (Viridis). Reads level (radius) + structure (angle)
+  in one view.
+- Both in expanders (collapsed) to respect the anti-scroll preference.
+- Colors are **regime labels, not favorability** — green ≥1 is requested shorthand
+  for "backwardation"; amber <0.70 reads as 0DTE/EOD caution. Legend uses regime
+  names. Reconciled against the §10.3 "no valenced coloring" rule in DOCUMENTATION.
+
+**`db.py`:**
+- `get_entry_iv_context(db_path, entry_ts_utc, front_expiry, back_expiry,
+  call_strike, put_strike)` — read-only. Finds the COMPLETE snapshot nearest the
+  entry timestamp (`ABS(strftime('%s',...))`), returns at-strike Front/Back IV
+  (avg of the call+put legs actually traded) + ratio + level √(F·B), plus ATM
+  context. Decimals (caller ×100). No schema change; works retroactively, incl.
+  T-001. Defensive: None on missing snapshot/legs.
+
+**`pages/journal.py`:**
+- New `📈 Regime Analysis` entry in the existing sidebar `page_mode` nav + an
+  `elif` branch calling `render_regime_analysis(all_trades)`. Chosen over `st.tabs`
+  to avoid nesting inside the Trade-Detail tabs (older-Streamlit risk) and over a
+  full-body reindent.
+- `render_regime_analysis()`: per-trade entry-context reconstruction (parse
+  `initial_legs` → front/back expiry + call/put strike; ET→UTC via zoneinfo;
+  `db.get_entry_iv_context`). Front-vs-Back scatter split into 4 quadrants by
+  **median level (√(F·B))** [purple hyperbola] and **median ratio** [orange ray],
+  points colored by realized `profit_locked_in` (RdYlGn, cmid=0); open trades grey
+  hollow. Stratified 2×2 cell-mean table with n; n<5 flagged as noise. Caveats
+  expander (sample size, pre-commit/overfitting, selection bias, confounds).
+- New imports: `math`, `plotly.graph_objects`, `zoneinfo.ZoneInfo`.
+
+**Why level = √(F·B) not Front IV:** intraday R≈F/(sticky back), so Front IV and
+Ratio are collinear — splitting on Front×Ratio empties two cells and confounds the
+test. Level and R are a near-orthogonal reparametrization of (F,B), so all cells
+populate and "does R matter after controlling for level?" is cleanly separable.
+
+**Status:** the Regime Analysis sub-tab is the *mechanism* to validate the
+IV-ratio-favorability HYPOTHESIS (§3.1). It asserts nothing until cells carry real n
+(~10–15). With T-001 only, expect "insufficient context / n<5" states until live
+collection logs more entries.
+
+**Verification:** all three files `python -m py_compile` clean. Banded-line
+continuity and the entry-context ET→UTC + level math validated with synthetic data.
+**Not runtime-verifiable here** (no live DB): `get_entry_iv_context`'s
+nearest-snapshot join and the populated regime scatter — confirm on first run that
+T-001 either matches a snapshot or shows the graceful "not matched" state.
+
+**Docs:** DOCUMENTATION.md → v1.3 (changelog row + new §11 with worked examples for
+the banded line, the scatter, and the quadrant test; §10.3 valenced-coloring item
+amended with the v3 regime-label nuance).
+
+---
+
+
 
 **Request:** After the rangebreaks fix, the 5D view looked right but showed a small break
 between each session's close and the next session's open. Make the line continuous.

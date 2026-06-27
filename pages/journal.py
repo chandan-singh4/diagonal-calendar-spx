@@ -26,9 +26,12 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import json
+import math
 from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 
 import config
@@ -181,6 +184,165 @@ def derive_ic(init_legs_json: str, tf_legs: list, credit: float,
         return None
 
 
+def render_regime_analysis(all_trades: list) -> None:
+    """Trade Journal sub-tab: tests whether IV Ratio carries outcome information
+    beyond IV level. Reconstructs entry-time term structure from stored snapshots
+    (no schema change), positions each trade on a Front-vs-Back scatter split into
+    four quadrants by median level (√(F·B)) and median ratio, colors by realized
+    transform credit, and shows the stratified 2x2 cell means."""
+    st.subheader("📈 Regime Analysis — does IV Ratio add value beyond IV level?")
+    st.caption(
+        "Reconstructs the IV term structure at each trade's entry from stored "
+        "snapshots, then asks whether structure (Ratio) carries outcome "
+        "information after controlling for level (√(Front·Back))."
+    )
+    if not all_trades:
+        st.info("No trades logged yet. This view activates as you log entries.")
+        return
+
+    et, utc = ZoneInfo(config.DISPLAY_TIMEZONE), ZoneInfo("UTC")
+    recs, missing = [], 0
+    for t in all_trades:
+        try:
+            legs = json.loads(t["initial_legs"])
+            exps = sorted({l["expiry"] for l in legs})
+            front_e, back_e = exps[0], exps[-1]
+            call_k = next(l["strike"] for l in legs if l["type"] == "Call")
+            put_k = next(l["strike"] for l in legs if l["type"] == "Put")
+            dt_et = datetime.strptime(
+                f"{t['entry_date']} {t['entry_time']}", "%Y-%m-%d %H:%M"
+            ).replace(tzinfo=et)
+            ts_utc = dt_et.astimezone(utc).strftime("%Y-%m-%d %H:%M:%S")
+            ctx = db.get_entry_iv_context(config.DB_PATH, ts_utc,
+                                          front_e, back_e, call_k, put_k)
+        except Exception:
+            ctx = None
+        if not ctx or ctx["front_iv"] is None or ctx["back_iv"] is None:
+            missing += 1
+            continue
+        recs.append({
+            "trade_id": t["trade_id"], "status": t["status"],
+            "front_iv": ctx["front_iv"] * 100, "back_iv": ctx["back_iv"] * 100,
+            "ratio": ctx["ratio"],
+            "level": (ctx["level"] * 100) if ctx["level"] else None,
+            "outcome": t["profit_locked_in"],   # per-share transform credit
+        })
+
+    n_ctx = len(recs)
+    st.markdown(
+        f"**{n_ctx}** of **{len(all_trades)}** trades have reconstructable entry "
+        f"IV context" + (f"  ·  {missing} not matched to a snapshot." if missing else ".")
+    )
+    if n_ctx == 0:
+        st.warning(
+            "No trades matched a stored snapshot near their entry time — usually "
+            "the collector wasn't running at entry, or the traded strikes weren't "
+            "in the captured chain. Fills in as you log trades during live collection."
+        )
+        return
+
+    rf = pd.DataFrame(recs)
+    med_ratio = float(rf["ratio"].median())
+    med_level = float(rf["level"].median())
+
+    lo = float(min(rf["back_iv"].min(), rf["front_iv"].min()))
+    hi = float(max(rf["back_iv"].max(), rf["front_iv"].max()))
+    pad = (hi - lo) * 0.08 or 1.0
+    xlo, xhi = max(0.01, lo - pad), hi + pad
+
+    st.markdown("##### Front vs Back IV at entry — quadrants by level x ratio")
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=[xlo, xhi], y=[xlo, xhi], mode="lines",
+        name="R = 1", line=dict(color="#888", dash="dash")))
+    fig.add_trace(go.Scatter(x=[xlo, xhi], y=[med_ratio * xlo, med_ratio * xhi],
+        mode="lines", name=f"median R = {med_ratio:.3f}",
+        line=dict(color="#e67e22", dash="dot")))
+    L2 = med_level ** 2
+    xs = [xlo + (xhi - xlo) * i / 60 for i in range(61)]
+    fig.add_trace(go.Scatter(x=xs, y=[L2 / x for x in xs], mode="lines",
+        name=f"median level = {med_level:.2f}%",
+        line=dict(color="#9b59b6", dash="dot")))
+
+    have = rf["outcome"].notna()
+    if have.any():
+        d = rf[have]
+        fig.add_trace(go.Scatter(
+            x=d["back_iv"], y=d["front_iv"], mode="markers+text",
+            text=d["trade_id"], textposition="top center", name="closed/transformed",
+            marker=dict(size=13, color=d["outcome"], colorscale="RdYlGn", cmid=0,
+                showscale=True, colorbar=dict(title="Credit/sh"),
+                line=dict(width=1, color="#222")),
+            customdata=d[["ratio", "level"]].to_numpy(),
+            hovertemplate="%{text}<br>Back %{x:.2f}%  Front %{y:.2f}%"
+                "<br>R=%{customdata[0]:.3f}  level=%{customdata[1]:.2f}%<extra></extra>"))
+    if (~have).any():
+        d = rf[~have]
+        fig.add_trace(go.Scatter(
+            x=d["back_iv"], y=d["front_iv"], mode="markers+text",
+            text=d["trade_id"], textposition="top center", name="open (no outcome)",
+            marker=dict(size=12, color="#888", symbol="circle-open",
+                line=dict(width=2, color="#aaa")),
+            customdata=d[["ratio", "level"]].to_numpy(),
+            hovertemplate="%{text}<br>Back %{x:.2f}%  Front %{y:.2f}%"
+                "<br>R=%{customdata[0]:.3f}  level=%{customdata[1]:.2f}%<extra></extra>"))
+    fig.update_layout(height=480, margin=dict(l=20, r=20, t=10, b=20),
+        xaxis_title="Back IV % (at entry)", yaxis_title="Front IV % (at entry)",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0, font=dict(size=10)))
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption(
+        "Dashed = R=1 (above it, front is richer). Orange ray splits high vs low "
+        "**ratio**; purple hyperbola splits high vs low **level** (√(F·B)) — the four "
+        "regions are your quadrants. Green = higher realized transform credit. The "
+        "question: do green points concentrate in one region *after* the level split?"
+    )
+
+    st.markdown("##### Quadrant outcomes (stratified)")
+    wo = rf[rf["outcome"].notna()].copy()
+    if wo.empty:
+        st.info("No transformed/closed trades yet — cell outcomes appear once trades "
+                "have a realized transform credit.")
+    else:
+        wo["Level"] = (wo["level"] >= med_level).map({True: "High", False: "Low"})
+        wo["Ratio"] = (wo["ratio"] >= med_ratio).map({True: "High", False: "Low"})
+        cells = []
+        for lv in ("High", "Low"):
+            for rt in ("High", "Low"):
+                sub = wo[(wo["Level"] == lv) & (wo["Ratio"] == rt)]
+                cells.append({"Level": lv, "Ratio": rt, "n": len(sub),
+                    "m": round(float(sub["outcome"].mean()), 3) if len(sub) else None})
+        cdf = pd.DataFrame(cells)
+        grid = cdf.pivot(index="Level", columns="Ratio", values="m")
+        ngrid = cdf.pivot(index="Level", columns="Ratio", values="n")
+        disp = grid.astype("object").copy()
+        for i in grid.index:
+            for j in grid.columns:
+                m, nn = grid.loc[i, j], ngrid.loc[i, j]
+                disp.loc[i, j] = "—" if (m is None or pd.isna(m)) else f"{m:+.3f} (n={int(nn)})"
+        st.write("Mean transform credit / share — rows = Level, cols = Ratio:")
+        st.table(disp)
+        thin = int((ngrid.fillna(0) < 5).to_numpy().sum())
+        if thin:
+            st.warning(f"{thin} of 4 cells have n<5 — these means are noise, not signal. "
+                "The 'does ratio matter within a level stratum' read needs ~10–15 per "
+                "cell. Treat this as a framework filling in, not a result.")
+
+    with st.expander("How to read this & what NOT to conclude", expanded=False):
+        st.markdown(
+            "- **The test:** compare High vs Low **Ratio** *within* each Level row. If "
+            "the credit gap survives in both rows, ratio adds information beyond level. "
+            "If it vanishes once level is fixed, ratio was just proxying level.\n"
+            "- **Sample size:** with a handful of trades, none of this is significant. "
+            "Pre-commit to transform credit as the primary outcome and these median "
+            "splits *before* the data fills in — don't tune to what looks good.\n"
+            "- **Selection bias:** you only have outcomes for regimes you entered. An "
+            "empty quadrant means 'never traded there', not 'bad'.\n"
+            "- **Confounds:** front-DTE and the 0DTE end-of-day artifact distort the "
+            "ratio; entries near the close are least reliable.\n"
+            "- IVs are *at-strike* (the legs you actually traded), from the nearest "
+            "snapshot to your logged entry time."
+        )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Load Data
 # ─────────────────────────────────────────────────────────────────────────────
@@ -201,7 +363,7 @@ with st.sidebar:
 
     page_mode = st.radio(
         "Navigation",
-        ["📊 Overview", "➕ New Trade", "🔄 Record Transformation", "⏰ Mark Expired", "✏️ Edit Notes"],
+        ["📊 Overview", "📈 Regime Analysis", "➕ New Trade", "🔄 Record Transformation", "⏰ Mark Expired", "✏️ Edit Notes"],
         label_visibility="collapsed",
     )
 
@@ -799,3 +961,7 @@ elif page_mode == "✏️ Edit Notes":
                 db.update_trade(config.DB_PATH, chosen_id, notes=new_notes)
                 st.success(f"✓ Notes saved for {chosen_id}.")
                 st.rerun()
+
+
+elif page_mode == "📈 Regime Analysis":
+    render_regime_analysis(all_trades)

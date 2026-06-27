@@ -27,6 +27,7 @@
 8. [Dashboard Design Philosophy](#8-dashboard-design-philosophy)
 9. [Assumptions and Known Limitations](#9-assumptions-and-known-limitations)
 10. [Future Roadmap](#10-future-roadmap)
+11. [Dashboard v3 — Changes & New Analytics (detailed)](#11-dashboard-v3--changes--new-analytics-detailed)
 
 ---
 
@@ -37,6 +38,7 @@
 | 1.0 | 2026-06-25 | Chandan Singh | Initial documentation through Dashboard v1 (IV Structure, Calendar Edge, Transform Credit panels). |
 | 1.1 | 2026-06-25 | Chandan Singh | **Critical audit corrections.** (1) Retracted the claim that IV ratio < 1.0 is "favorable" / "maximizes transformation credit" — it rested on a single paper trade and Black-Scholes analysis suggests the reverse; demoted to an unvalidated `HYPOTHESIS` with neutral framing. (2) Fixed inverted/contango terminology to standard conventions. (3) Corrected the transformation workflow (keep shorts, close backs, add front-expiry wings). (4) Fixed expiry collection (20 expirations by count, not within 20 DTE). (5) Reframed 100-pt strike width as an example, not a rule. (6) Removed the Theta ETA metric (assumption-based). (7) "Risk-free" → "risk-reduced." (8) Flagged Greeks-sign, Trade-Quality-direction, liquidity-threshold, and IV-Index claims as unvalidated. (9) Added approved trade-logging schema to the roadmap as the validation mechanism. Authority statement softened to exclude HYPOTHESIS blocks. |
 | 1.2 | 2026-06-26 | Chandan Singh | **Dashboard v2 — complete layout rewrite.** (1) Replaced single-pair static layout with a Pair Scanner showing all valid (front, back) expiry combinations from the current session, ranked by intraday Drop%. (2) Added Pinned Pairs persistent watchlist (`pinned_pairs.json`). (3) Added GEX display (Max \|Net GEX\| strike + call/put dominated) computed from `option_rows.gamma` — no schema change required. (4) SPX daily change corrected to use prior session's last COMPLETE snapshot (`get_prior_session_close`) rather than the first intraday snapshot. (5) Mini SPX intraday sparkline embedded in the header. (6) Expiry Detail + Strike Detail panel restored (ATM IV + tick-change per expiry; per-leg IV + mark price at selected strikes). (7) Calendar Edge moved above Historical Statistics — now immediately follows the IV chart. (8) Max Gap filter moved from Controls Row to the Pair Scanner filter row. (9) Three new DB read functions added: `get_prior_session_close`, `get_spx_intraday_today`, `get_all_expiry_atm_iv_today`. (10) Section 5 of this document fully rewritten for v2. |
+| 1.3 | 2026-06-26 | Chandan Singh | **Dashboard v3 — layout polish + IV-ratio/level analytics.** Layout: (1) compaction CSS (tighter top padding + section rhythm); (2) removed the header sparkline; (3) moved the `pts ↔ %` toggle beside the change value; (4) DTE shown in both expiry dropdowns, e.g. `2026-06-29 (3D)`; (5) Expiry Detail shows date + DTE together; (6) the Today/5D/10D/20D selector moved to the right of the chart (shared across both charts). Multi-day charts: (7) non-trading time (overnight/weekend/holiday via `config.MARKET_HOLIDAYS`) collapsed with Plotly `rangebreaks` so multi-day lines are continuous, not diagonal ramps. New analytics (Calendar Edge, additive — the original dual-axis chart is **kept**): (8) a **stacked panel** (Front/Back IV on one axis + a regime-colored ratio line); (9) a **Front-vs-Back scatter** colored by time of day. New **Regime Analysis** sub-tab on the Trade Journal page: (10) a Front-vs-Back entry scatter split into four quadrants by **median level (√(F·B))** and **median ratio**, colored by realized transform credit, plus a stratified 2×2 cell-mean table — the test for whether IV Ratio adds outcome information beyond IV level. (11) New DB read helper `get_entry_iv_context` reconstructs entry-time term structure from snapshots (no schema change; works retroactively). See new Section 11 for detailed explanations and examples. |
 
 ---
 
@@ -594,10 +596,163 @@ Analysis enabled once ~20+ trades exist: correlate `entry_*_ratio` with `outcome
 - **Composite Transformation Score (0–100).** Obscures the limiting dimension. Do not build.
 - **Automatic event detection.** Lags the spike; manual Event Mode is faster. Do not build.
 - **Theta ETA (assumption-based).** Removed v1.1; do not reintroduce without per-leg Greeks. Do not build in the old form.
-- **Valenced regime coloring.** No green/red good-bad encoding of IV regime until favorability is validated.
+- **Valenced regime coloring.** No green/red *good–bad* encoding of IV regime until favorability is validated. **v3 nuance:** the IV-ratio line is colored by *regime band* (teal ≥1.30, green 1.00–1.30, periwinkle 0.70–1.00, amber <0.70) at the user's request for readability. The legend uses *regime names*, not valence words, and the amber band reads as a 0DTE/EOD *caution/artifact* zone — so this remains a regime label, not a "this regime is favorable, enter" signal. Favorability stays unvalidated (see §3.1 HYPOTHESIS and §11.4).
 - **Multi-user / SaaS.** Personal tool. Do not build.
 - **Cross-underlying extension.** Every threshold/assumption is SPX-specific. Not planned.
 
 ---
 
-*End of DOCUMENTATION.md — Version 1.2 — 2026-06-26*
+## 11. Dashboard v3 — Changes & New Analytics (detailed)
+
+This section documents Dashboard v3 in full: the layout changes, the multi-day
+chart-continuity fix, and the three new analytics surfaces (stacked panel,
+Front-vs-Back scatter, and the Regime Analysis sub-tab). It explains each with a
+worked example.
+
+### 11.1 Layout & continuity changes (`app.py`)
+
+These are presentation-only; no metric definitions changed.
+
+- **Compaction.** A CSS block after `set_page_config` reduces the main container's
+  top padding and tightens the vertical rhythm between sections. Goal: less
+  scrolling without crowding. The two dials are `.block-container { padding-top }`
+  and the vertical-block `gap`.
+- **Header.** The intraday sparkline was removed. The `pts ↔ %` toggle now sits
+  directly beneath the SPX change value for one-tap switching.
+- **Expiry dropdowns** show DTE inline, e.g. `2026-06-29  (3D)`, via a `format_func`
+  over an `{expiry: dte}` map. The dropdown's *value* is still the raw date, so no
+  downstream code changed.
+- **Expiry Detail** shows date and DTE together, e.g. `Front · 2026-06-26 · 0 DTE`.
+- **Period selector** (Today/5D/10D/20D) moved to the right of the Selected-Strike
+  IV chart and remains a single **shared** control driving both that chart and the
+  Calendar Edge chart. Calendar Edge shows a read-only `Range:` indicator.
+- **Multi-day continuity.** All multi-day IV charts collapse non-trading time with
+  Plotly `rangebreaks`: weekends, the 16:00→09:30 ET overnight window, and full-day
+  holidays from `config.MARKET_HOLIDAYS` (the dashboard now reads this set; it was
+  collector-only before). Bounds are in `America/New_York`, so they are DST-safe.
+  *Effect:* on 5D/10D/20D the line is continuous across sessions instead of drawing
+  long diagonal ramps across empty overnight/weekend bands. *Known residual:* a
+  mid-session collector outage (a data hole during trading hours that is not a
+  holiday) is neither broken nor collapsed and will draw a straight connector across
+  the hole — rare, and arguably a useful data-quality signal.
+
+### 11.2 Stacked panel — Front/Back IV + regime-colored ratio (Calendar Edge)
+
+Lives in a collapsed expander under the **existing** Calendar Edge dual-axis chart
+(which is retained). Two panels share one x-axis:
+
+- **Top:** Front ATM IV and Back ATM IV on the *same* IV% axis. Because they share a
+  scale, the vertical gap between the lines *is* the term-structure spread — read
+  directly, with no second-axis distortion.
+- **Bottom:** the IV Ratio (F/B) as a single **continuous** line whose color changes
+  by regime band, with reference lines at 1.00 (solid) and 0.70 / 1.30 (dotted).
+
+**Bands (thresholds 0.70 / 1.00 / 1.30):** teal `≥1.30` (strong backwardation),
+green `1.00–1.30` (backwardation, front rich), periwinkle `0.70–1.00` (contango,
+normal), amber `<0.70` (deep contango / likely 0DTE-EOD artifact). Colors are
+**regime labels, not favorability** (see §11.4 and §10.3).
+
+**How the continuous coloring works (and a worked example).** Coloring a line by
+y-value normally leaves gaps at band changes. Instead, where the series crosses a
+threshold the exact crossing point is interpolated and inserted, and each band emits
+one trace that is non-None only inside its band — but **boundary points belong to
+both adjacent bands**, so the segments touch.
+
+> *Example.* Ratio goes 0.95 → 1.06 between two snapshots. It crosses 1.00. We solve
+> for the fraction of the segment at which R=1.00: `frac = (1.00 − 0.95)/(1.06 − 0.95)
+> = 0.4545`, interpolate the timestamp at that fraction, and insert the point
+> (t*, 1.00). The periwinkle (0.70–1.00) segment ends exactly at (t*, 1.00); the
+> green (1.00–1.30) segment begins exactly there. The eye sees one unbroken line that
+> turns from periwinkle to green precisely at the 1.00 line.
+
+### 11.3 Front-vs-Back scatter — intraday trajectory (Calendar Edge)
+
+A collapsed expander plotting each snapshot as a dot: **x = Back IV, y = Front IV**,
+with the `y = x` (R=1) line drawn, colored by **time of day**.
+
+**How to read it.** Above the line = backwardation (front richer, R>1); below =
+contango. Perpendicular distance from the line ∝ the spread (F−B). Distance from the
+origin ∝ the overall vol level. So one dot encodes level (radius) and structure
+(angle) at once.
+
+> *Example.* A dot at (Back 16%, Front 20%) sits above the line (R = 1.25,
+> backwardation) and far from the origin (high level). A dot at (Back 11%, Front 12%)
+> sits just above the line (R ≈ 1.09) and near the origin (low level) — same broad
+> "front rich" structure, very different premium environment. The two-line time
+> series can't show that distinction at a glance; the scatter can.
+
+**The diagnostic.** A cloud hugging one ray through the origin ⇒ ratio ≈ constant
+(adds little beyond level). A cloud that fans across angles ⇒ ratio varies
+independently of level (adds information). Intraday, color typically shows the cloud
+starting high and above the line at the open, then spiraling inward and downward as
+the front leg crushes faster than the back.
+
+### 11.4 Regime Analysis sub-tab (Trade Journal → `📈 Regime Analysis`)
+
+The formal test of the §3.1 question: **does IV Ratio carry outcome information
+beyond IV level?** It reconstructs entry-time term structure for every logged trade
+and asks whether the *structure* dimension matters after the *level* dimension is
+held fixed.
+
+**Data path (no schema change).** For each trade, `initial_legs` JSON yields the
+front/back expiries and the call/put strikes; `entry_date`+`entry_time` (ET) is
+converted to UTC; `db.get_entry_iv_context` finds the nearest COMPLETE snapshot and
+returns the **at-strike** Front/Back IV (averaged across the call and put legs you
+actually traded), plus ATM context. This works **retroactively** on existing trades.
+
+**Why level = √(F·B), not Front IV.** Intraday, R = F/B ≈ F/(sticky back), so Front
+IV and Ratio are *correlated* — splitting on Front IV × Ratio leaves two quadrants
+nearly empty and confounds the test. Level `L = √(F·B)` and `R = F/B` are an exact,
+near-orthogonal reparametrization of (F, B): knowing the geometric-mean vol tells you
+almost nothing about the ratio, so all four quadrants populate and "does R matter
+after controlling for level?" becomes cleanly separable. (`F = L·√R`, `B = L/√R`.)
+
+**The visualization.** The same Front-vs-Back scatter, now divided by an **orange ray**
+(front = median-R × back) splitting high/low ratio and a **purple hyperbola**
+(`front = median-level² / back`) splitting high/low level. The four regions are the
+quadrants. Points are colored by **realized transform credit** (`profit_locked_in`,
+the validated metric; red→green diverging, centered at 0); open trades render as grey
+hollow markers.
+
+**The stratified 2×2 table** reports mean transform credit and **n** per cell.
+
+> *Worked example.* Suppose, once enough trades exist:
+>
+> | Level \ Ratio | High R | Low R |
+> |---|---|---|
+> | **High level** | +6.9 (n=12) | +5.1 (n=11) |
+> | **Low level**  | +6.4 (n=10) | +4.8 (n=13) |
+>
+> Reading **across each row** (holding level fixed): High-R beats Low-R by ~+1.8 at
+> high level and ~+1.6 at low level. Because the ratio effect **survives within both
+> level strata**, IV Ratio is adding information beyond level — a real reason to put it
+> in the entry criteria. If instead the rows were flat across the ratio columns and all
+> the variation were top-to-bottom (level), the ratio would just be proxying level and
+> would *not* earn a place in the entry rule.
+
+**What NOT to conclude (enforced in the UI).** (1) **Sample size** — with a handful of
+trades none of this is significant; cells with n<5 are flagged as noise; ~10–15 per
+cell is the floor. (2) **Pre-commit** to transform credit as the primary outcome and
+the median splits *before* the data fills in — do not tune the 0.70/1.30 bands or the
+split points to what looks good (overfitting). (3) **Selection bias** — outcomes exist
+only for regimes actually entered; an empty quadrant means "never traded there", not
+"bad". (4) **Confounds** — front-DTE and the 0DTE end-of-day artifact distort the
+ratio; entries near the close are least reliable.
+
+**Status:** `HYPOTHESIS`. This sub-tab is the *mechanism* to validate or refute the
+IV-ratio-favorability question; it asserts nothing until the cells carry real n.
+
+### 11.5 New code surface (v3)
+
+| Item | File | Notes |
+|---|---|---|
+| `_SESSION_RANGEBREAKS` | `app.py` | Weekend + overnight + holiday collapse for multi-day charts. |
+| `_RATIO_BANDS`, `_RATIO_THRESHOLDS` | `app.py` | Regime band edges/colors for the ratio line. |
+| `_banded_ratio_traces()` | `app.py` | Continuous multicolor ratio line via threshold interpolation. |
+| Stacked panel + scatter | `app.py` | Additive expanders under Calendar Edge; original chart retained. |
+| `get_entry_iv_context()` | `db.py` | Read-only reconstruction of entry-time F/B/R/level from snapshots. No schema change. |
+| `render_regime_analysis()` + nav entry | `pages/journal.py` | New `📈 Regime Analysis` sub-tab. |
+
+---
+
+*End of DOCUMENTATION.md — Version 1.3 — 2026-06-26*
