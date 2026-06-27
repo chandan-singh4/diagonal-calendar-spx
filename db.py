@@ -915,6 +915,18 @@ def init_trades_table(db_path: str) -> None:
     """
     with managed_conn(db_path) as conn:
         conn.executescript(_TRADES_DDL)
+
+        # v3.1 column migrations — safe to run on existing databases
+        try:
+            conn.execute("ALTER TABLE trades ADD COLUMN transform_commissions REAL")
+        except Exception:
+            pass  # column already exists
+
+        try:
+            conn.execute("ALTER TABLE trades ADD COLUMN close_type TEXT")
+        except Exception:
+            pass  # column already exists
+
     logger.info("Trades table verified at %s", db_path)
 
 
