@@ -530,7 +530,7 @@ if page_mode == "📊 Overview":
                 "Debit/sh":    f"−{fmt_f2(t['total_debit'])}",
                 "Fees ($)":    f"${_fees:.2f}" if _fees > 0 else "—",
                 "Realized P&L": fmt_pl(_real_pl) if _real_pl is not None else "—",
-                "Max Loss":    fmt_pl(_max_loss) if _max_loss is not None else ("Risk-Free" if t.get("ic_risk_free") else "—"),
+                "Max Loss":    fmt_pl(_max_loss) if _max_loss is not None else ("Risk-Free" if t["ic_risk_free"] else "—"),
                 "Net P&L":     fmt_pl(_net_pl)   if _net_pl  is not None else "—",
                 "Outcome":     t["outcome"] or "Pending",
             })
