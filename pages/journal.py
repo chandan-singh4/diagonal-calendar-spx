@@ -86,6 +86,7 @@ _SS_DEFAULTS = {
     "close_mode_radio":         "Transform to Iron Condor",
     # Banner
     "_success_msg":             None,
+    "_show_no_data_warning":    False,
 }
 for _k, _v in _SS_DEFAULTS.items():
     if _k not in st.session_state:
@@ -530,7 +531,7 @@ if page_mode == "📊 Overview":
                 "Debit/sh":    f"−{fmt_f2(t['total_debit'])}",
                 "Fees ($)":    f"${_fees:.2f}" if _fees > 0 else "—",
                 "Realized P&L": fmt_pl(_real_pl) if _real_pl is not None else "—",
-                "Max Loss":    fmt_pl(_max_loss) if _max_loss is not None else ("Risk-Free" if t["ic_risk_free"] else "—"),
+                "Max Loss":    fmt_pl(_max_loss) if _max_loss is not None else ("Risk-Free" if t.get("ic_risk_free") else "—"),
                 "Net P&L":     fmt_pl(_net_pl)   if _net_pl  is not None else "—",
                 "Outcome":     t["outcome"] or "Pending",
             })
@@ -631,34 +632,6 @@ if page_mode == "📊 Overview":
                         c2.metric("Net P&L / contract",
                                   fmt_pl(t["profit_locked_in"]*100*t["contracts"] - _tf_r))
 
-                    st.markdown(""); st.markdown("---")
-                    btn1,btn2,_ = st.columns([1,1,4])
-                    if btn1.button("✏️ Edit Close", key=f"edit_tf_{t['trade_id']}", use_container_width=True):
-                        st.session_state["edit_transform_id"]          = t["trade_id"]
-                        st.session_state["confirm_delete_transform_id"] = None
-                        st.session_state["_pending_close_mode"]        = "Close Position Directly"
-                        st.session_state["_pending_nav"]               = "🔄 Close / Transform"
-                        st.rerun()
-                    if btn2.button("🗑️ Delete Close Record", key=f"del_tf_{t['trade_id']}", use_container_width=True):
-                        st.session_state["confirm_delete_transform_id"] = t["trade_id"]
-                    if st.session_state["confirm_delete_transform_id"] == t["trade_id"]:
-                        st.warning(f"⚠️ Delete close record for **{t['trade_id']}**? Trade resets to Open.")
-                        dc1,dc2,_ = st.columns([1,1,4])
-                        if dc1.button("Confirm", type="primary", key="btn_confirm_del_tf"):
-                            db.update_trade(config.DB_PATH, t["trade_id"],
-                                status="Open", close_type=None,
-                                transform_date=None, transform_time=None, transform_minutes=None,
-                                spx_at_transform=None, transform_legs=None, credit_received=None,
-                                profit_locked_in=None, transform_commissions=None,
-                                result_date=None, final_pl=None, outcome=None,
-                                ic_expiry_date=None, ic_short_call=None, ic_long_call=None,
-                                ic_short_put=None, ic_long_put=None, ic_call_wing=None,
-                                ic_put_wing=None, ic_max_profit=None, ic_worst_case=None, ic_risk_free=None)
-                            st.session_state["confirm_delete_transform_id"] = None
-                            st.session_state["_success_msg"] = f"Close record for {t['trade_id']} deleted. Trade reset to Open."
-                            st.rerun()
-                        if dc2.button("Cancel", key="btn_cancel_del_tf"):
-                            st.session_state["confirm_delete_transform_id"] = None; st.rerun()
 
                 else:
                     # IC Transformation
@@ -683,33 +656,6 @@ if page_mode == "📊 Overview":
                     c2.metric("Net P&L / contract (after fees)",
                               fmt_pl(t["profit_locked_in"]*100*t["contracts"] - _tf_fees))
 
-                    st.markdown(""); st.markdown("---")
-                    btn1,btn2,_ = st.columns([1,1,4])
-                    if btn1.button("✏️ Edit Transformation", key=f"edit_tf_{t['trade_id']}", use_container_width=True):
-                        st.session_state["edit_transform_id"]          = t["trade_id"]
-                        st.session_state["confirm_delete_transform_id"] = None
-                        st.session_state["_pending_close_mode"]        = "Transform to Iron Condor"
-                        st.session_state["_pending_nav"]               = "🔄 Close / Transform"
-                        st.rerun()
-                    if btn2.button("🗑️ Delete Transformation", key=f"del_tf_{t['trade_id']}", use_container_width=True):
-                        st.session_state["confirm_delete_transform_id"] = t["trade_id"]
-                    if st.session_state["confirm_delete_transform_id"] == t["trade_id"]:
-                        st.warning(f"⚠️ Delete transformation for **{t['trade_id']}**? IC data cleared, trade resets to Open.")
-                        dc1,dc2,_ = st.columns([1,1,4])
-                        if dc1.button("Confirm", type="primary", key="btn_confirm_del_tf"):
-                            db.update_trade(config.DB_PATH, t["trade_id"],
-                                status="Open", close_type=None,
-                                transform_date=None, transform_time=None, transform_minutes=None,
-                                spx_at_transform=None, transform_legs=None, credit_received=None,
-                                profit_locked_in=None, transform_commissions=None,
-                                ic_expiry_date=None, ic_short_call=None, ic_long_call=None,
-                                ic_short_put=None, ic_long_put=None, ic_call_wing=None,
-                                ic_put_wing=None, ic_max_profit=None, ic_worst_case=None, ic_risk_free=None)
-                            st.session_state["confirm_delete_transform_id"] = None
-                            st.session_state["_success_msg"] = f"Transformation for {t['trade_id']} deleted. Trade reset to Open."
-                            st.rerun()
-                        if dc2.button("Cancel", key="btn_cancel_del_tf"):
-                            st.session_state["confirm_delete_transform_id"] = None; st.rerun()
 
             # ── Tab 2: Iron Condor ────────────────────────────────────────
             with tabs[2]:
@@ -880,16 +826,32 @@ elif page_mode == "➕ Log a Trade":
     # ── Header ───────────────────────────────────────────────────────────────
     if in_wizard and is_edit:
         st.info(f"**Step 1 of 2 — Initial Trade Entry** for {edit_id}. "
-                f"Save to continue to Close / Transform.")
-        tc, cc = st.columns([5,1])
-        tc.subheader(f"Log a Trade — Editing {edit_id}")
-        tc.caption("Modifying the initial entry. Transformation and IC data are unchanged.")
-        if cc.button("✕ Cancel Edit", key="cancel_edit"):
+                f"Review and save, or move to Step 2 without changes.")
+        # Top action buttons (outside the form)
+        hdr_c1, hdr_c2, hdr_c3 = st.columns([1, 1.3, 5])
+        if hdr_c1.button("← Cancel Edit", key="cancel_edit", use_container_width=True):
+            # Discard unsaved edits, return to Overview — zero DB writes.
             st.session_state["edit_trade_id"]    = None
             st.session_state["_wizard_mode"]     = False
             st.session_state["_wizard_trade_id"] = None
+            st.session_state["_show_leave_warning"] = False
             st.session_state["_pending_nav"]     = "📊 Overview"
             st.rerun()
+        if hdr_c2.button("Move to Step 2 →", key="move_to_step2", use_container_width=True):
+            # Navigate to Close/Transform WITHOUT saving the initial trade.
+            wizard_id = st.session_state.get("_wizard_trade_id", edit_id)
+            _existing = db.get_trade(config.DB_PATH, wizard_id)
+            _ct_existing = get_close_type(_existing) if _existing else None
+            st.session_state["edit_trade_id"]       = None
+            st.session_state["edit_transform_id"]   = wizard_id
+            st.session_state["_pending_close_mode"] = (
+                "Close Position Directly" if _ct_existing == "direct" else "Transform to Iron Condor"
+            )
+            st.session_state["_pending_nav"]  = "🔄 Close / Transform"
+            st.session_state["_success_msg"]  = "Log Entry unchanged. Review Close / Transform record below."
+            st.rerun()
+        st.subheader(f"Log a Trade — Editing {edit_id}")
+        st.caption("Modifying the initial entry. Transformation and IC data are unchanged.")
     elif is_edit and edit_trade:
         tc, cc = st.columns([5,1])
         tc.subheader(f"Log a Trade — Editing {edit_id}")
@@ -967,17 +929,16 @@ elif page_mode == "➕ Log a Trade":
                     db.update_trade(config.DB_PATH, edit_id, **fields)
                     st.session_state["edit_trade_id"] = None
                     if in_wizard:
-                        # Proceed to Step 2
+                        # Proceed to Step 2 — same destination as Move to Step 2
                         wizard_id = st.session_state.get("_wizard_trade_id", edit_id)
-                        st.session_state["edit_transform_id"] = wizard_id
-                        # Pre-select the correct close mode based on existing close_type
                         _existing = db.get_trade(config.DB_PATH, wizard_id)
                         _ct_existing = get_close_type(_existing) if _existing else None
+                        st.session_state["edit_transform_id"]   = wizard_id
                         st.session_state["_pending_close_mode"] = (
                             "Close Position Directly" if _ct_existing == "direct" else "Transform to Iron Condor"
                         )
                         st.session_state["_pending_nav"]  = "🔄 Close / Transform"
-                        st.session_state["_success_msg"]  = "Initial trade saved. Review close / transform record below."
+                        st.session_state["_success_msg"]  = "Initial Trade saved. Review Close / Transform record below."
                     else:
                         st.session_state["_pending_nav"]  = "📊 Overview"
                         st.session_state["_success_msg"]  = "Changes saved successfully."
@@ -1017,27 +978,42 @@ elif page_mode == "🔄 Close / Transform":
             st.rerun()
         st.stop()
 
+    # ── "Nothing entered" warning (set by form submit when wizard + no data) ──
+    if st.session_state.get("_show_no_data_warning"):
+        st.warning("Position hasn't been transformed or closed.")
+        if st.button("← Return to Overview", key="no_data_overview"):
+            st.session_state["_show_no_data_warning"] = False
+            st.session_state["edit_transform_id"]     = None
+            st.session_state["_wizard_mode"]          = False
+            st.session_state["_wizard_trade_id"]      = None
+            st.session_state["_pending_nav"]          = "📊 Overview"
+            st.rerun()
+        st.stop()
+
     # ── Header ───────────────────────────────────────────────────────────────
     if is_tf_edit and edit_tf_trade:
-        hdr_cols = st.columns([5,1]) if not in_wizard else st.columns([4,1,1])
-        hdr_cols[0].subheader(
-            f"Close / Transform — {'Step 2 of 2: ' if in_wizard else ''}Editing {edit_tf_id}")
-        hdr_cols[0].caption("Modifying close or transformation record.")
         if in_wizard:
-            if hdr_cols[1].button("Skip →", key="wizard_skip", help="Skip Step 2 and return to Overview"):
+            hdr_cols = st.columns([4, 1, 1])
+            hdr_cols[0].subheader(f"Close / Transform — Step 2 of 2: Editing {edit_tf_id}")
+            hdr_cols[0].caption("Modifying close or transformation record.")
+            if hdr_cols[1].button("← Go Back", key="wizard_go_back", use_container_width=True,
+                                   help="Return to Step 1 — Log a Trade"):
+                wizard_id = st.session_state.get("_wizard_trade_id", edit_tf_id)
                 st.session_state["edit_transform_id"] = None
-                st.session_state["_wizard_mode"]      = False
-                st.session_state["_wizard_trade_id"]  = None
-                st.session_state["_pending_nav"]      = "📊 Overview"
-                st.session_state["_success_msg"]      = f"Trade {edit_tf_id} updated. No changes made to close / transform."
+                st.session_state["edit_trade_id"]     = wizard_id
+                st.session_state["_pending_nav"]      = "➕ Log a Trade"
                 st.rerun()
-            if hdr_cols[2].button("✕ Cancel", key="cancel_tf_edit"):
+            if hdr_cols[2].button("Cancel", key="cancel_tf_edit", use_container_width=True,
+                                   help="Exit wizard and return to Overview"):
                 st.session_state["edit_transform_id"] = None
                 st.session_state["_wizard_mode"]      = False
                 st.session_state["_wizard_trade_id"]  = None
                 st.session_state["_pending_nav"]      = "📊 Overview"
                 st.rerun()
         else:
+            hdr_cols = st.columns([5, 1])
+            hdr_cols[0].subheader(f"Close / Transform — Editing {edit_tf_id}")
+            hdr_cols[0].caption("Modifying close or transformation record.")
             if hdr_cols[1].button("← Cancel", key="cancel_tf_edit"):
                 st.session_state["edit_transform_id"] = None
                 st.session_state["_pending_nav"]      = "📊 Overview"
@@ -1096,7 +1072,11 @@ elif page_mode == "🔄 Close / Transform":
                             unsafe_allow_html=True)
             if st.form_submit_button("💾 Save Changes" if is_tf_edit else "💾 Record Close", use_container_width=True):
                 if not close_time:
-                    st.error("Close time is required.")
+                    if in_wizard:
+                        st.session_state["_show_no_data_warning"] = True
+                        st.rerun()
+                    else:
+                        st.error("Close time is required.")
                 else:
                     locked = net_credit - base["total_debit"]
                     final_pl_ct = locked*100*int(base["contracts"])
@@ -1111,6 +1091,7 @@ elif page_mode == "🔄 Close / Transform":
                     st.session_state["edit_transform_id"] = None
                     st.session_state["_wizard_mode"]      = False
                     st.session_state["_wizard_trade_id"]  = None
+                    # Direct close: position fully recorded → return to Overview
                     st.session_state["_pending_nav"]      = "📊 Overview"
                     st.session_state["_success_msg"]      = (
                         f"Close record {'updated' if is_tf_edit else 'saved'} for {chosen_id}. "
@@ -1175,7 +1156,11 @@ elif page_mode == "🔄 Close / Transform":
 
             if st.form_submit_button("💾 Save Changes" if is_tf_edit else "💾 Save Transformation", use_container_width=True):
                 if credit <= 0:
-                    st.error("Credit received must be > 0.")
+                    if in_wizard:
+                        st.session_state["_show_no_data_warning"] = True
+                        st.rerun()
+                    else:
+                        st.error("Credit received must be > 0.")
                 elif not tf_time:
                     st.error("Transform time is required.")
                 else:
@@ -1199,10 +1184,17 @@ elif page_mode == "🔄 Close / Transform":
                     st.session_state["edit_transform_id"] = None
                     st.session_state["_wizard_mode"]      = False
                     st.session_state["_wizard_trade_id"]  = None
-                    st.session_state["_pending_nav"]      = "📊 Overview"
                     ic_note = (f" IC: Max Profit ${ic['ic_max_profit']:.0f} · {'⚡ Risk-Free' if ic['ic_risk_free'] else 'Not risk-free'}." if ic else "")
-                    st.session_state["_success_msg"] = (
-                        f"Transformation {'updated' if is_tf_edit else 'recorded'} for {chosen_id}.{ic_note}")
+                    if in_wizard:
+                        # IC still needs expiry tracking — send to Mark Expired
+                        st.session_state["_pending_nav"]  = "⏰ Mark Expired"
+                        st.session_state["_success_msg"]  = (
+                            f"Transformation recorded for {chosen_id}.{ic_note} "
+                            f"Mark the position as expired when it reaches expiry.")
+                    else:
+                        st.session_state["_pending_nav"]  = "📊 Overview"
+                        st.session_state["_success_msg"]  = (
+                            f"Transformation {'updated' if is_tf_edit else 'recorded'} for {chosen_id}.{ic_note}")
                     st.rerun()
 
 # ─────────────────────────────────────────────────────────────────────────────
