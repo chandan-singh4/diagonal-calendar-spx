@@ -29,6 +29,7 @@ import json
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -187,6 +188,222 @@ def get_ic_fills(initial_legs_json, transform_legs_json) -> dict:
     except Exception:
         pass
     return fills
+
+
+def _ic_payoff_chart(
+    lp: float, sp: float, sc: float, lc: float,
+    mp: float, wc: float, rf: bool,
+    current_spx: float | None = None,
+) -> go.Figure:
+    """
+    Iron Condor payoff-at-expiration chart.
+
+    Strikes:  lp (long put) < sp (short put) < sc (short call) < lc (long call)
+    mp        – max profit in dollars per contract
+    wc        – max loss magnitude (worst-case) in dollars per contract
+    rf        – True when the position is risk-free (locked credit > IC max loss)
+    current_spx – optional live SPX price; draws an amber vertical marker when provided
+    """
+    # ── Colour palette (matches dashboard dark theme) ────────────────────────
+    C_BG    = "#0e1117"
+    C_GRID  = "#1e2530"
+    C_TEXT  = "#c8d0dc"
+    C_GREEN = "#2ecc71"
+    C_RED   = "#e74c3c"
+    C_ZERO  = "#4a5568"
+    C_SPX   = "#f59e0b"
+    C_BE    = "#94a3b8"
+    C_STK   = "#2a3750"
+    C_PROFIT_FILL = "rgba(46,204,113,0.13)"
+    C_LOSS_FILL   = "rgba(231,76,60,0.13)"
+
+    # ── Payoff function ───────────────────────────────────────────────────────
+    wing_val = wc if rf else -wc  # P&L at either wing
+
+    def _pnl(price: float) -> float:
+        if price <= lp:
+            return wing_val
+        if price <= sp:
+            t = (price - lp) / (sp - lp)
+            return wing_val + t * (mp - wing_val)
+        if price <= sc:
+            return mp
+        if price <= lc:
+            t = (price - sc) / (lc - sc)
+            return mp + t * (wing_val - mp)
+        return wing_val
+
+    # ── X range ──────────────────────────────────────────────────────────────
+    wing_w = max(sp - lp, lc - sc, 50)
+    pad    = wing_w * 1.8
+    x_min, x_max = lp - pad, lc + pad
+    x = np.linspace(x_min, x_max, 3000)
+    y = np.vectorize(_pnl)(x)
+
+    # ── Breakeven prices ─────────────────────────────────────────────────────
+    # (only finite when the wings are at a loss)
+    if not rf and (mp + wc) > 0:
+        be_lo = lp + wc * (sp - lp) / (mp + wc)
+        be_hi = sc + mp * (lc - sc) / (mp + wc)
+    else:
+        be_lo = be_hi = None
+
+    # ── Colour-split curve ───────────────────────────────────────────────────
+    y_pos = np.where(y >= 0, y, np.nan)
+    y_neg = np.where(y <  0, y, np.nan)
+
+    fig = go.Figure()
+
+    # Profit fill
+    fig.add_trace(go.Scatter(
+        x=x, y=np.where(y >= 0, y, 0),
+        fill="tozeroy", fillcolor=C_PROFIT_FILL,
+        line=dict(color="rgba(0,0,0,0)"),
+        showlegend=False, hoverinfo="skip",
+    ))
+    # Loss fill
+    fig.add_trace(go.Scatter(
+        x=x, y=np.where(y < 0, y, 0),
+        fill="tozeroy", fillcolor=C_LOSS_FILL,
+        line=dict(color="rgba(0,0,0,0)"),
+        showlegend=False, hoverinfo="skip",
+    ))
+    # Profit curve
+    fig.add_trace(go.Scatter(
+        x=x, y=y_pos, mode="lines",
+        line=dict(color=C_GREEN, width=2.5),
+        showlegend=False, hoverinfo="skip",
+    ))
+    # Loss curve
+    fig.add_trace(go.Scatter(
+        x=x, y=y_neg, mode="lines",
+        line=dict(color=C_RED, width=2.5),
+        showlegend=False, hoverinfo="skip",
+    ))
+    # Wide invisible trace for hover hit-area
+    hover_labels = [
+        (f"+${v:.0f}" if v >= 0 else f"−${abs(v):.0f}") for v in y
+    ]
+    fig.add_trace(go.Scatter(
+        x=x, y=y,
+        mode="lines",
+        line=dict(color="rgba(0,0,0,0)", width=24),
+        showlegend=False,
+        hovertemplate=(
+            "<span style='font-size:13px'><b>SPX %{x:.0f}</b></span><br>"
+            "P&L: <b>%{customdata}</b><extra></extra>"
+        ),
+        customdata=hover_labels,
+    ))
+
+    # ── Strike dotted verticals + labels ─────────────────────────────────────
+    strike_labels = [
+        (lp, f"LP {int(lp)}"),
+        (sp, f"SP {int(sp)}"),
+        (sc, f"SC {int(sc)}"),
+        (lc, f"LC {int(lc)}"),
+    ]
+    for sx, label in strike_labels:
+        fig.add_vline(x=sx, line=dict(color=C_STK, width=1, dash="dot"))
+        fig.add_annotation(
+            x=sx, y=1.04, yref="paper",
+            text=label, showarrow=False,
+            font=dict(size=9, color="#64748b"),
+            xanchor="center",
+        )
+
+    # ── Zero baseline ────────────────────────────────────────────────────────
+    fig.add_hline(y=0, line=dict(color=C_ZERO, width=1))
+
+    # ── Breakeven markers ────────────────────────────────────────────────────
+    if be_lo is not None:
+        fig.add_vline(x=be_lo, line=dict(color=C_BE, width=1.5, dash="dash"))
+        fig.add_annotation(
+            x=be_lo, y=0, ax=0, ay=28,
+            text=f"BE {be_lo:.0f}", showarrow=True,
+            arrowhead=0, arrowcolor=C_BE, arrowwidth=1,
+            font=dict(size=10, color=C_BE),
+            xanchor="right",
+        )
+    if be_hi is not None:
+        fig.add_vline(x=be_hi, line=dict(color=C_BE, width=1.5, dash="dash"))
+        fig.add_annotation(
+            x=be_hi, y=0, ax=0, ay=28,
+            text=f"BE {be_hi:.0f}", showarrow=True,
+            arrowhead=0, arrowcolor=C_BE, arrowwidth=1,
+            font=dict(size=10, color=C_BE),
+            xanchor="left",
+        )
+
+    # ── Current SPX vertical ──────────────────────────────────────────────────
+    if current_spx is not None:
+        fig.add_vline(x=current_spx, line=dict(color=C_SPX, width=2))
+        fig.add_annotation(
+            x=current_spx, y=1.04, yref="paper",
+            text=f"▼ {current_spx:.0f}",
+            showarrow=False,
+            font=dict(size=10, color=C_SPX, family="monospace"),
+            xanchor="center",
+            bgcolor="rgba(14,17,23,0.85)",
+            borderpad=3,
+        )
+
+    # ── Max profit callout ───────────────────────────────────────────────────
+    fig.add_annotation(
+        x=(sp + sc) / 2, y=mp,
+        ax=0, ay=-36,
+        text=f"Max Profit  +${mp:.0f}",
+        showarrow=True,
+        arrowhead=0, arrowcolor="#10b981", arrowwidth=1,
+        font=dict(size=11, color="#10b981"),
+        bgcolor="rgba(14,17,23,0.9)",
+        bordercolor="#10b981", borderwidth=1, borderpad=4,
+    )
+
+    # ── Max loss callout (wings only, not risk-free) ──────────────────────────
+    if not rf:
+        fig.add_annotation(
+            x=lp - pad * 0.35, y=-wc,
+            text=f"Max Loss  −${wc:.0f}",
+            showarrow=False,
+            font=dict(size=11, color=C_RED),
+            bgcolor="rgba(14,17,23,0.9)",
+            bordercolor=C_RED, borderwidth=1, borderpad=4,
+            xanchor="center",
+        )
+
+    # ── Layout ────────────────────────────────────────────────────────────────
+    y_lo = (-wc * 1.45) if not rf else (-mp * 0.15)
+    y_hi = mp * 1.40
+
+    fig.update_layout(
+        paper_bgcolor=C_BG,
+        plot_bgcolor=C_BG,
+        margin=dict(l=70, r=20, t=42, b=44),
+        height=330,
+        hovermode="x",
+        xaxis=dict(
+            title="SPX at Expiration",
+            title_font=dict(color=C_TEXT, size=11),
+            tickfont=dict(color=C_TEXT, size=11),
+            gridcolor=C_GRID, showgrid=True, zeroline=False,
+            range=[x_min, x_max],
+        ),
+        yaxis=dict(
+            title="P&L per Contract ($)",
+            title_font=dict(color=C_TEXT, size=11),
+            tickfont=dict(color=C_TEXT, size=11),
+            gridcolor=C_GRID, showgrid=True, zeroline=False,
+            range=[y_lo, y_hi],
+            tickprefix="$",
+        ),
+        hoverlabel=dict(
+            bgcolor="#1a2035",
+            bordercolor="#334155",
+            font=dict(color=C_TEXT, size=13),
+        ),
+    )
+    return fig
 
 
 def compute_stats(rows: list) -> dict:
@@ -677,22 +894,24 @@ if page_mode == "📊 Overview":
                               f"{'+'if t['ic_risk_free'] else '−'}${t['ic_worst_case']:.0f}")
                     if t["ic_risk_free"]:
                         st.success("✓ Risk-Free — locked credit exceeds max IC loss at any expiry.")
-                    st.markdown("**P&L by Expiry Zone**")
                     sc,lc,sp,lp = t["ic_short_call"],t["ic_long_call"],t["ic_short_put"],t["ic_long_put"]
                     mp,wc,rf = t["ic_max_profit"],t["ic_worst_case"],bool(t["ic_risk_free"])
-                    st.dataframe(pd.DataFrame([
-                        {"Zone":f"SPX>{int(lc)} (call wing)","P&L":f"+${wc:.0f}" if rf else f"−${wc:.0f}"},
-                        {"Zone":f"{int(sc)}–{int(lc)} (call partial)","P&L":f"+${wc:.0f}→+${mp:.0f}" if rf else f"$0→+${mp:.0f}"},
-                        {"Zone":f"{int(sp)}–{int(sc)} ★ MAX PROFIT","P&L":f"+${mp:.0f}"},
-                        {"Zone":f"{int(lp)}–{int(sp)} (put partial)","P&L":f"+${wc:.0f}→+${mp:.0f}" if rf else f"$0→+${mp:.0f}"},
-                        {"Zone":f"SPX<{int(lp)} (put wing)","P&L":f"+${wc:.0f}" if rf else f"−${wc:.0f}"},
-                    ]), use_container_width=True, hide_index=True)
-                    st.markdown("")
+
+                    # ── Hoist marks query so current SPX is available for chart ──
+                    marks = db.get_ic_marks(config.DB_PATH, t["ic_expiry_date"],
+                                            sc,lc,sp,lp)
+                    current_spx = marks["spx"] if marks else None
+
+                    # ── Risk Profile chart ──────────────────────────────────────
+                    st.markdown("**Risk Profile at Expiration**")
+                    st.plotly_chart(
+                        _ic_payoff_chart(lp, sp, sc, lc, mp, wc, rf, current_spx),
+                        use_container_width=True,
+                        config={"displayModeBar": False},
+                    )
 
                     # Live IC Marks
                     st.markdown("**Live IC Marks & Position P&L**")
-                    marks = db.get_ic_marks(config.DB_PATH, t["ic_expiry_date"],
-                                            sc,lc,sp,lp)
                     if marks:
                         ctc    = marks["cost_to_close"]
                         locked = t["profit_locked_in"] or 0.0
