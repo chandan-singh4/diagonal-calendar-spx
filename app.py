@@ -746,7 +746,7 @@ with r2a:
         _ic_color  = "#2ecc71" if _ic_signal > 5 else "#c8d0dc"
         _ic_dollar = int(round(_ic_mark * 100))
         st.metric(
-            "IC Equivalent Mark",
+            "Transform Order Mark",
             f"{_ic_mark:.2f} pts  ·  ${_ic_dollar:,}",
             help="Credit value of the resulting IC after transformation: "
                  "short back legs minus long wings at ±5. "
@@ -761,7 +761,7 @@ with r2a:
             unsafe_allow_html=True,
         )
     else:
-        st.metric("IC Equivalent Mark", "— (set strikes)" if not strikes_set
+        st.metric("Transform Order Mark", "— (set strikes)" if not strikes_set
                   else "— (wing strikes not in chain)")
         st.caption("Value of IC after transforming diagonal at these strikes.")
 
@@ -784,19 +784,40 @@ with r2c:
     st.caption("How easy will it be to get filled near the mark price?")
 
 with r2d:
-    if strikes_set and _fc_wing_call.mark is not None and _fc_wing_put.mark is not None:
-        _wing_total = _fc_wing_call.mark + _fc_wing_put.mark
-        st.metric(
-            "Front Wing Cost (±5)",
-            f"${_wing_total:.2f}",
-            help=f"Cost to buy front-expiry wings: "
-                 f"Call {call_strike+5:.0f} + Put {put_strike-5:.0f}. "
-                 "These are the Buy to Open legs of your transformation order.",
-        )
-        st.caption(f"Call {call_strike+5:.0f} + Put {put_strike-5:.0f} on front expiry.")
+    _THRESHOLD = 5.0
+    if _ic_mark is not None and _diag_mark is not None:
+        _diff = _ic_mark - _diag_mark
+        if _diff >= _THRESHOLD:
+            st.metric("Transform Difference", f"+{_diff:.2f}")
+            st.markdown(
+                "<div style='margin-top:2px;padding:6px 10px;border-radius:6px;"
+                "background:#0d3320;border:1px solid #2ecc71;'>"
+                "<span style='color:#2ecc71;font-size:0.85em;font-weight:600;'>"
+                "✓ Transformation threshold reached</span><br>"
+                f"<span style='color:#aaa;font-size:0.78em;'>"
+                f"Ready to transform · +{_diff:.2f} pts above threshold</span>"
+                "</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            _remaining = _THRESHOLD - _diff
+            _progress  = max(0.0, min(1.0, _diff / _THRESHOLD))
+            _filled    = int(_progress * 10)
+            _bar       = "█" * _filled + "░" * (10 - _filled)
+            st.metric("Transform Difference", f"{_diff:.2f}",
+                      help=f"Transform Order Mark − Diagonal Mark. "
+                           f"Green when ≥ {_THRESHOLD}.")
+            st.markdown(
+                f"<div style='margin-top:4px;font-size:0.78em;color:#aaa;'>"
+                f"<span style='color:#f59e0b;font-family:monospace;'>{_bar}</span>"
+                f"&nbsp;{_progress*100:.0f}%<br>"
+                f"<span style='color:#64748b;'>{_remaining:.2f} pts until threshold</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
     else:
-        st.metric("Front Wing Cost (±5)", "— (set strikes)")
-        st.caption("Cost to add protection at ±5 strikes on front expiry.")
+        st.metric("Transform Difference", "— (set strikes)")
+        st.caption(f"Needs {_THRESHOLD} pts to trigger transformation signal.")
 
 st.divider()
 
