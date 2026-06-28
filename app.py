@@ -548,20 +548,20 @@ with c2:
         format_func=_exp_label, key="back_expiry_select",
     )
 with c3:
-    default_call = float(round(spx_price / 5) * 5)
-    call_strike = st.number_input(
-        "Call Strike", min_value=1000.0, max_value=15000.0,
-        value=default_call, step=5.0, format="%.0f",
-        key="call_strike_input",
-        help="Sell front CALL / Buy back CALL",
-    )
-with c4:
     default_put = float(round((spx_price - 100) / 5) * 5)
     put_strike = st.number_input(
         "Put Strike", min_value=1000.0, max_value=15000.0,
         value=default_put, step=5.0, format="%.0f",
         key="put_strike_input",
         help="Sell front PUT / Buy back PUT",
+    )
+with c4:
+    default_call = float(round(spx_price / 5) * 5)
+    call_strike = st.number_input(
+        "Call Strike", min_value=1000.0, max_value=15000.0,
+        value=default_call, step=5.0, format="%.0f",
+        key="call_strike_input",
+        help="Sell front CALL / Buy back CALL",
     )
 
 if back_expiry <= front_expiry:
@@ -570,27 +570,6 @@ if back_expiry <= front_expiry:
 front_dte = int(chain_df[chain_df["expiry"] == front_expiry]["dte"].iloc[0])
 back_dte  = int(chain_df[chain_df["expiry"] == back_expiry]["dte"].iloc[0])
 strikes_set = call_strike > 0 and put_strike > 0
-
-# Live per-strike contract data beneath controls
-if strikes_set:
-    lc1, lc2 = st.columns(2)
-    for col, side, strike, label in [
-        (lc1, "CALL", call_strike, "Call"),
-        (lc2, "PUT",  put_strike,  "Put"),
-    ]:
-        fc = iv_engine.strike_contract(chain_df, front_expiry, strike, side)
-        bc = iv_engine.strike_contract(chain_df, back_expiry,  strike, side)
-        if not fc.found_exact:
-            with col:
-                st.warning(f"{label} {strike:.0f} not in chain — nearest {fc.strike:.0f}")
-        f_iv_s = f"{fc.iv:.2f}%" if fc.iv else "N/A"
-        b_iv_s = f"{bc.iv:.2f}%" if bc.iv else "N/A"
-        rat_s  = f"{fc.iv / bc.iv:.4f}" if (fc.iv and bc.iv) else "N/A"
-        with col:
-            st.caption(
-                f"**{label} {strike:.0f}** — "
-                f"Front IV: {f_iv_s}  |  Back IV: {b_iv_s}  |  Ratio: {rat_s}"
-            )
 
 st.divider()
 
@@ -603,207 +582,29 @@ front_iv_atm = iv_engine.atm_iv(chain_df, front_expiry, spx_price)
 back_iv_atm  = iv_engine.atm_iv(chain_df, back_expiry,  spx_price)
 ts_now       = iv_engine.term_structure(front_iv_atm, back_iv_atm)
 
-# ═════════════════════════════════════════════════════════════════════════════
-# Period selector (Today / 5D / 10D / 20D) now lives on the RIGHT, above the
-# Selected-Strike IV chart (rendered inside right_col below). It is SHARED:
-# the same selection drives both the Selected-Strike IV and Calendar Edge charts.
-# ═════════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────────────────────
+# Period selector — page-level; drives all time-series charts below.
+# Hoisted from right_col so Calendar Edge and Strike Detail share one control.
+# ─────────────────────────────────────────────────────────────────────────────
 
-# ═════════════════════════════════════════════════════════════════════════════
-# SECTION 3 — EXPIRY DETAIL + STRIKE DETAIL  (left)
-#           + IV STRUCTURE PER STRIKE         (right)
-#
-# Left panel mirrors the "Expiry Detail / Strike Detail" from the previous
-# dashboard version: ATM IV per expiry with tick-change, and per-leg IV +
-# mark price for both call and put at the selected strikes.
-# Right panel is the Selected-Strike IV chart with ratio on second axis.
-# ═════════════════════════════════════════════════════════════════════════════
-
-left_col, right_col = st.columns([1, 3])
-
-# ── Left panel ────────────────────────────────────────────────────────────────
-with left_col:
-
-    # ── Expiry Detail ────────────────────────────────────────────────────
-    st.markdown("**Expiry Detail**")
-
-    for exp_label, exp_date, dte_val in [
-        ("Front", front_expiry, front_dte),
-        ("Back",  back_expiry,  back_dte),
-    ]:
-        exp_rows = db.get_latest_atm_iv_snapshots(config.DB_PATH, exp_date, n=2)
-        if exp_rows:
-            atm_now = exp_rows[0]["atm_avg_iv"] * 100
-            atm_chg = (
-                (exp_rows[0]["atm_avg_iv"] - exp_rows[1]["atm_avg_iv"]) * 100
-                if len(exp_rows) == 2 else 0.0
-            )
-            chg_color = "#2ecc71" if atm_chg >= 0 else "#e74c3c"
-            chg_arrow = "↑" if atm_chg >= 0 else "↓"
-            st.markdown(
-                f"<p style='margin:0;font-size:0.8em;color:#aaa;'>"
-                f"{exp_label} · {exp_date} · {dte_val} DTE</p>"
-                f"<p style='margin:0;font-size:1.6em;font-weight:600;'>"
-                f"{atm_now:.2f}%</p>"
-                f"<p style='margin:0 0 10px 0;font-size:0.85em;color:{chg_color};'>"
-                f"{chg_arrow} {atm_chg:+.2f}%</p>",
-                unsafe_allow_html=True,
-            )
-        else:
-            st.markdown(
-                f"<p style='margin:0;font-size:0.8em;color:#aaa;'>"
-                f"{exp_label} · {exp_date} · {dte_val} DTE</p>"
-                f"<p style='margin:0 0 10px 0;color:#666;'>N/A</p>",
-                unsafe_allow_html=True,
-            )
-
-    st.markdown("<hr style='margin:8px 0;opacity:0.2;'>", unsafe_allow_html=True)
-
-    # ── Strike Detail ────────────────────────────────────────────────────
-    st.markdown("**Strike Detail**")
-
-    if strikes_set:
-        fc_call = iv_engine.strike_contract(chain_df, front_expiry, call_strike, "CALL")
-        bc_call = iv_engine.strike_contract(chain_df, back_expiry,  call_strike, "CALL")
-        fc_put  = iv_engine.strike_contract(chain_df, front_expiry, put_strike,  "PUT")
-        bc_put  = iv_engine.strike_contract(chain_df, back_expiry,  put_strike,  "PUT")
-
-        for leg_label, fc, bc in [
-            (f"Call {call_strike:.0f}", fc_call, bc_call),
-            (f"Put  {put_strike:.0f}",  fc_put,  bc_put),
-        ]:
-            ratio_str = (
-                f"{fc.iv / bc.iv:.4f}" if (fc.iv and bc.iv) else "N/A"
-            )
-            f_iv_str  = f"{fc.iv:.2f}%" if fc.iv  else "N/A"
-            b_iv_str  = f"{bc.iv:.2f}%" if bc.iv  else "N/A"
-            f_mk_str  = f"${fc.mark:.2f}" if fc.mark else "N/A"
-            b_mk_str  = f"${bc.mark:.2f}" if bc.mark else "N/A"
-
-            st.markdown(
-                f"<p style='margin:6px 0 2px 0;font-weight:600;'>{leg_label}</p>"
-                f"<p style='margin:0;font-size:0.82em;'>"
-                f"IV → F <span style='color:#2ecc71;'>{f_iv_str}</span> "
-                f"/ B <span style='color:#3498db;'>{b_iv_str}</span> "
-                f"&nbsp;·&nbsp; Ratio <span style='color:#e74c3c;'>{ratio_str}</span></p>"
-                f"<p style='margin:0 0 6px 0;font-size:0.82em;'>"
-                f"Mark → F <span style='color:#2ecc71;'>{f_mk_str}</span> "
-                f"/ B <span style='color:#3498db;'>{b_mk_str}</span></p>",
-                unsafe_allow_html=True,
-            )
-    else:
-        st.caption("Set call and put strikes in Controls above.")
-
-# ── Right panel — IV Structure chart ─────────────────────────────────────────
-with right_col:
-    # Shared period selector, right-aligned above the chart
-    _rsp_spacer, _rsp_sel = st.columns([3, 2])
-    with _rsp_sel:
-        period_label = st.radio(
-            "Chart Range",
-            ["Today", "5D", "10D", "20D"],
-            horizontal=True,
-            label_visibility="collapsed",
-            key="period_radio",
-        )
-    period_days = {"Today": 1, "5D": 5, "10D": 10, "20D": 20}[period_label]
-
-    st.subheader("Selected-Strike IV")
-    st.caption("Front vs back IV at your trade strikes — ratio on right axis.")
-
-    if strikes_set:
-        fch = _load_contract_hist(front_expiry, call_strike, "CALL", period_days)
-        bch = _load_contract_hist(back_expiry,  call_strike, "CALL", period_days)
-        fph = _load_contract_hist(front_expiry, put_strike,  "PUT",  period_days)
-        bph = _load_contract_hist(back_expiry,  put_strike,  "PUT",  period_days)
-
-        call_ready = not fch.empty and not bch.empty
-        put_ready  = not fph.empty and not bph.empty
-
-        if call_ready or put_ready:
-            fig_str = go.Figure()
-
-            if call_ready:
-                cm = pd.merge(
-                    fch[["timestamp", "iv"]].rename(columns={"iv": "f_call"}),
-                    bch[["timestamp", "iv"]].rename(columns={"iv": "b_call"}),
-                    on="timestamp", how="inner",
-                )
-                cm["call_ratio"] = cm["f_call"] / cm["b_call"]
-                fig_str.add_trace(go.Scatter(x=cm["timestamp"], y=cm["f_call"],
-                    name=f"Front {call_strike:.0f}C",
-                    line=dict(color="#2ecc71", width=1.5), yaxis="y1"))
-                fig_str.add_trace(go.Scatter(x=cm["timestamp"], y=cm["b_call"],
-                    name=f"Back  {call_strike:.0f}C",
-                    line=dict(color="#3498db", width=1.5), yaxis="y1"))
-                fig_str.add_trace(go.Scatter(x=cm["timestamp"], y=cm["call_ratio"],
-                    name="Call Ratio (F/B)",
-                    line=dict(color="#e74c3c", width=1.5), yaxis="y2"))
-
-            if put_ready:
-                pm = pd.merge(
-                    fph[["timestamp", "iv"]].rename(columns={"iv": "f_put"}),
-                    bph[["timestamp", "iv"]].rename(columns={"iv": "b_put"}),
-                    on="timestamp", how="inner",
-                )
-                pm["put_ratio"] = pm["f_put"] / pm["b_put"]
-                fig_str.add_trace(go.Scatter(x=pm["timestamp"], y=pm["f_put"],
-                    name=f"Front {put_strike:.0f}P",
-                    line=dict(color="#2ecc71", width=1.5, dash="dot"), yaxis="y1"))
-                fig_str.add_trace(go.Scatter(x=pm["timestamp"], y=pm["b_put"],
-                    name=f"Back  {put_strike:.0f}P",
-                    line=dict(color="#3498db", width=1.5, dash="dot"), yaxis="y1"))
-                fig_str.add_trace(go.Scatter(x=pm["timestamp"], y=pm["put_ratio"],
-                    name="Put Ratio (F/B)",
-                    line=dict(color="#e74c3c", width=1.5, dash="dot"), yaxis="y2"))
-
-            fig_str.update_layout(
-                height=360,
-                margin=dict(l=20, r=20, t=10, b=20),
-                xaxis=dict(rangebreaks=_SESSION_RANGEBREAKS),
-                yaxis=dict(title="IV %", side="left"),
-                yaxis2=dict(title="Ratio", side="right", overlaying="y", showgrid=False),
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-                hovermode="x unified",
-            )
-            st.plotly_chart(fig_str, use_container_width=True)
-        else:
-            st.info(
-                f"No per-strike history for {call_strike:.0f}C / {put_strike:.0f}P "
-                f"in the selected range. Try 'Today'."
-            )
-    else:
-        st.caption("Enter call and put strikes in the Controls row above.")
-
-st.divider()
-
-# ═════════════════════════════════════════════════════════════════════════════
-# SECTION 4 — CALENDAR EDGE  (moved up — now directly below IV Structure)
-# ATM IV chart (floating ATM, macro context) + ratio metrics.
-# ═════════════════════════════════════════════════════════════════════════════
-
-_ce_title, _ce_range = st.columns([3, 1])
-with _ce_title:
-    st.subheader("Calendar Edge")
-with _ce_range:
-    st.markdown(
-        f"<p style='text-align:right;margin:0;padding-top:0.6em;"
-        f"font-size:0.85em;color:#aaa;'>Range: <b>{period_label}</b></p>",
-        unsafe_allow_html=True,
+_pr_l, _pr_r = st.columns([5, 1])
+with _pr_r:
+    period_label = st.radio(
+        "Chart Range",
+        ["Today", "5D", "10D", "20D"],
+        horizontal=True,
+        label_visibility="collapsed",
+        key="period_radio",
     )
+period_days = {"Today": 1, "5D": 5, "10D": 10, "20D": 20}[period_label]
 
-iv_index = float(chain_df.groupby("expiry")["iv"].mean().mean())
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("ATM IV Ratio (F/B)", f"{ts_now.ratio:.4f}")
-m2.metric("Front ATM IV",       f"{ts_now.front_iv:.2f}%")
-m3.metric("Back ATM IV",        f"{ts_now.back_iv:.2f}%")
-m4.metric("IV Index (avg)",     f"{iv_index:.2f}%")
-
-st.info(iv_engine.interpret_curve(ts_now))
+# ─────────────────────────────────────────────────────────────────────────────
+# atm_merged — hoisted so Entry Analysis (_iv_pct) and Calendar Edge
+# (charts) both see the same pre-computed DataFrame.
+# ─────────────────────────────────────────────────────────────────────────────
 
 front_hist = _load_atm_hist(front_expiry, period_days)
 back_hist  = _load_atm_hist(back_expiry,  period_days)
-
 atm_merged = pd.DataFrame()
 if not front_hist.empty and not back_hist.empty:
     atm_merged = pd.merge(
@@ -813,311 +614,11 @@ if not front_hist.empty and not back_hist.empty:
     )
     atm_merged["iv_ratio"] = atm_merged["front_iv"] / atm_merged["back_iv"]
 
-if not atm_merged.empty:
-    fig_atm = go.Figure()
-    fig_atm.add_trace(go.Scatter(x=atm_merged["timestamp"], y=atm_merged["front_iv"],
-        name="Front ATM IV", line=dict(color="#2ecc71", width=1.5), yaxis="y1"))
-    fig_atm.add_trace(go.Scatter(x=atm_merged["timestamp"], y=atm_merged["back_iv"],
-        name="Back ATM IV",  line=dict(color="#3498db", width=1.5), yaxis="y1"))
-    fig_atm.add_trace(go.Scatter(x=atm_merged["timestamp"], y=atm_merged["iv_ratio"],
-        name="IV Ratio (F/B)", line=dict(color="#e74c3c", width=1.5), yaxis="y2"))
-    fig_atm.update_layout(
-        height=300,
-        margin=dict(l=20, r=20, t=10, b=20),
-        xaxis=dict(rangebreaks=_SESSION_RANGEBREAKS),
-        yaxis=dict(title="IV %", side="left"),
-        yaxis2=dict(title="Ratio", side="right", overlaying="y", showgrid=False),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-        hovermode="x unified",
-    )
-    st.plotly_chart(fig_atm, use_container_width=True)
-
-    samp_warn = iv_engine.sample_size_warning(atm_merged["iv_ratio"])
-    if samp_warn:
-        st.warning(samp_warn)
-
-    # ── NEW (v3): stacked panel — Front/Back IV (same scale) + regime ratio ──
-    with st.expander("📊 Stacked view — Front/Back IV on one scale + regime-colored ratio",
-                     expanded=False):
-        fig_stack = make_subplots(
-            rows=2, cols=1, shared_xaxes=True,
-            row_heights=[0.62, 0.38], vertical_spacing=0.06,
-            subplot_titles=("Front vs Back ATM IV — same axis (the gap IS the spread)",
-                            "IV Ratio (F/B) — colored by regime"),
-        )
-        fig_stack.add_trace(go.Scatter(
-            x=atm_merged["timestamp"], y=atm_merged["front_iv"],
-            name="Front ATM IV", line=dict(color="#2ecc71", width=1.5)), row=1, col=1)
-        fig_stack.add_trace(go.Scatter(
-            x=atm_merged["timestamp"], y=atm_merged["back_iv"],
-            name="Back ATM IV", line=dict(color="#3498db", width=1.5)), row=1, col=1)
-        for tr in _banded_ratio_traces(atm_merged["timestamp"], atm_merged["iv_ratio"]):
-            fig_stack.add_trace(tr, row=2, col=1)
-        for thr, dash in [(1.00, "solid"), (0.70, "dot"), (1.30, "dot")]:
-            fig_stack.add_hline(y=thr, line=dict(color="#777", width=1, dash=dash),
-                                row=2, col=1)
-        fig_stack.update_xaxes(rangebreaks=_SESSION_RANGEBREAKS)
-        fig_stack.update_yaxes(title_text="IV %", row=1, col=1)
-        fig_stack.update_yaxes(title_text="Ratio", row=2, col=1)
-        fig_stack.update_layout(
-            height=520, margin=dict(l=20, r=20, t=40, b=20),
-            hovermode="x unified",
-            legend=dict(orientation="h", yanchor="bottom", y=-0.18,
-                        xanchor="left", x=0, font=dict(size=10)),
-        )
-        st.plotly_chart(fig_stack, use_container_width=True)
-        st.caption(
-            "Top: front and back ATM IV share one axis, so the vertical gap "
-            "between them is the term-structure spread. Bottom: the ratio crosses "
-            "into a new color at 0.70 / 1.00 / 1.30. Green (≥1) = backwardation "
-            "(front rich); amber (<0.70) is usually the front leg decaying into the "
-            "close, not a structural signal — read it as a caution zone."
-        )
-
-    # ── NEW (v3): Front-vs-Back scatter, colored by time of day ─────────────
-    with st.expander("🔵 Front vs Back IV scatter — intraday trajectory",
-                     expanded=False):
-        sc = atm_merged.copy()
-        sc["hod"] = sc["timestamp"].dt.hour + sc["timestamp"].dt.minute / 60.0
-        lo = float(min(sc["back_iv"].min(), sc["front_iv"].min()))
-        hi = float(max(sc["back_iv"].max(), sc["front_iv"].max()))
-        pad = (hi - lo) * 0.05 or 1.0
-        fig_sc = go.Figure()
-        fig_sc.add_trace(go.Scatter(
-            x=[lo - pad, hi + pad], y=[lo - pad, hi + pad], mode="lines",
-            name="R = 1  (Front = Back)", line=dict(color="#888", dash="dash")))
-        fig_sc.add_trace(go.Scatter(
-            x=sc["back_iv"], y=sc["front_iv"], mode="markers", name="snapshots",
-            marker=dict(size=6, color=sc["hod"], colorscale="Viridis",
-                        showscale=True, colorbar=dict(title="Hour ET"),
-                        line=dict(width=0)),
-            customdata=sc["iv_ratio"],
-            hovertemplate="Back %{x:.2f}%<br>Front %{y:.2f}%"
-                          "<br>R=%{customdata:.4f}<extra></extra>"))
-        fig_sc.update_layout(
-            height=420, margin=dict(l=20, r=20, t=10, b=20),
-            xaxis_title="Back ATM IV %", yaxis_title="Front ATM IV %",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
-        )
-        st.plotly_chart(fig_sc, use_container_width=True)
-        st.caption(
-            "Each dot is one snapshot. Above the dashed line = backwardation "
-            "(front richer, R>1); below = contango. Distance from the line is the "
-            "spread; distance from the origin is the overall vol level. Color is "
-            "time of day: watch the cloud start high/above the line at the open and "
-            "spiral inward and downward as the front leg crushes faster than the "
-            "back. A cloud hugging one ray ⇒ ratio ≈ constant (adds little); a cloud "
-            "fanning across angles ⇒ ratio varies independently of level (adds info)."
-        )
-else:
-    st.caption(
-        f"No ATM IV history for {front_expiry} / {back_expiry} in the selected range."
-    )
-
-dc1, dc2 = st.columns(2)
-for col, label, exp, dte in [
-    (dc1, "Front", front_expiry, front_dte),
-    (dc2, "Back",  back_expiry,  back_dte),
-]:
-    latest_rows = db.get_latest_atm_iv_snapshots(config.DB_PATH, exp, n=2)
-    with col:
-        if latest_rows:
-            lat_iv = latest_rows[0]["atm_avg_iv"] * 100
-            chg_iv = (
-                (latest_rows[0]["atm_avg_iv"] - latest_rows[1]["atm_avg_iv"]) * 100
-                if len(latest_rows) == 2 else 0.0
-            )
-            st.metric(f"{label} ATM IV  ({dte} DTE)", f"{lat_iv:.2f}%", f"{chg_iv:+.2f}%")
-        else:
-            st.metric(f"{label} ATM IV  ({dte} DTE)", "N/A")
-
 st.divider()
 
 # ═════════════════════════════════════════════════════════════════════════════
-# SECTION 5 — HISTORICAL STATISTICS  (always Today / 5D / 10D / 20D)
-# ts_now already computed above.
-# ═════════════════════════════════════════════════════════════════════════════
-
-st.subheader(
-    f"Historical Statistics — ATM IV Ratio  ·  "
-    f"{front_expiry} ({front_dte}d)  /  {back_expiry} ({back_dte}d)"
-)
-
-stat_cols = st.columns(4)
-for col, (label, days) in zip(
-    stat_cols,
-    [("Today", 1), ("5 Days", 5), ("10 Days", 10), ("20 Days", 20)],
-):
-    pf = _load_atm_hist(front_expiry, days)
-    pb = _load_atm_hist(back_expiry,  days)
-    with col:
-        st.caption(label)
-        if not pf.empty and not pb.empty:
-            pm = pd.merge(
-                pf[["timestamp", "atm_iv"]].rename(columns={"atm_iv": "f"}),
-                pb[["timestamp", "atm_iv"]].rename(columns={"atm_iv": "b"}),
-                on="timestamp",
-            )
-            pm["ratio"] = pm["f"] / pm["b"]
-            rs = iv_engine.range_stats(pm["ratio"], ts_now.ratio)
-            st.markdown(
-                f"""<div style="font-size:0.85em">{rs.low:.4f}
-<div style="background:linear-gradient(90deg,#444,#888);
-height:6px;border-radius:3px;position:relative;margin:4px 0;">
-<div style="position:absolute;left:{rs.position_pct}%;top:-3px;
-width:12px;height:12px;background:#e74c3c;border-radius:50%;
-transform:translateX(-50%);"></div></div>
-{rs.high:.4f}</div>""",
-                unsafe_allow_html=True,
-            )
-        else:
-            st.caption("No data")
-
-st.divider()
-
-# ═════════════════════════════════════════════════════════════════════════════
-# PAIR SCANNER DATA — computed once, shared by Pinned Pairs and Pair Scanner
-# ═════════════════════════════════════════════════════════════════════════════
-
-full_scanner_df = _compute_pair_scanner(session_date)
-scanner_total   = len(full_scanner_df)
-scanner_snaps   = (
-    int(full_scanner_df["snapshots"].max())
-    if not full_scanner_df.empty else 0
-)
-
-# ═════════════════════════════════════════════════════════════════════════════
-# SECTION 6 — PINNED PAIRS
-# ═════════════════════════════════════════════════════════════════════════════
-
-pinned = _load_pinned()
-st.subheader(f"⭐ Pinned Pairs  ({len(pinned)} pinned)")
-
-if pinned and not full_scanner_df.empty:
-    pinned_keys = {(p["front_expiry"], p["back_expiry"]) for p in pinned}
-    pinned_df = full_scanner_df[
-        full_scanner_df.apply(
-            lambda r: (r["front_expiry"], r["back_expiry"]) in pinned_keys, axis=1
-        )
-    ].copy()
-
-    if not pinned_df.empty:
-        pin_event = st.dataframe(
-            pinned_df[_TABLE_DISPLAY_COLS],
-            use_container_width=True, hide_index=True,
-            on_select="rerun", selection_mode="multi-row",
-            key="pinned_table", column_config=_table_col_config(),
-        )
-        sel_pinned = (
-            pin_event.selection.rows if hasattr(pin_event, "selection") else []
-        )
-        if sel_pinned:
-            to_remove_df = pinned_df.iloc[sel_pinned]
-            remove_keys  = set(zip(to_remove_df["front_expiry"], to_remove_df["back_expiry"]))
-            if st.button(f"🗑️ Unpin {len(sel_pinned)} Selected", key="unpin_btn"):
-                _save_pinned([p for p in pinned
-                              if (p["front_expiry"], p["back_expiry"]) not in remove_keys])
-                st.rerun()
-    else:
-        st.caption(
-            "Pinned pairs have no data for the current session "
-            "(may have expired or collector hasn't run yet)."
-        )
-elif pinned:
-    st.caption("No scanner data yet for this session.")
-else:
-    st.caption(
-        "No pinned pairs yet. "
-        "Select rows in the Pair Scanner below and click **Pin Selected**."
-    )
-
-st.divider()
-
-# ═════════════════════════════════════════════════════════════════════════════
-# SECTION 7 — PAIR SCANNER
-# Filter row: Min DTE | Max DTE | Max Gap (Max Gap lives here, not in Controls)
-# ═════════════════════════════════════════════════════════════════════════════
-
-sc_hdr, sc_meta = st.columns([3, 2])
-with sc_hdr:
-    st.subheader("🔍 Pair Scanner")
-with sc_meta:
-    st.caption(f"{scanner_total} pairs  ·  {scanner_snaps} snapshots today")
-
-sf1, sf2, sf3, sf4 = st.columns([2, 2, 2, 1])
-with sf1:
-    min_dte = st.number_input(
-        "Min DTE", min_value=0, max_value=60, value=0, step=1, key="min_dte"
-    )
-with sf2:
-    max_dte_filter = st.number_input(
-        "Max DTE", min_value=1, max_value=60, value=20, step=1, key="max_dte"
-    )
-with sf3:
-    max_gap = st.number_input(
-        "Max Gap (days)", min_value=1, max_value=30, value=1, step=1,
-        key="max_gap_input",
-        help=(
-            "Maximum calendar days between front and back expiry.\n"
-            "SPX daily expirations: Mon→Tue = 1d, Fri→Mon = 3d."
-        ),
-    )
-with sf4:
-    st.button("↺ Rescan", key="rescan_btn")
-
-if not full_scanner_df.empty:
-    filtered_df = full_scanner_df[
-        (full_scanner_df["front_dte"] >= min_dte)
-        & (full_scanner_df["front_dte"] <= max_dte_filter)
-        & (full_scanner_df["gap"] <= max_gap)
-    ].copy()
-
-    filtered_df = filtered_df.sort_values("Drop%", ascending=True)
-
-    if not filtered_df.empty:
-        scan_event = st.dataframe(
-            filtered_df[_TABLE_DISPLAY_COLS],
-            use_container_width=True, hide_index=True,
-            on_select="rerun", selection_mode="multi-row",
-            key="scanner_table", column_config=_table_col_config(),
-        )
-        sel_scan = (
-            scan_event.selection.rows if hasattr(scan_event, "selection") else []
-        )
-        if sel_scan:
-            to_pin_df           = filtered_df.iloc[sel_scan]
-            current_pinned      = _load_pinned()
-            current_pinned_keys = {
-                (p["front_expiry"], p["back_expiry"]) for p in current_pinned
-            }
-            new_entries = [
-                {"front_expiry": r["front_expiry"], "back_expiry": r["back_expiry"]}
-                for _, r in to_pin_df.iterrows()
-                if (r["front_expiry"], r["back_expiry"]) not in current_pinned_keys
-            ]
-            if new_entries:
-                if st.button(f"📌 Pin {len(new_entries)} New", key="pin_btn"):
-                    _save_pinned(current_pinned + new_entries)
-                    st.rerun()
-            else:
-                st.caption("All selected pairs are already pinned.")
-    else:
-        st.caption(
-            f"No pairs match: Min DTE {min_dte}, Max DTE {max_dte_filter}, "
-            f"Max Gap {int(max_gap)}d.  Try increasing Max Gap or DTE range."
-        )
-else:
-    st.caption(
-        "No scanner data for this session yet. "
-        "Make sure collector.py is running and has completed at least one cycle."
-    )
-
-st.divider()
-
-# ═════════════════════════════════════════════════════════════════════════════
-# SECTION 8 — ENTRY ANALYSIS  (v3.2)
-# Normalized Debit, Theta Differential, IV Ratio vs. Norm. Debit scatter.
-# atm_merged already computed in Calendar Edge above.
+# SECTION 3 — ENTRY ANALYSIS
+# First thing after controls: what is this position offering right now?
 # ═════════════════════════════════════════════════════════════════════════════
 
 st.subheader("Entry Analysis")
@@ -1178,9 +679,12 @@ r1c.metric(
          "HYPOTHESIS — not yet validated as a predictor of transform profit.",
 )
 
-# ── Row 1d: Theta differential ────────────────────────────────────────────────
 if _theta_diff is not None and _theta_diff.available:
-    _net_ct_s  = f"+${_theta_diff.net_daily_theta_ct:.2f}" if _theta_diff.net_daily_theta_ct >= 0                  else f"−${abs(_theta_diff.net_daily_theta_ct):.2f}"
+    _net_ct_s = (
+        f"+${_theta_diff.net_daily_theta_ct:.2f}"
+        if _theta_diff.net_daily_theta_ct >= 0
+        else f"−${abs(_theta_diff.net_daily_theta_ct):.2f}"
+    )
     r1d.metric(
         "Net Daily θ / contract",
         _net_ct_s,
@@ -1197,18 +701,14 @@ else:
              "theta from quotes when options are deep OTM or illiquid.",
     )
 
-# ── Theta breakdown caption ───────────────────────────────────────────────────
 if _theta_diff is not None and _theta_diff.available:
-    _fs = _theta_diff.front_sum
-    _bs = _theta_diff.back_sum
-    _net = _theta_diff.net_daily_theta
     st.caption(
         f"Theta breakdown — "
-        f"Front (short): {_fs:+.3f} /sh/day  ·  "
-        f"Back (long): {_bs:+.3f} /sh/day  ·  "
-        f"Net position: {_net:+.3f} /sh/day "
-        f"(call {_theta_diff.front_call_theta:+.3f} / {_theta_diff.back_call_theta:+.3f}  "
-        f"· put {_theta_diff.front_put_theta:+.3f} / {_theta_diff.back_put_theta:+.3f})"
+        f"Front (short): {_theta_diff.front_sum:+.3f} /sh/day  ·  "
+        f"Back (long): {_theta_diff.back_sum:+.3f} /sh/day  ·  "
+        f"Net position: {_theta_diff.net_daily_theta:+.3f} /sh/day "
+        f"(call {_theta_diff.front_call_theta:+.3f} / {_theta_diff.back_call_theta:+.3f}"
+        f"  · put {_theta_diff.front_put_theta:+.3f} / {_theta_diff.back_put_theta:+.3f})"
     )
 
 st.markdown("<div style='margin-bottom:4px'></div>", unsafe_allow_html=True)
@@ -1228,167 +728,588 @@ r2b.metric(
          "Higher = tighter spreads and easier fills at the ATM front strike.",
 )
 
-# ── Scatter: IV Ratio vs. Normalized Debit ───────────────────────────────────
-with st.expander("📈 Research — IV Ratio vs. Normalized Debit", expanded=False):
-    st.caption(
-        "Each point is one intraday snapshot. X = ATM IV Ratio (F/B); "
-        "Y = Normalized Debit (diagonal mark ÷ ATM straddle). "
-        "The amber diamond marks the current observation. "
-        "This is an observation tool — no predictive claim is made."
+# ── Research scatter — IV Ratio vs. Normalized Debit (inline, no expander) ───
+st.markdown("**Research — IV Ratio vs. Normalized Debit**")
+st.caption(
+    "Each point is one intraday snapshot. X = ATM IV Ratio (F/B); "
+    "Y = Normalized Debit (diagonal mark ÷ ATM straddle). "
+    "The amber diamond marks the current observation. "
+    "This is an observation tool — no predictive claim is made."
+)
+
+if not strikes_set:
+    st.info("Set call and put strikes in Controls to populate the scatter.")
+else:
+    _hist_rows = db.get_diagonal_history(
+        config.DB_PATH, front_expiry, back_expiry,
+        call_strike, put_strike, days=90,
+    )
+    _hist = pd.DataFrame([dict(r) for r in _hist_rows]) if _hist_rows else pd.DataFrame()
+
+    if not _hist.empty:
+        _hist["net_debit"] = (
+            _hist["back_call_mark"] + _hist["back_put_mark"]
+            - _hist["front_call_mark"] - _hist["front_put_mark"]
+        )
+        _hist["atm_straddle_hist"] = (
+            _hist["spx"]
+            * _hist["front_iv"]
+            * np.sqrt(2.0 * _hist["front_dte"] / (365.0 * np.pi))
+        )
+        _hist = _hist[_hist["atm_straddle_hist"] > 0].copy()
+        _hist["norm_debit_hist"] = _hist["net_debit"] / _hist["atm_straddle_hist"]
+        _hist["ts"] = pd.to_datetime(_hist["snapshot_timestamp"])
+        _hist["hover_date"] = _hist["ts"].dt.strftime("%Y-%m-%d %H:%M UTC")
+
+    MIN_SCATTER_PTS = 5
+    _has_data = not _hist.empty and len(_hist) >= MIN_SCATTER_PTS
+
+    fig_sc = go.Figure()
+
+    if _has_data:
+        fig_sc.add_trace(go.Scatter(
+            x=_hist["iv_ratio"],
+            y=_hist["norm_debit_hist"],
+            mode="markers",
+            marker=dict(color="#38b2ac", size=7, opacity=0.55,
+                        line=dict(color="#234e52", width=0.5)),
+            showlegend=True,
+            name="Historical",
+            hovertemplate=(
+                "<b>%{customdata[0]}</b><br>"
+                "SPX: %{customdata[1]:.0f}<br>"
+                "IV Ratio: %{x:.4f}<br>"
+                "Norm. Debit: %{y:.4f}<br>"
+                "Raw Debit: $%{customdata[2]:.2f}"
+                "<extra></extra>"
+            ),
+            customdata=list(zip(_hist["hover_date"], _hist["spx"], _hist["net_debit"])),
+        ))
+        _valid = _hist[["iv_ratio", "norm_debit_hist"]].dropna()
+        if len(_valid) >= 5:
+            _m, _b = np.polyfit(_valid["iv_ratio"], _valid["norm_debit_hist"], 1)
+            _x_tr = np.linspace(_valid["iv_ratio"].min(), _valid["iv_ratio"].max(), 100)
+            fig_sc.add_trace(go.Scatter(
+                x=_x_tr, y=_m * _x_tr + _b,
+                mode="lines",
+                line=dict(color="#718096", width=1.5, dash="dash"),
+                showlegend=True, name="OLS trend (descriptive)", hoverinfo="skip",
+            ))
+
+    if _norm_deb is not None and ts_now.ratio is not None:
+        fig_sc.add_trace(go.Scatter(
+            x=[ts_now.ratio], y=[_norm_deb],
+            mode="markers",
+            marker=dict(symbol="diamond", color="#f59e0b", size=14,
+                        line=dict(color="#78350f", width=1.5)),
+            showlegend=True, name="Current",
+            hovertemplate=(
+                "<b>Current observation</b><br>"
+                f"SPX: {spx_price:.0f}<br>"
+                "IV Ratio: %{x:.4f}<br>"
+                "Norm. Debit: %{y:.4f}<br>"
+                f"Diagonal Mark: ${_diag_mark:.2f}"
+                "<extra></extra>"
+            ),
+        ))
+
+    fig_sc.add_vline(x=1.0, line=dict(color="#4a5568", width=1, dash="dot"),
+                     annotation_text="ratio = 1.0",
+                     annotation_font=dict(color="#718096", size=10),
+                     annotation_position="top right")
+
+    if not _has_data and _norm_deb is None:
+        fig_sc.add_annotation(
+            x=0.5, y=0.5, xref="paper", yref="paper",
+            text="No data yet. Scatter will populate as snapshots accumulate.",
+            showarrow=False, font=dict(color="#718096", size=13),
+        )
+
+    fig_sc.update_layout(
+        height=380, paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+        margin=dict(l=60, r=20, t=20, b=44),
+        xaxis=dict(title="ATM IV Ratio (Front / Back)",
+                   title_font=dict(color="#c8d0dc", size=11),
+                   tickfont=dict(color="#c8d0dc", size=11),
+                   gridcolor="#1e2530", showgrid=True, zeroline=False),
+        yaxis=dict(title="Normalized Debit (diagonal mark ÷ ATM straddle)",
+                   title_font=dict(color="#c8d0dc", size=11),
+                   tickfont=dict(color="#c8d0dc", size=11),
+                   gridcolor="#1e2530", showgrid=True, zeroline=False),
+        legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0,
+                    font=dict(color="#c8d0dc", size=11), bgcolor="rgba(0,0,0,0)"),
+        hovermode="closest",
+        hoverlabel=dict(bgcolor="#1a2035", bordercolor="#334155",
+                        font=dict(color="#c8d0dc", size=13)),
     )
 
-    if not strikes_set:
-        st.info("Set call and put strikes in Controls to populate the scatter.")
+    if not _has_data:
+        st.caption(
+            f"Fewer than {MIN_SCATTER_PTS} complete snapshots found for this "
+            "strike / expiry pair. The scatter will populate as more data is collected."
+        )
+
+    st.plotly_chart(fig_sc, use_container_width=True, config={"displayModeBar": False})
+
+st.divider()
+
+# ═════════════════════════════════════════════════════════════════════════════
+# SECTION 4 — CALENDAR EDGE
+# ATM IV chart + regime interpretation + stacked view + intraday scatter.
+# atm_merged already computed above.
+# ═════════════════════════════════════════════════════════════════════════════
+
+_ce_title, _ce_range = st.columns([3, 1])
+with _ce_title:
+    st.subheader("Calendar Edge")
+with _ce_range:
+    st.markdown(
+        f"<p style='text-align:right;margin:0;padding-top:0.6em;"
+        f"font-size:0.85em;color:#aaa;'>Range: <b>{period_label}</b></p>",
+        unsafe_allow_html=True,
+    )
+
+iv_index = float(chain_df.groupby("expiry")["iv"].mean().mean())
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("ATM IV Ratio (F/B)", f"{ts_now.ratio:.4f}")
+m2.metric("Front ATM IV",       f"{ts_now.front_iv:.2f}%")
+m3.metric("Back ATM IV",        f"{ts_now.back_iv:.2f}%")
+m4.metric("IV Index (avg)",     f"{iv_index:.2f}%")
+
+st.info(iv_engine.interpret_curve(ts_now))
+
+if not atm_merged.empty:
+    # ── Primary chart: Front/Back IV + Ratio on dual axis ────────────────────
+    fig_atm = go.Figure()
+    fig_atm.add_trace(go.Scatter(x=atm_merged["timestamp"], y=atm_merged["front_iv"],
+        name="Front ATM IV", line=dict(color="#2ecc71", width=1.5), yaxis="y1"))
+    fig_atm.add_trace(go.Scatter(x=atm_merged["timestamp"], y=atm_merged["back_iv"],
+        name="Back ATM IV",  line=dict(color="#3498db", width=1.5), yaxis="y1"))
+    fig_atm.add_trace(go.Scatter(x=atm_merged["timestamp"], y=atm_merged["iv_ratio"],
+        name="IV Ratio (F/B)", line=dict(color="#e74c3c", width=1.5), yaxis="y2"))
+    fig_atm.update_layout(
+        height=300, margin=dict(l=20, r=20, t=10, b=20),
+        xaxis=dict(rangebreaks=_SESSION_RANGEBREAKS),
+        yaxis=dict(title="IV %", side="left"),
+        yaxis2=dict(title="Ratio", side="right", overlaying="y", showgrid=False),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        hovermode="x unified",
+    )
+    st.plotly_chart(fig_atm, use_container_width=True)
+
+    samp_warn = iv_engine.sample_size_warning(atm_merged["iv_ratio"])
+    if samp_warn:
+        st.warning(samp_warn)
+
+    # ── Stacked view: same-axis IV + regime-colored ratio (inline) ───────────
+    st.markdown("**Front vs Back ATM IV — same axis · IV Ratio by regime**")
+    fig_stack = make_subplots(
+        rows=2, cols=1, shared_xaxes=True,
+        row_heights=[0.62, 0.38], vertical_spacing=0.06,
+        subplot_titles=("Front vs Back ATM IV — same axis (the gap IS the spread)",
+                        "IV Ratio (F/B) — colored by regime"),
+    )
+    fig_stack.add_trace(go.Scatter(
+        x=atm_merged["timestamp"], y=atm_merged["front_iv"],
+        name="Front ATM IV", line=dict(color="#2ecc71", width=1.5)), row=1, col=1)
+    fig_stack.add_trace(go.Scatter(
+        x=atm_merged["timestamp"], y=atm_merged["back_iv"],
+        name="Back ATM IV", line=dict(color="#3498db", width=1.5)), row=1, col=1)
+    for tr in _banded_ratio_traces(atm_merged["timestamp"], atm_merged["iv_ratio"]):
+        fig_stack.add_trace(tr, row=2, col=1)
+    for thr, dash in [(1.00, "solid"), (0.70, "dot"), (1.30, "dot")]:
+        fig_stack.add_hline(y=thr, line=dict(color="#777", width=1, dash=dash),
+                            row=2, col=1)
+    fig_stack.update_xaxes(rangebreaks=_SESSION_RANGEBREAKS)
+    fig_stack.update_yaxes(title_text="IV %", row=1, col=1)
+    fig_stack.update_yaxes(title_text="Ratio", row=2, col=1)
+    fig_stack.update_layout(
+        height=520, margin=dict(l=20, r=20, t=40, b=20),
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=-0.18,
+                    xanchor="left", x=0, font=dict(size=10)),
+    )
+    st.plotly_chart(fig_stack, use_container_width=True)
+    st.caption(
+        "Top: front and back ATM IV share one axis, so the vertical gap "
+        "between them is the term-structure spread. Bottom: the ratio crosses "
+        "into a new color at 0.70 / 1.00 / 1.30. Green (≥1) = backwardation "
+        "(front rich); amber (<0.70) is usually the front leg decaying into the "
+        "close, not a structural signal — read it as a caution zone."
+    )
+
+    # ── Intraday Front vs Back IV scatter ────────────────────────────────────
+    st.markdown("**Front vs Back IV scatter — intraday trajectory**")
+    _sc = atm_merged.copy()
+    _sc["hod"] = _sc["timestamp"].dt.hour + _sc["timestamp"].dt.minute / 60.0
+    _lo = float(min(_sc["back_iv"].min(), _sc["front_iv"].min()))
+    _hi = float(max(_sc["back_iv"].max(), _sc["front_iv"].max()))
+    _pad = (_hi - _lo) * 0.05 or 1.0
+    fig_intra = go.Figure()
+    fig_intra.add_trace(go.Scatter(
+        x=[_lo - _pad, _hi + _pad], y=[_lo - _pad, _hi + _pad], mode="lines",
+        name="R = 1  (Front = Back)", line=dict(color="#888", dash="dash")))
+    fig_intra.add_trace(go.Scatter(
+        x=_sc["back_iv"], y=_sc["front_iv"], mode="markers", name="snapshots",
+        marker=dict(size=6, color=_sc["hod"], colorscale="Viridis",
+                    showscale=True, colorbar=dict(title="Hour ET"),
+                    line=dict(width=0)),
+        customdata=_sc["iv_ratio"],
+        hovertemplate="Back %{x:.2f}%<br>Front %{y:.2f}%"
+                      "<br>R=%{customdata:.4f}<extra></extra>"))
+    fig_intra.update_layout(
+        height=420, margin=dict(l=20, r=20, t=10, b=20),
+        xaxis_title="Back ATM IV %", yaxis_title="Front ATM IV %",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+    )
+    st.plotly_chart(fig_intra, use_container_width=True)
+    st.caption(
+        "Each dot is one snapshot. Above the dashed line = backwardation "
+        "(front richer, R>1); below = contango. Distance from the line is the "
+        "spread; distance from the origin is the overall vol level. Color is "
+        "time of day: watch the cloud start high/above the line at the open and "
+        "spiral inward and downward as the front leg crushes faster than the "
+        "back. A cloud hugging one ray ⇒ ratio ≈ constant (adds little); a cloud "
+        "fanning across angles ⇒ ratio varies independently of level (adds info)."
+    )
+
+else:
+    st.caption(
+        f"No ATM IV history for {front_expiry} / {back_expiry} in the selected range."
+    )
+
+dc1, dc2 = st.columns(2)
+for col, label, exp, dte in [
+    (dc1, "Front", front_expiry, front_dte),
+    (dc2, "Back",  back_expiry,  back_dte),
+]:
+    latest_rows = db.get_latest_atm_iv_snapshots(config.DB_PATH, exp, n=2)
+    with col:
+        if latest_rows:
+            lat_iv = latest_rows[0]["atm_avg_iv"] * 100
+            chg_iv = (
+                (latest_rows[0]["atm_avg_iv"] - latest_rows[1]["atm_avg_iv"]) * 100
+                if len(latest_rows) == 2 else 0.0
+            )
+            st.metric(f"{label} ATM IV  ({dte} DTE)", f"{lat_iv:.2f}%", f"{chg_iv:+.2f}%")
+        else:
+            st.metric(f"{label} ATM IV  ({dte} DTE)", "N/A")
+
+st.divider()
+
+# ═════════════════════════════════════════════════════════════════════════════
+# SECTION 5 — HISTORICAL STATISTICS
+# ═════════════════════════════════════════════════════════════════════════════
+
+st.subheader(
+    f"Historical Statistics — ATM IV Ratio  ·  "
+    f"{front_expiry} ({front_dte}d)  /  {back_expiry} ({back_dte}d)"
+)
+
+stat_cols = st.columns(4)
+for col, (label, days) in zip(
+    stat_cols,
+    [("Today", 1), ("5 Days", 5), ("10 Days", 10), ("20 Days", 20)],
+):
+    pf = _load_atm_hist(front_expiry, days)
+    pb = _load_atm_hist(back_expiry,  days)
+    with col:
+        st.caption(label)
+        if not pf.empty and not pb.empty:
+            pm = pd.merge(
+                pf[["timestamp", "atm_iv"]].rename(columns={"atm_iv": "f"}),
+                pb[["timestamp", "atm_iv"]].rename(columns={"atm_iv": "b"}),
+                on="timestamp",
+            )
+            pm["ratio"] = pm["f"] / pm["b"]
+            rs = iv_engine.range_stats(pm["ratio"], ts_now.ratio)
+            st.markdown(
+                f"""<div style="font-size:0.85em">{rs.low:.4f}
+<div style="background:linear-gradient(90deg,#444,#888);
+height:6px;border-radius:3px;position:relative;margin:4px 0;">
+<div style="position:absolute;left:{rs.position_pct}%;top:-3px;
+width:12px;height:12px;background:#e74c3c;border-radius:50%;
+transform:translateX(-50%);"></div></div>
+{rs.high:.4f}</div>""",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.caption("No data")
+
+st.divider()
+
+# ═════════════════════════════════════════════════════════════════════════════
+# SECTION 6 — STRIKE DETAIL + IV STRUCTURE CHART
+# Period selector already rendered above; period_days already defined.
+# ═════════════════════════════════════════════════════════════════════════════
+
+st.subheader("Strike Detail")
+
+left_col, right_col = st.columns([1, 3])
+
+with left_col:
+
+    st.markdown("**Expiry Detail**")
+
+    for exp_label, exp_date, dte_val in [
+        ("Front", front_expiry, front_dte),
+        ("Back",  back_expiry,  back_dte),
+    ]:
+        exp_rows = db.get_latest_atm_iv_snapshots(config.DB_PATH, exp_date, n=2)
+        if exp_rows:
+            atm_now = exp_rows[0]["atm_avg_iv"] * 100
+            atm_chg = (
+                (exp_rows[0]["atm_avg_iv"] - exp_rows[1]["atm_avg_iv"]) * 100
+                if len(exp_rows) == 2 else 0.0
+            )
+            chg_color = "#2ecc71" if atm_chg >= 0 else "#e74c3c"
+            chg_arrow = "↑" if atm_chg >= 0 else "↓"
+            st.markdown(
+                f"<p style='margin:0;font-size:0.8em;color:#aaa;'>"
+                f"{exp_label} · {exp_date} · {dte_val} DTE</p>"
+                f"<p style='margin:0;font-size:1.6em;font-weight:600;'>"
+                f"{atm_now:.2f}%</p>"
+                f"<p style='margin:0 0 10px 0;font-size:0.85em;color:{chg_color};'>"
+                f"{chg_arrow} {atm_chg:+.2f}%</p>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                f"<p style='margin:0;font-size:0.8em;color:#aaa;'>"
+                f"{exp_label} · {exp_date} · {dte_val} DTE</p>"
+                f"<p style='margin:0 0 10px 0;color:#666;'>N/A</p>",
+                unsafe_allow_html=True,
+            )
+
+    st.markdown("<hr style='margin:8px 0;opacity:0.2;'>", unsafe_allow_html=True)
+
+    st.markdown("**Strike Detail**")
+
+    if strikes_set:
+        fc_call = iv_engine.strike_contract(chain_df, front_expiry, call_strike, "CALL")
+        bc_call = iv_engine.strike_contract(chain_df, back_expiry,  call_strike, "CALL")
+        fc_put  = iv_engine.strike_contract(chain_df, front_expiry, put_strike,  "PUT")
+        bc_put  = iv_engine.strike_contract(chain_df, back_expiry,  put_strike,  "PUT")
+
+        for leg_label, fc, bc in [
+            (f"Put  {put_strike:.0f}",  fc_put,  bc_put),
+            (f"Call {call_strike:.0f}", fc_call, bc_call),
+        ]:
+            ratio_str = f"{fc.iv / bc.iv:.4f}" if (fc.iv and bc.iv) else "N/A"
+            f_iv_str  = f"{fc.iv:.2f}%"   if fc.iv   else "N/A"
+            b_iv_str  = f"{bc.iv:.2f}%"   if bc.iv   else "N/A"
+            f_mk_str  = f"${fc.mark:.2f}" if fc.mark  else "N/A"
+            b_mk_str  = f"${bc.mark:.2f}" if bc.mark  else "N/A"
+            st.markdown(
+                f"<p style='margin:6px 0 2px 0;font-weight:600;'>{leg_label}</p>"
+                f"<p style='margin:0;font-size:0.82em;'>"
+                f"IV → F <span style='color:#2ecc71;'>{f_iv_str}</span> "
+                f"/ B <span style='color:#3498db;'>{b_iv_str}</span> "
+                f"&nbsp;·&nbsp; Ratio <span style='color:#e74c3c;'>{ratio_str}</span></p>"
+                f"<p style='margin:0 0 6px 0;font-size:0.82em;'>"
+                f"Mark → F <span style='color:#2ecc71;'>{f_mk_str}</span> "
+                f"/ B <span style='color:#3498db;'>{b_mk_str}</span></p>",
+                unsafe_allow_html=True,
+            )
     else:
-        _hist_rows = db.get_diagonal_history(
-            config.DB_PATH, front_expiry, back_expiry,
-            call_strike, put_strike, days=90,
+        st.caption("Set call and put strikes in Controls above.")
+
+with right_col:
+    st.subheader("Selected-Strike IV")
+    st.caption("Front vs back IV at your trade strikes — ratio on right axis.")
+
+    if strikes_set:
+        fch = _load_contract_hist(front_expiry, call_strike, "CALL", period_days)
+        bch = _load_contract_hist(back_expiry,  call_strike, "CALL", period_days)
+        fph = _load_contract_hist(front_expiry, put_strike,  "PUT",  period_days)
+        bph = _load_contract_hist(back_expiry,  put_strike,  "PUT",  period_days)
+
+        call_ready = not fch.empty and not bch.empty
+        put_ready  = not fph.empty and not bph.empty
+
+        if call_ready or put_ready:
+            fig_str = go.Figure()
+            if call_ready:
+                cm = pd.merge(
+                    fch[["timestamp", "iv"]].rename(columns={"iv": "f_call"}),
+                    bch[["timestamp", "iv"]].rename(columns={"iv": "b_call"}),
+                    on="timestamp", how="inner",
+                )
+                cm["call_ratio"] = cm["f_call"] / cm["b_call"]
+                fig_str.add_trace(go.Scatter(x=cm["timestamp"], y=cm["f_call"],
+                    name=f"Front {call_strike:.0f}C",
+                    line=dict(color="#2ecc71", width=1.5), yaxis="y1"))
+                fig_str.add_trace(go.Scatter(x=cm["timestamp"], y=cm["b_call"],
+                    name=f"Back  {call_strike:.0f}C",
+                    line=dict(color="#3498db", width=1.5), yaxis="y1"))
+                fig_str.add_trace(go.Scatter(x=cm["timestamp"], y=cm["call_ratio"],
+                    name="Call Ratio (F/B)",
+                    line=dict(color="#e74c3c", width=1.5), yaxis="y2"))
+            if put_ready:
+                pm = pd.merge(
+                    fph[["timestamp", "iv"]].rename(columns={"iv": "f_put"}),
+                    bph[["timestamp", "iv"]].rename(columns={"iv": "b_put"}),
+                    on="timestamp", how="inner",
+                )
+                pm["put_ratio"] = pm["f_put"] / pm["b_put"]
+                fig_str.add_trace(go.Scatter(x=pm["timestamp"], y=pm["f_put"],
+                    name=f"Front {put_strike:.0f}P",
+                    line=dict(color="#2ecc71", width=1.5, dash="dot"), yaxis="y1"))
+                fig_str.add_trace(go.Scatter(x=pm["timestamp"], y=pm["b_put"],
+                    name=f"Back  {put_strike:.0f}P",
+                    line=dict(color="#3498db", width=1.5, dash="dot"), yaxis="y1"))
+                fig_str.add_trace(go.Scatter(x=pm["timestamp"], y=pm["put_ratio"],
+                    name="Put Ratio (F/B)",
+                    line=dict(color="#e74c3c", width=1.5, dash="dot"), yaxis="y2"))
+            fig_str.update_layout(
+                height=360, margin=dict(l=20, r=20, t=10, b=20),
+                xaxis=dict(rangebreaks=_SESSION_RANGEBREAKS),
+                yaxis=dict(title="IV %", side="left"),
+                yaxis2=dict(title="Ratio", side="right", overlaying="y", showgrid=False),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+                hovermode="x unified",
+            )
+            st.plotly_chart(fig_str, use_container_width=True)
+        else:
+            st.info(
+                f"No per-strike history for {call_strike:.0f}C / {put_strike:.0f}P "
+                f"in the selected range. Try 'Today'."
+            )
+    else:
+        st.caption("Enter call and put strikes in the Controls row above.")
+
+st.divider()
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PAIR SCANNER DATA — computed once, shared by Pinned Pairs and Pair Scanner
+# ═════════════════════════════════════════════════════════════════════════════
+
+full_scanner_df = _compute_pair_scanner(session_date)
+scanner_total   = len(full_scanner_df)
+scanner_snaps   = (
+    int(full_scanner_df["snapshots"].max())
+    if not full_scanner_df.empty else 0
+)
+
+# ═════════════════════════════════════════════════════════════════════════════
+# SECTION 7 — PINNED PAIRS
+# ═════════════════════════════════════════════════════════════════════════════
+
+pinned = _load_pinned()
+st.subheader(f"⭐ Pinned Pairs  ({len(pinned)} pinned)")
+
+if pinned and not full_scanner_df.empty:
+    pinned_keys = {(p["front_expiry"], p["back_expiry"]) for p in pinned}
+    pinned_df = full_scanner_df[
+        full_scanner_df.apply(
+            lambda r: (r["front_expiry"], r["back_expiry"]) in pinned_keys, axis=1
         )
-        _hist = pd.DataFrame([dict(r) for r in _hist_rows]) if _hist_rows else pd.DataFrame()
-
-        if not _hist.empty:
-            _hist["net_debit"] = (
-                _hist["back_call_mark"] + _hist["back_put_mark"]
-                - _hist["front_call_mark"] - _hist["front_put_mark"]
-            )
-            # atm_straddle from DB: front_iv is decimal (as stored)
-            _hist["atm_straddle_hist"] = (
-                _hist["spx"]
-                * _hist["front_iv"]
-                * np.sqrt(2.0 * _hist["front_dte"] / (365.0 * np.pi))
-            )
-            _hist = _hist[_hist["atm_straddle_hist"] > 0].copy()
-            _hist["norm_debit_hist"] = _hist["net_debit"] / _hist["atm_straddle_hist"]
-            _hist["ts"] = pd.to_datetime(_hist["snapshot_timestamp"])
-            _hist["hover_date"] = _hist["ts"].dt.strftime("%Y-%m-%d %H:%M UTC")
-
-        MIN_SCATTER_PTS = 5
-        _has_data = not _hist.empty and len(_hist) >= MIN_SCATTER_PTS
-
-        fig_sc = go.Figure()
-
-        if _has_data:
-            # Historical scatter — muted teal, semi-transparent
-            fig_sc.add_trace(go.Scatter(
-                x=_hist["iv_ratio"],
-                y=_hist["norm_debit_hist"],
-                mode="markers",
-                marker=dict(
-                    color="#38b2ac",
-                    size=7,
-                    opacity=0.55,
-                    line=dict(color="#234e52", width=0.5),
-                ),
-                showlegend=True,
-                name="Historical",
-                hovertemplate=(
-                    "<b>%{customdata[0]}</b><br>"
-                    "SPX: %{customdata[1]:.0f}<br>"
-                    "IV Ratio: %{x:.4f}<br>"
-                    "Norm. Debit: %{y:.4f}<br>"
-                    "Raw Debit: $%{customdata[2]:.2f}"
-                    "<extra></extra>"
-                ),
-                customdata=list(zip(
-                    _hist["hover_date"],
-                    _hist["spx"],
-                    _hist["net_debit"],
-                )),
-            ))
-
-            # OLS trendline (descriptive, not predictive)
-            _valid = _hist[["iv_ratio", "norm_debit_hist"]].dropna()
-            if len(_valid) >= 5:
-                _m, _b = np.polyfit(_valid["iv_ratio"], _valid["norm_debit_hist"], 1)
-                _x_trend = np.linspace(_valid["iv_ratio"].min(), _valid["iv_ratio"].max(), 100)
-                _y_trend = _m * _x_trend + _b
-                fig_sc.add_trace(go.Scatter(
-                    x=_x_trend, y=_y_trend,
-                    mode="lines",
-                    line=dict(color="#718096", width=1.5, dash="dash"),
-                    showlegend=True,
-                    name="OLS trend (descriptive)",
-                    hoverinfo="skip",
-                ))
-
-        # Current observation
-        if _norm_deb is not None and ts_now.ratio is not None:
-            fig_sc.add_trace(go.Scatter(
-                x=[ts_now.ratio],
-                y=[_norm_deb],
-                mode="markers",
-                marker=dict(
-                    symbol="diamond",
-                    color="#f59e0b",
-                    size=14,
-                    line=dict(color="#78350f", width=1.5),
-                ),
-                showlegend=True,
-                name="Current",
-                hovertemplate=(
-                    "<b>Current observation</b><br>"
-                    f"SPX: {spx_price:.0f}<br>"
-                    "IV Ratio: %{x:.4f}<br>"
-                    "Norm. Debit: %{y:.4f}<br>"
-                    f"Diagonal Mark: ${_diag_mark:.2f}"
-                    "<extra></extra>"
-                ),
-            ))
-
-        # Reference line at IV Ratio = 1.0
-        fig_sc.add_vline(
-            x=1.0,
-            line=dict(color="#4a5568", width=1, dash="dot"),
-            annotation_text="ratio = 1.0",
-            annotation_font=dict(color="#718096", size=10),
-            annotation_position="top right",
+    ].copy()
+    if not pinned_df.empty:
+        pin_event = st.dataframe(
+            pinned_df[_TABLE_DISPLAY_COLS],
+            use_container_width=True, hide_index=True,
+            on_select="rerun", selection_mode="multi-row",
+            key="pinned_table", column_config=_table_col_config(),
         )
-
-        if not _has_data and _norm_deb is None:
-            fig_sc.add_annotation(
-                x=0.5, y=0.5, xref="paper", yref="paper",
-                text="No data yet. Scatter will populate as snapshots accumulate.",
-                showarrow=False,
-                font=dict(color="#718096", size=13),
-            )
-
-        fig_sc.update_layout(
-            height=380,
-            paper_bgcolor="#0e1117",
-            plot_bgcolor="#0e1117",
-            margin=dict(l=60, r=20, t=20, b=44),
-            xaxis=dict(
-                title="ATM IV Ratio (Front / Back)",
-                title_font=dict(color="#c8d0dc", size=11),
-                tickfont=dict(color="#c8d0dc", size=11),
-                gridcolor="#1e2530",
-                showgrid=True, zeroline=False,
-            ),
-            yaxis=dict(
-                title="Normalized Debit (diagonal mark ÷ ATM straddle)",
-                title_font=dict(color="#c8d0dc", size=11),
-                tickfont=dict(color="#c8d0dc", size=11),
-                gridcolor="#1e2530",
-                showgrid=True, zeroline=False,
-            ),
-            legend=dict(
-                orientation="h", yanchor="bottom", y=1.01,
-                xanchor="left", x=0,
-                font=dict(color="#c8d0dc", size=11),
-                bgcolor="rgba(0,0,0,0)",
-            ),
-            hovermode="closest",
-            hoverlabel=dict(
-                bgcolor="#1a2035",
-                bordercolor="#334155",
-                font=dict(color="#c8d0dc", size=13),
-            ),
+        sel_pinned = (
+            pin_event.selection.rows if hasattr(pin_event, "selection") else []
         )
+        if sel_pinned:
+            to_remove_df = pinned_df.iloc[sel_pinned]
+            remove_keys  = set(zip(to_remove_df["front_expiry"], to_remove_df["back_expiry"]))
+            if st.button(f"🗑️ Unpin {len(sel_pinned)} Selected", key="unpin_btn"):
+                _save_pinned([p for p in pinned
+                              if (p["front_expiry"], p["back_expiry"]) not in remove_keys])
+                st.rerun()
+    else:
+        st.caption(
+            "Pinned pairs have no data for the current session "
+            "(may have expired or collector hasn't run yet)."
+        )
+elif pinned:
+    st.caption("No scanner data yet for this session.")
+else:
+    st.caption(
+        "No pinned pairs yet. "
+        "Select rows in the Pair Scanner below and click **Pin Selected**."
+    )
 
-        if not _has_data:
-            st.caption(
-                f"Fewer than {MIN_SCATTER_PTS} complete snapshots found for this "
-                "strike / expiry pair. The scatter will populate as more data is collected."
-            )
+st.divider()
 
-        st.plotly_chart(fig_sc, use_container_width=True, config={"displayModeBar": False})
+# ═════════════════════════════════════════════════════════════════════════════
+# SECTION 8 — PAIR SCANNER
+# ═════════════════════════════════════════════════════════════════════════════
+
+sc_hdr, sc_meta = st.columns([3, 2])
+with sc_hdr:
+    st.subheader("🔍 Pair Scanner")
+with sc_meta:
+    st.caption(f"{scanner_total} pairs  ·  {scanner_snaps} snapshots today")
+
+sf1, sf2, sf3, sf4 = st.columns([2, 2, 2, 1])
+with sf1:
+    min_dte = st.number_input(
+        "Min DTE", min_value=0, max_value=60, value=0, step=1, key="min_dte"
+    )
+with sf2:
+    max_dte_filter = st.number_input(
+        "Max DTE", min_value=1, max_value=60, value=20, step=1, key="max_dte"
+    )
+with sf3:
+    max_gap = st.number_input(
+        "Max Gap (days)", min_value=1, max_value=30, value=1, step=1,
+        key="max_gap_input",
+        help=(
+            "Maximum calendar days between front and back expiry.\n"
+            "SPX daily expirations: Mon→Tue = 1d, Fri→Mon = 3d."
+        ),
+    )
+with sf4:
+    st.button("↺ Rescan", key="rescan_btn")
+
+if not full_scanner_df.empty:
+    filtered_df = full_scanner_df[
+        (full_scanner_df["front_dte"] >= min_dte)
+        & (full_scanner_df["front_dte"] <= max_dte_filter)
+        & (full_scanner_df["gap"] <= max_gap)
+    ].copy()
+    filtered_df = filtered_df.sort_values("Drop%", ascending=True)
+
+    if not filtered_df.empty:
+        scan_event = st.dataframe(
+            filtered_df[_TABLE_DISPLAY_COLS],
+            use_container_width=True, hide_index=True,
+            on_select="rerun", selection_mode="multi-row",
+            key="scanner_table", column_config=_table_col_config(),
+        )
+        sel_scan = (
+            scan_event.selection.rows if hasattr(scan_event, "selection") else []
+        )
+        if sel_scan:
+            to_pin_df           = filtered_df.iloc[sel_scan]
+            current_pinned      = _load_pinned()
+            current_pinned_keys = {
+                (p["front_expiry"], p["back_expiry"]) for p in current_pinned
+            }
+            new_entries = [
+                {"front_expiry": r["front_expiry"], "back_expiry": r["back_expiry"]}
+                for _, r in to_pin_df.iterrows()
+                if (r["front_expiry"], r["back_expiry"]) not in current_pinned_keys
+            ]
+            if new_entries:
+                if st.button(f"📌 Pin {len(new_entries)} New", key="pin_btn"):
+                    _save_pinned(current_pinned + new_entries)
+                    st.rerun()
+            else:
+                st.caption("All selected pairs are already pinned.")
+    else:
+        st.caption(
+            f"No pairs match: Min DTE {min_dte}, Max DTE {max_dte_filter}, "
+            f"Max Gap {int(max_gap)}d.  Try increasing Max Gap or DTE range."
+        )
+else:
+    st.caption(
+        "No scanner data for this session yet. "
+        "Make sure collector.py is running and has completed at least one cycle."
+    )
