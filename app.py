@@ -200,6 +200,22 @@ def _load_atm_hist(expiry: str, days: int) -> pd.DataFrame:
     return df
 
 
+def _load_atm_hist_fb(expiry: str, days: int) -> pd.DataFrame:
+    """
+    Load ATM IV history with weekend/gap fallback.
+    When days==1 returns empty (no intraday data — weekend, holiday, pre-open)
+    retry with 5 days and trim to the most recent session date, so
+    Saturday/Sunday always shows Friday's last data.
+    """
+    df = _load_atm_hist(expiry, days)
+    if df.empty and days == 1:
+        df = _load_atm_hist(expiry, 5)
+        if not df.empty:
+            last_date = df["timestamp"].dt.date.max()
+            df = df[df["timestamp"].dt.date == last_date]
+    return df
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper — per-contract IV history
 # ─────────────────────────────────────────────────────────────────────────────
@@ -583,36 +599,21 @@ back_iv_atm  = iv_engine.atm_iv(chain_df, back_expiry,  spx_price)
 ts_now       = iv_engine.term_structure(front_iv_atm, back_iv_atm)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Period selector — page-level; drives all time-series charts below.
-# Hoisted from right_col so Calendar Edge and Strike Detail share one control.
+# atm_merged_90d — fixed 90-day window used by Entry Analysis for
+# IV Ratio Percentile.  Period-independent so the percentile reflects
+# long-run context regardless of the chart zoom the user has selected.
 # ─────────────────────────────────────────────────────────────────────────────
 
-_pr_l, _pr_r = st.columns([5, 1])
-with _pr_r:
-    period_label = st.radio(
-        "Chart Range",
-        ["Today", "5D", "10D", "20D"],
-        horizontal=True,
-        label_visibility="collapsed",
-        key="period_radio",
-    )
-period_days = {"Today": 1, "5D": 5, "10D": 10, "20D": 20}[period_label]
-
-# ─────────────────────────────────────────────────────────────────────────────
-# atm_merged — hoisted so Entry Analysis (_iv_pct) and Calendar Edge
-# (charts) both see the same pre-computed DataFrame.
-# ─────────────────────────────────────────────────────────────────────────────
-
-front_hist = _load_atm_hist(front_expiry, period_days)
-back_hist  = _load_atm_hist(back_expiry,  period_days)
-atm_merged = pd.DataFrame()
-if not front_hist.empty and not back_hist.empty:
-    atm_merged = pd.merge(
-        front_hist[["timestamp", "atm_iv"]].rename(columns={"atm_iv": "front_iv"}),
-        back_hist [["timestamp", "atm_iv"]].rename(columns={"atm_iv": "back_iv"}),
+_fh90 = _load_atm_hist(front_expiry, 90)
+_bh90 = _load_atm_hist(back_expiry,  90)
+atm_merged_90d = pd.DataFrame()
+if not _fh90.empty and not _bh90.empty:
+    atm_merged_90d = pd.merge(
+        _fh90[["timestamp", "atm_iv"]].rename(columns={"atm_iv": "front_iv"}),
+        _bh90[["timestamp", "atm_iv"]].rename(columns={"atm_iv": "back_iv"}),
         on="timestamp", how="inner",
     )
-    atm_merged["iv_ratio"] = atm_merged["front_iv"] / atm_merged["back_iv"]
+    atm_merged_90d["iv_ratio"] = atm_merged_90d["front_iv"] / atm_merged_90d["back_iv"]
 
 st.divider()
 
@@ -623,13 +624,14 @@ st.divider()
 
 st.subheader("Entry Analysis")
 
-# ── ATM Straddle (computable without strikes) ─────────────────────────────
+# ── ATM Straddle (computable without strikes) ────────────────────────────
 _straddle = iv_engine.atm_straddle_price(spx_price, front_iv_atm, front_dte)
 
-# ── Position metrics (require strikes) ───────────────────────────────────────
-_diag_mark:  float | None = None
-_norm_deb:   float | None = None
+# ── Position metrics (require strikes) ──────────────────────────────────
+_diag_mark: float | None = None
+_norm_deb:  float | None = None
 _theta_diff: "iv_engine.ThetaDifferential | None" = None
+_ic_mark:   float | None = None   # Transform-to-IC Mark
 
 if strikes_set:
     _efc = iv_engine.strike_contract(chain_df, front_expiry, call_strike, "CALL")
@@ -641,11 +643,18 @@ if strikes_set:
         _diag_mark = (_ebc.mark + _ebp.mark) - (_efc.mark + _efp.mark)
         _norm_deb  = iv_engine.normalized_debit(_diag_mark, _straddle)
 
+    # Transform-to-IC wings (fixed width = 5 on back expiry)
+    _lc_wing = iv_engine.strike_contract(chain_df, back_expiry, call_strike + 5, "CALL")
+    _lp_wing = iv_engine.strike_contract(chain_df, back_expiry, put_strike  - 5, "PUT")
+    if all(m is not None for m in [_ebc.mark, _ebp.mark, _lc_wing.mark, _lp_wing.mark]):
+        # IC credit = short back legs − long wings (at ±5)
+        _ic_mark = (_ebc.mark + _ebp.mark) - (_lc_wing.mark + _lp_wing.mark)
+
     _theta_diff = iv_engine.theta_differential(
         chain_df, front_expiry, back_expiry, call_strike, put_strike
     )
 
-# ── Market condition metrics (always available) ───────────────────────────
+# ── Market condition metrics ─────────────────────────────────────────────
 near_front = chain_df[chain_df["expiry"] == front_expiry]
 atm_row    = near_front.iloc[(near_front["strike"] - spx_price).abs().argsort()[:1]]
 _liquidity = iv_engine.liquidity_score(
@@ -653,221 +662,163 @@ _liquidity = iv_engine.liquidity_score(
     atm_row["open_interest"].fillna(0).mean(),
 )
 _iv_pct = (
-    iv_engine.percentile_rank(atm_merged["iv_ratio"], ts_now.ratio)
-    if not atm_merged.empty else None
+    iv_engine.percentile_rank(atm_merged_90d["iv_ratio"], ts_now.ratio)
+    if not atm_merged_90d.empty else None
 )
 
-# ── Row 1: position cost metrics ─────────────────────────────────────────────
+# ── Row 1: position cost + theta ─────────────────────────────────────────
 r1a, r1b, r1c, r1d = st.columns(4)
-r1a.metric(
-    "Diagonal Mark",
-    f"${_diag_mark:.2f}" if _diag_mark is not None else "— (set strikes)",
-    help="Current cost to enter the diagonal: (back call mark + back put mark) "
-         "− (front call mark + front put mark).  Positive = debit to open.",
-)
-r1b.metric(
-    "ATM Straddle",
-    f"${_straddle:.2f}" if _straddle is not None else "—",
-    help="ATM straddle approximation: SPX × σ × √(2·DTE/365·π). "
-         "Uses front-expiry ATM IV.  The normalisation denominator.",
-)
-r1c.metric(
-    "Normalized Debit",
-    f"{_norm_deb:.4f}" if _norm_deb is not None else "— (set strikes)",
-    help="Diagonal Mark ÷ ATM Straddle. Removes the effect of SPX price drift "
-         "and vol-regime shifts, making trade cost comparable across dates. "
-         "HYPOTHESIS — not yet validated as a predictor of transform profit.",
-)
 
-if _theta_diff is not None and _theta_diff.available:
-    _net_ct_s = (
-        f"+${_theta_diff.net_daily_theta_ct:.2f}"
-        if _theta_diff.net_daily_theta_ct >= 0
-        else f"−${abs(_theta_diff.net_daily_theta_ct):.2f}"
-    )
-    r1d.metric(
-        "Net Daily θ / contract",
-        _net_ct_s,
-        help="Position-level daily time decay, per contract (100 shares). "
-             "Short front legs earn theta; long back legs pay theta. "
-             "Positive = position gains value from time alone each day. "
-             "HYPOTHESIS — magnitude at entry not yet validated as predictor.",
-    )
-else:
-    r1d.metric(
-        "Net Daily θ / contract",
-        "— (set strikes)" if not strikes_set else "— (Greeks unavailable)",
-        help="Greeks not present in current snapshot. Schwab sometimes omits "
-             "theta from quotes when options are deep OTM or illiquid.",
-    )
-
-if _theta_diff is not None and _theta_diff.available:
-    st.caption(
-        f"Theta breakdown — "
-        f"Front (short): {_theta_diff.front_sum:+.3f} /sh/day  ·  "
-        f"Back (long): {_theta_diff.back_sum:+.3f} /sh/day  ·  "
-        f"Net position: {_theta_diff.net_daily_theta:+.3f} /sh/day "
-        f"(call {_theta_diff.front_call_theta:+.3f} / {_theta_diff.back_call_theta:+.3f}"
-        f"  · put {_theta_diff.front_put_theta:+.3f} / {_theta_diff.back_put_theta:+.3f})"
-    )
-
-st.markdown("<div style='margin-bottom:4px'></div>", unsafe_allow_html=True)
-
-# ── Row 2: market condition metrics ──────────────────────────────────────────
-r2a, r2b, _, _ = st.columns(4)
-r2a.metric(
-    "IV Ratio Percentile",
-    f"{_iv_pct:.0f}th" if _iv_pct is not None else "— (need history)",
-    help="Where today's IV ratio sits within its 6-month distribution. "
-         "Higher = front IV is historically elevated relative to back IV.",
-)
-r2b.metric(
-    "Liquidity (ATM)",
-    f"{_liquidity:.0f}",
-    help="Composite of ATM front-strike volume and open interest, scored 0–100. "
-         "Higher = tighter spreads and easier fills at the ATM front strike.",
-)
-
-# ── Research scatter — IV Ratio vs. Normalized Debit (inline, no expander) ───
-st.markdown("**Research — IV Ratio vs. Normalized Debit**")
-st.caption(
-    "Each point is one intraday snapshot. X = ATM IV Ratio (F/B); "
-    "Y = Normalized Debit (diagonal mark ÷ ATM straddle). "
-    "The amber diamond marks the current observation. "
-    "This is an observation tool — no predictive claim is made."
-)
-
-if not strikes_set:
-    st.info("Set call and put strikes in Controls to populate the scatter.")
-else:
-    _hist_rows = db.get_diagonal_history(
-        config.DB_PATH, front_expiry, back_expiry,
-        call_strike, put_strike, days=90,
-    )
-    _hist = pd.DataFrame([dict(r) for r in _hist_rows]) if _hist_rows else pd.DataFrame()
-
-    if not _hist.empty:
-        _hist["net_debit"] = (
-            _hist["back_call_mark"] + _hist["back_put_mark"]
-            - _hist["front_call_mark"] - _hist["front_put_mark"]
+with r1a:
+    if _diag_mark is not None:
+        _diag_dollar = int(round(_diag_mark * 100))
+        st.metric(
+            "Diagonal Mark",
+            f"{_diag_mark:.2f} pts  ·  ${_diag_dollar:,}",
+            help="Per-share mark price of the diagonal × 100 = dollar cost per contract.",
         )
-        _hist["atm_straddle_hist"] = (
-            _hist["spx"]
-            * _hist["front_iv"]
-            * np.sqrt(2.0 * _hist["front_dte"] / (365.0 * np.pi))
-        )
-        _hist = _hist[_hist["atm_straddle_hist"] > 0].copy()
-        _hist["norm_debit_hist"] = _hist["net_debit"] / _hist["atm_straddle_hist"]
-        _hist["ts"] = pd.to_datetime(_hist["snapshot_timestamp"])
-        _hist["hover_date"] = _hist["ts"].dt.strftime("%Y-%m-%d %H:%M UTC")
+    else:
+        st.metric("Diagonal Mark", "— (set strikes)")
+    st.caption("What you'd pay to open this position right now.")
 
-    MIN_SCATTER_PTS = 5
-    _has_data = not _hist.empty and len(_hist) >= MIN_SCATTER_PTS
-
-    fig_sc = go.Figure()
-
-    if _has_data:
-        fig_sc.add_trace(go.Scatter(
-            x=_hist["iv_ratio"],
-            y=_hist["norm_debit_hist"],
-            mode="markers",
-            marker=dict(color="#38b2ac", size=7, opacity=0.55,
-                        line=dict(color="#234e52", width=0.5)),
-            showlegend=True,
-            name="Historical",
-            hovertemplate=(
-                "<b>%{customdata[0]}</b><br>"
-                "SPX: %{customdata[1]:.0f}<br>"
-                "IV Ratio: %{x:.4f}<br>"
-                "Norm. Debit: %{y:.4f}<br>"
-                "Raw Debit: $%{customdata[2]:.2f}"
-                "<extra></extra>"
-            ),
-            customdata=list(zip(_hist["hover_date"], _hist["spx"], _hist["net_debit"])),
-        ))
-        _valid = _hist[["iv_ratio", "norm_debit_hist"]].dropna()
-        if len(_valid) >= 5:
-            _m, _b = np.polyfit(_valid["iv_ratio"], _valid["norm_debit_hist"], 1)
-            _x_tr = np.linspace(_valid["iv_ratio"].min(), _valid["iv_ratio"].max(), 100)
-            fig_sc.add_trace(go.Scatter(
-                x=_x_tr, y=_m * _x_tr + _b,
-                mode="lines",
-                line=dict(color="#718096", width=1.5, dash="dash"),
-                showlegend=True, name="OLS trend (descriptive)", hoverinfo="skip",
-            ))
-
-    if _norm_deb is not None and ts_now.ratio is not None:
-        fig_sc.add_trace(go.Scatter(
-            x=[ts_now.ratio], y=[_norm_deb],
-            mode="markers",
-            marker=dict(symbol="diamond", color="#f59e0b", size=14,
-                        line=dict(color="#78350f", width=1.5)),
-            showlegend=True, name="Current",
-            hovertemplate=(
-                "<b>Current observation</b><br>"
-                f"SPX: {spx_price:.0f}<br>"
-                "IV Ratio: %{x:.4f}<br>"
-                "Norm. Debit: %{y:.4f}<br>"
-                f"Diagonal Mark: ${_diag_mark:.2f}"
-                "<extra></extra>"
-            ),
-        ))
-
-    fig_sc.add_vline(x=1.0, line=dict(color="#4a5568", width=1, dash="dot"),
-                     annotation_text="ratio = 1.0",
-                     annotation_font=dict(color="#718096", size=10),
-                     annotation_position="top right")
-
-    if not _has_data and _norm_deb is None:
-        fig_sc.add_annotation(
-            x=0.5, y=0.5, xref="paper", yref="paper",
-            text="No data yet. Scatter will populate as snapshots accumulate.",
-            showarrow=False, font=dict(color="#718096", size=13),
-        )
-
-    fig_sc.update_layout(
-        height=380, paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
-        margin=dict(l=60, r=20, t=20, b=44),
-        xaxis=dict(title="ATM IV Ratio (Front / Back)",
-                   title_font=dict(color="#c8d0dc", size=11),
-                   tickfont=dict(color="#c8d0dc", size=11),
-                   gridcolor="#1e2530", showgrid=True, zeroline=False),
-        yaxis=dict(title="Normalized Debit (diagonal mark ÷ ATM straddle)",
-                   title_font=dict(color="#c8d0dc", size=11),
-                   tickfont=dict(color="#c8d0dc", size=11),
-                   gridcolor="#1e2530", showgrid=True, zeroline=False),
-        legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0,
-                    font=dict(color="#c8d0dc", size=11), bgcolor="rgba(0,0,0,0)"),
-        hovermode="closest",
-        hoverlabel=dict(bgcolor="#1a2035", bordercolor="#334155",
-                        font=dict(color="#c8d0dc", size=13)),
+with r1b:
+    st.metric(
+        "ATM Straddle",
+        f"${_straddle:.2f}" if _straddle else "—",
+        help="S × σ × √(2·DTE/365·π). The market's expected ±1σ move by front expiry.",
     )
+    st.caption("How big a move the market expects by front expiry.")
 
-    if not _has_data:
+with r1c:
+    st.metric(
+        "Normalized Debit",
+        f"{_norm_deb:.4f}" if _norm_deb is not None else "— (set strikes)",
+        help="Diagonal Mark ÷ ATM Straddle. Removes SPX price-level and vol-regime "
+             "effects so entry cost is comparable across different dates. HYPOTHESIS.",
+    )
+    st.caption("Is this cheap or expensive relative to expected market movement?")
+
+with r1d:
+    if _theta_diff is not None and _theta_diff.available:
+        _net_ct_s = (
+            f"+${_theta_diff.net_daily_theta_ct:.2f}"
+            if _theta_diff.net_daily_theta_ct >= 0
+            else f"−${abs(_theta_diff.net_daily_theta_ct):.2f}"
+        )
+        st.metric(
+            "Net Daily θ / contract",
+            _net_ct_s,
+            help="Position earns this much per day from time decay alone. "
+                 "Front decays faster than back — the difference is your daily gain. "
+                 "HYPOTHESIS — not yet validated as entry predictor.",
+        )
         st.caption(
-            f"Fewer than {MIN_SCATTER_PTS} complete snapshots found for this "
-            "strike / expiry pair. The scatter will populate as more data is collected."
+            f"Front θ {_theta_diff.front_sum:+.3f} · "
+            f"Back θ {_theta_diff.back_sum:+.3f} · "
+            f"Net {_theta_diff.net_daily_theta:+.3f} /sh/day"
         )
+    else:
+        st.metric(
+            "Net Daily θ / contract",
+            "— (set strikes)" if not strikes_set else "— (Greeks N/A)",
+        )
+        st.caption("How much time decay earns you each calendar day.")
 
-    st.plotly_chart(fig_sc, use_container_width=True, config={"displayModeBar": False})
+st.markdown("<div style='margin-bottom:2px'></div>", unsafe_allow_html=True)
+
+# ── Row 2: Transform-to-IC + market conditions ───────────────────────────
+r2a, r2b, r2c, r2d = st.columns(4)
+
+with r2a:
+    if _ic_mark is not None and _diag_mark is not None:
+        _ic_signal = _ic_mark - _diag_mark
+        _ic_color  = "#2ecc71" if _ic_signal > 5 else "#c8d0dc"
+        _ic_dollar = int(round(_ic_mark * 100))
+        st.metric(
+            "IC Equivalent Mark",
+            f"{_ic_mark:.2f} pts  ·  ${_ic_dollar:,}",
+            help="Credit value of the resulting IC after transformation: "
+                 "short back legs minus long wings at ±5. "
+                 "Green when IC Mark − Diagonal Mark > $5 (favorable to transform). "
+                 "HYPOTHESIS — signal not yet validated.",
+        )
+        st.markdown(
+            f"<p style='margin:0;font-size:0.78em;color:{_ic_color};'>"
+            f"vs Diagonal: {_ic_signal:+.2f} pts"
+            f"{'  ✓ Transformation favorable' if _ic_signal > 5 else ''}"
+            f"</p>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.metric("IC Equivalent Mark", "— (set strikes)" if not strikes_set
+                  else "— (wing strikes not in chain)")
+        st.caption("Value of IC after transforming diagonal at these strikes.")
+
+with r2b:
+    st.metric(
+        "IV Ratio Percentile",
+        f"{_iv_pct:.0f}th" if _iv_pct is not None else "— (need history)",
+        help="Where today's IV ratio ranks within the last 90 days. "
+             "100th = front has never been this expensive relative to back.",
+    )
+    st.caption("Is today's term structure unusually steep or flat?")
+
+with r2c:
+    st.metric(
+        "Liquidity (ATM)",
+        f"{_liquidity:.0f} / 100",
+        help="Composite of ATM front-strike volume and open interest. "
+             "Higher = tighter bid/ask and easier fills. Below 50 = expect wider slippage.",
+    )
+    st.caption("How easy will it be to get filled near the mark price?")
+
+with r2d:
+    if _straddle and _diag_mark is not None and _norm_deb is not None:
+        st.metric(
+            "Wing Cost (±5)",
+            f"${(_lc_wing.mark + _lp_wing.mark):.2f}" if (
+                strikes_set and _lc_wing.mark and _lp_wing.mark
+            ) else "—",
+            help="Total mark price of the two IC wings (long call +5, long put −5). "
+                 "This is what you pay to add bounded protection when transforming.",
+        )
+        st.caption("Cost to add downside protection at ±5 strikes.")
+    else:
+        st.metric("Wing Cost (±5)", "— (set strikes)")
+        st.caption("Cost to add downside protection at ±5 strikes.")
 
 st.divider()
 
 # ═════════════════════════════════════════════════════════════════════════════
 # SECTION 4 — CALENDAR EDGE
-# ATM IV chart + regime interpretation + stacked view + intraday scatter.
-# atm_merged already computed above.
+# Period radio lives here. atm_merged_period is computed from that selection.
+# session_date is used to pin the x-axis on "Today" view from 09:30 → 16:15.
 # ═════════════════════════════════════════════════════════════════════════════
 
-_ce_title, _ce_range = st.columns([3, 1])
-with _ce_title:
+_ce_hdr, _ce_radio = st.columns([3, 1])
+with _ce_hdr:
     st.subheader("Calendar Edge")
-with _ce_range:
-    st.markdown(
-        f"<p style='text-align:right;margin:0;padding-top:0.6em;"
-        f"font-size:0.85em;color:#aaa;'>Range: <b>{period_label}</b></p>",
-        unsafe_allow_html=True,
+with _ce_radio:
+    period_label = st.radio(
+        "Chart Range",
+        ["Today", "5D", "10D", "20D"],
+        horizontal=True,
+        label_visibility="collapsed",
+        key="period_radio",
     )
+period_days = {"Today": 1, "5D": 5, "10D": 10, "20D": 20}[period_label]
+
+# Build atm_merged_period — respects weekend/gap fallback for "Today"
+_fhp = _load_atm_hist_fb(front_expiry, period_days)
+_bhp = _load_atm_hist_fb(back_expiry,  period_days)
+atm_merged = pd.DataFrame()
+if not _fhp.empty and not _bhp.empty:
+    atm_merged = pd.merge(
+        _fhp[["timestamp", "atm_iv"]].rename(columns={"atm_iv": "front_iv"}),
+        _bhp[["timestamp", "atm_iv"]].rename(columns={"atm_iv": "back_iv"}),
+        on="timestamp", how="inner",
+    )
+    atm_merged["iv_ratio"] = atm_merged["front_iv"] / atm_merged["back_iv"]
 
 iv_index = float(chain_df.groupby("expiry")["iv"].mean().mean())
 m1, m2, m3, m4 = st.columns(4)
@@ -879,7 +830,15 @@ m4.metric("IV Index (avg)",     f"{iv_index:.2f}%")
 st.info(iv_engine.interpret_curve(ts_now))
 
 if not atm_merged.empty:
-    # ── Primary chart: Front/Back IV + Ratio on dual axis ────────────────────
+    # x-axis bounds: on "Today" pin from 09:30 to 16:15 of session_date
+    _xaxis_today = (
+        dict(range=[f"{session_date} 09:30", f"{session_date} 16:15"],
+             rangebreaks=_SESSION_RANGEBREAKS)
+        if period_label == "Today"
+        else dict(rangebreaks=_SESSION_RANGEBREAKS)
+    )
+
+    # ── Primary: Front/Back IV + Ratio on dual axis ───────────────────────
     fig_atm = go.Figure()
     fig_atm.add_trace(go.Scatter(x=atm_merged["timestamp"], y=atm_merged["front_iv"],
         name="Front ATM IV", line=dict(color="#2ecc71", width=1.5), yaxis="y1"))
@@ -889,7 +848,7 @@ if not atm_merged.empty:
         name="IV Ratio (F/B)", line=dict(color="#e74c3c", width=1.5), yaxis="y2"))
     fig_atm.update_layout(
         height=300, margin=dict(l=20, r=20, t=10, b=20),
-        xaxis=dict(rangebreaks=_SESSION_RANGEBREAKS),
+        xaxis=_xaxis_today,
         yaxis=dict(title="IV %", side="left"),
         yaxis2=dict(title="Ratio", side="right", overlaying="y", showgrid=False),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
@@ -901,7 +860,7 @@ if not atm_merged.empty:
     if samp_warn:
         st.warning(samp_warn)
 
-    # ── Stacked view: same-axis IV + regime-colored ratio (inline) ───────────
+    # ── Stacked: same-axis IV + regime-colored ratio ──────────────────────
     st.markdown("**Front vs Back ATM IV — same axis · IV Ratio by regime**")
     fig_stack = make_subplots(
         rows=2, cols=1, shared_xaxes=True,
@@ -918,9 +877,14 @@ if not atm_merged.empty:
     for tr in _banded_ratio_traces(atm_merged["timestamp"], atm_merged["iv_ratio"]):
         fig_stack.add_trace(tr, row=2, col=1)
     for thr, dash in [(1.00, "solid"), (0.70, "dot"), (1.30, "dot")]:
-        fig_stack.add_hline(y=thr, line=dict(color="#777", width=1, dash=dash),
-                            row=2, col=1)
-    fig_stack.update_xaxes(rangebreaks=_SESSION_RANGEBREAKS)
+        fig_stack.add_hline(y=thr, line=dict(color="#777", width=1, dash=dash), row=2, col=1)
+    if period_label == "Today":
+        fig_stack.update_xaxes(
+            range=[f"{session_date} 09:30", f"{session_date} 16:15"],
+            rangebreaks=_SESSION_RANGEBREAKS,
+        )
+    else:
+        fig_stack.update_xaxes(rangebreaks=_SESSION_RANGEBREAKS)
     fig_stack.update_yaxes(title_text="IV %", row=1, col=1)
     fig_stack.update_yaxes(title_text="Ratio", row=2, col=1)
     fig_stack.update_layout(
@@ -931,14 +895,12 @@ if not atm_merged.empty:
     )
     st.plotly_chart(fig_stack, use_container_width=True)
     st.caption(
-        "Top: front and back ATM IV share one axis, so the vertical gap "
-        "between them is the term-structure spread. Bottom: the ratio crosses "
-        "into a new color at 0.70 / 1.00 / 1.30. Green (≥1) = backwardation "
-        "(front rich); amber (<0.70) is usually the front leg decaying into the "
-        "close, not a structural signal — read it as a caution zone."
+        "Top: front and back ATM IV share one axis — the vertical gap IS the spread. "
+        "Bottom: ratio colored by regime at 0.70 / 1.00 / 1.30. "
+        "Green (≥1) = backwardation (front rich). Amber (<0.70) = usually 0DTE decay artifact."
     )
 
-    # ── Intraday Front vs Back IV scatter ────────────────────────────────────
+    # ── Intraday Front vs Back IV scatter ────────────────────────────────
     st.markdown("**Front vs Back IV scatter — intraday trajectory**")
     _sc = atm_merged.copy()
     _sc["hod"] = _sc["timestamp"].dt.hour + _sc["timestamp"].dt.minute / 60.0
@@ -952,11 +914,9 @@ if not atm_merged.empty:
     fig_intra.add_trace(go.Scatter(
         x=_sc["back_iv"], y=_sc["front_iv"], mode="markers", name="snapshots",
         marker=dict(size=6, color=_sc["hod"], colorscale="Viridis",
-                    showscale=True, colorbar=dict(title="Hour ET"),
-                    line=dict(width=0)),
+                    showscale=True, colorbar=dict(title="Hour ET"), line=dict(width=0)),
         customdata=_sc["iv_ratio"],
-        hovertemplate="Back %{x:.2f}%<br>Front %{y:.2f}%"
-                      "<br>R=%{customdata:.4f}<extra></extra>"))
+        hovertemplate="Back %{x:.2f}%<br>Front %{y:.2f}%<br>R=%{customdata:.4f}<extra></extra>"))
     fig_intra.update_layout(
         height=420, margin=dict(l=20, r=20, t=10, b=20),
         xaxis_title="Back ATM IV %", yaxis_title="Front ATM IV %",
@@ -964,19 +924,13 @@ if not atm_merged.empty:
     )
     st.plotly_chart(fig_intra, use_container_width=True)
     st.caption(
-        "Each dot is one snapshot. Above the dashed line = backwardation "
-        "(front richer, R>1); below = contango. Distance from the line is the "
-        "spread; distance from the origin is the overall vol level. Color is "
-        "time of day: watch the cloud start high/above the line at the open and "
-        "spiral inward and downward as the front leg crushes faster than the "
-        "back. A cloud hugging one ray ⇒ ratio ≈ constant (adds little); a cloud "
-        "fanning across angles ⇒ ratio varies independently of level (adds info)."
+        "Each dot is one snapshot. Above the dashed line = backwardation (R>1); below = contango. "
+        "Color = time of day. A cloud hugging one ray → ratio ≈ constant; "
+        "fanning across angles → ratio varies independently of vol level."
     )
 
 else:
-    st.caption(
-        f"No ATM IV history for {front_expiry} / {back_expiry} in the selected range."
-    )
+    st.caption(f"No ATM IV history for {front_expiry} / {back_expiry} in the selected range.")
 
 dc1, dc2 = st.columns(2)
 for col, label, exp, dte in [
@@ -999,6 +953,8 @@ st.divider()
 
 # ═════════════════════════════════════════════════════════════════════════════
 # SECTION 5 — HISTORICAL STATISTICS
+# Weekend/gap fallback: if Today returns empty, show last available session.
+# Each column now shows: range bar, current percentile, min/max/current values.
 # ═════════════════════════════════════════════════════════════════════════════
 
 st.subheader(
@@ -1011,8 +967,9 @@ for col, (label, days) in zip(
     stat_cols,
     [("Today", 1), ("5 Days", 5), ("10 Days", 10), ("20 Days", 20)],
 ):
-    pf = _load_atm_hist(front_expiry, days)
-    pb = _load_atm_hist(back_expiry,  days)
+    # Weekend / gap fallback: if Today (days=1) is empty, use last session
+    pf = _load_atm_hist_fb(front_expiry, days)
+    pb = _load_atm_hist_fb(back_expiry,  days)
     with col:
         st.caption(label)
         if not pf.empty and not pb.empty:
@@ -1023,14 +980,21 @@ for col, (label, days) in zip(
             )
             pm["ratio"] = pm["f"] / pm["b"]
             rs = iv_engine.range_stats(pm["ratio"], ts_now.ratio)
+            pct_rank = iv_engine.percentile_rank(pm["ratio"], ts_now.ratio)
+            _is_low  = pct_rank < 25
+            _is_high = pct_rank > 75
+            _ctx_color = "#2ecc71" if _is_high else ("#e74c3c" if _is_low else "#aaa")
+            _ctx_label = "HIGH" if _is_high else ("LOW" if _is_low else "MID")
             st.markdown(
-                f"""<div style="font-size:0.85em">{rs.low:.4f}
-<div style="background:linear-gradient(90deg,#444,#888);
-height:6px;border-radius:3px;position:relative;margin:4px 0;">
-<div style="position:absolute;left:{rs.position_pct}%;top:-3px;
-width:12px;height:12px;background:#e74c3c;border-radius:50%;
-transform:translateX(-50%);"></div></div>
-{rs.high:.4f}</div>""",
+                f"""<div style="font-size:0.83em;line-height:1.6;">
+  <span style="color:#aaa;">Min</span> {rs.low:.4f}
+  <div style="background:linear-gradient(90deg,#333,#666);height:6px;border-radius:3px;position:relative;margin:4px 0;">
+    <div style="position:absolute;left:{rs.position_pct:.1f}%;top:-4px;width:14px;height:14px;background:#e74c3c;border-radius:50%;transform:translateX(-50%);border:2px solid #0e1117;"></div>
+  </div>
+  <span style="color:#aaa;">Max</span> {rs.high:.4f}<br>
+  <span style="color:#aaa;">Now</span> <b>{ts_now.ratio:.4f}</b>
+  &nbsp;<span style="color:{_ctx_color};font-size:0.9em;">{pct_rank:.0f}th pct · {_ctx_label}</span>
+</div>""",
                 unsafe_allow_html=True,
             )
         else:
@@ -1161,9 +1125,15 @@ with right_col:
                 fig_str.add_trace(go.Scatter(x=pm["timestamp"], y=pm["put_ratio"],
                     name="Put Ratio (F/B)",
                     line=dict(color="#e74c3c", width=1.5, dash="dot"), yaxis="y2"))
+            _str_xaxis = (
+                dict(range=[f"{session_date} 09:30", f"{session_date} 16:15"],
+                     rangebreaks=_SESSION_RANGEBREAKS)
+                if period_label == "Today"
+                else dict(rangebreaks=_SESSION_RANGEBREAKS)
+            )
             fig_str.update_layout(
                 height=360, margin=dict(l=20, r=20, t=10, b=20),
-                xaxis=dict(rangebreaks=_SESSION_RANGEBREAKS),
+                xaxis=_str_xaxis,
                 yaxis=dict(title="IV %", side="left"),
                 yaxis2=dict(title="Ratio", side="right", overlaying="y", showgrid=False),
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
@@ -1313,3 +1283,113 @@ else:
         "No scanner data for this session yet. "
         "Make sure collector.py is running and has completed at least one cycle."
     )
+
+st.divider()
+
+# ═════════════════════════════════════════════════════════════════════════════
+# SECTION 9 — RESEARCH: IV Ratio vs. Normalized Debit
+# Observation tool placed at bottom — not part of the primary decision flow.
+# ═════════════════════════════════════════════════════════════════════════════
+
+st.subheader("Research — IV Ratio vs. Normalized Debit")
+st.caption(
+    "Each point is one intraday snapshot. X = ATM IV Ratio (F/B); "
+    "Y = Normalized Debit (diagonal mark ÷ ATM straddle). "
+    "Amber diamond = current observation. No predictive claim is made."
+)
+
+if not strikes_set:
+    st.info("Set call and put strikes in Controls to populate the scatter.")
+else:
+    _hist_rows = db.get_diagonal_history(
+        config.DB_PATH, front_expiry, back_expiry,
+        call_strike, put_strike, days=90,
+    )
+    _hist = pd.DataFrame([dict(r) for r in _hist_rows]) if _hist_rows else pd.DataFrame()
+    if not _hist.empty:
+        _hist["net_debit"] = (
+            _hist["back_call_mark"] + _hist["back_put_mark"]
+            - _hist["front_call_mark"] - _hist["front_put_mark"]
+        )
+        _hist["atm_straddle_hist"] = (
+            _hist["spx"] * _hist["front_iv"]
+            * np.sqrt(2.0 * _hist["front_dte"] / (365.0 * np.pi))
+        )
+        _hist = _hist[_hist["atm_straddle_hist"] > 0].copy()
+        _hist["norm_debit_hist"] = _hist["net_debit"] / _hist["atm_straddle_hist"]
+        _hist["ts"] = pd.to_datetime(_hist["snapshot_timestamp"])
+        _hist["hover_date"] = _hist["ts"].dt.strftime("%Y-%m-%d %H:%M UTC")
+
+    _has_data = not _hist.empty and len(_hist) >= 5
+    fig_sc = go.Figure()
+    if _has_data:
+        fig_sc.add_trace(go.Scatter(
+            x=_hist["iv_ratio"], y=_hist["norm_debit_hist"], mode="markers",
+            marker=dict(color="#38b2ac", size=7, opacity=0.55,
+                        line=dict(color="#234e52", width=0.5)),
+            showlegend=True, name="Historical",
+            hovertemplate=(
+                "<b>%{customdata[0]}</b><br>SPX: %{customdata[1]:.0f}<br>"
+                "IV Ratio: %{x:.4f}<br>Norm. Debit: %{y:.4f}<br>"
+                "Raw Debit: $%{customdata[2]:.2f}<extra></extra>"
+            ),
+            customdata=list(zip(_hist["hover_date"], _hist["spx"], _hist["net_debit"])),
+        ))
+        _valid = _hist[["iv_ratio", "norm_debit_hist"]].dropna()
+        if len(_valid) >= 5:
+            _m_sc, _b_sc = np.polyfit(_valid["iv_ratio"], _valid["norm_debit_hist"], 1)
+            _x_tr = np.linspace(_valid["iv_ratio"].min(), _valid["iv_ratio"].max(), 100)
+            fig_sc.add_trace(go.Scatter(
+                x=_x_tr, y=_m_sc * _x_tr + _b_sc, mode="lines",
+                line=dict(color="#718096", width=1.5, dash="dash"),
+                showlegend=True, name="OLS trend (descriptive)", hoverinfo="skip",
+            ))
+
+    if _norm_deb is not None and ts_now.ratio is not None:
+        fig_sc.add_trace(go.Scatter(
+            x=[ts_now.ratio], y=[_norm_deb], mode="markers",
+            marker=dict(symbol="diamond", color="#f59e0b", size=14,
+                        line=dict(color="#78350f", width=1.5)),
+            showlegend=True, name="Current",
+            hovertemplate=(
+                "<b>Current observation</b><br>"
+                f"SPX: {spx_price:.0f}<br>"
+                "IV Ratio: %{x:.4f}<br>Norm. Debit: %{y:.4f}<br>"
+                + (f"Diagonal Mark: ${_diag_mark:.2f}" if _diag_mark else "")
+                + "<extra></extra>"
+            ),
+        ))
+
+    fig_sc.add_vline(x=1.0, line=dict(color="#4a5568", width=1, dash="dot"),
+                     annotation_text="ratio = 1.0",
+                     annotation_font=dict(color="#718096", size=10),
+                     annotation_position="top right")
+    if not _has_data and _norm_deb is None:
+        fig_sc.add_annotation(
+            x=0.5, y=0.5, xref="paper", yref="paper",
+            text="No data yet — scatter populates as snapshots accumulate.",
+            showarrow=False, font=dict(color="#718096", size=13),
+        )
+    fig_sc.update_layout(
+        height=380, paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+        margin=dict(l=60, r=20, t=20, b=44),
+        xaxis=dict(title="ATM IV Ratio (Front / Back)",
+                   title_font=dict(color="#c8d0dc", size=11),
+                   tickfont=dict(color="#c8d0dc", size=11),
+                   gridcolor="#1e2530", showgrid=True, zeroline=False),
+        yaxis=dict(title="Normalized Debit (diagonal mark ÷ ATM straddle)",
+                   title_font=dict(color="#c8d0dc", size=11),
+                   tickfont=dict(color="#c8d0dc", size=11),
+                   gridcolor="#1e2530", showgrid=True, zeroline=False),
+        legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0,
+                    font=dict(color="#c8d0dc", size=11), bgcolor="rgba(0,0,0,0)"),
+        hovermode="closest",
+        hoverlabel=dict(bgcolor="#1a2035", bordercolor="#334155",
+                        font=dict(color="#c8d0dc", size=13)),
+    )
+    if not _has_data:
+        st.caption(
+            "Fewer than 5 complete snapshots found for this strike/expiry pair. "
+            "Scatter populates as more data is collected."
+        )
+    st.plotly_chart(fig_sc, use_container_width=True, config={"displayModeBar": False})
