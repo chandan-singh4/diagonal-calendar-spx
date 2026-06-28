@@ -698,6 +698,81 @@ def get_iv_spread_history(db_path: str, front_expiry: str, back_expiry: str,
         ).fetchall()
 
 
+def get_diagonal_history(
+    db_path:      str,
+    front_expiry: str,
+    back_expiry:  str,
+    call_strike:  float,
+    put_strike:   float,
+    days:         int = 90,
+) -> list:
+    """
+    Historical (iv_ratio, mark prices) for the IV Ratio vs. Normalized Debit scatter.
+
+    Returns one row per COMPLETE snapshot where all four diagonal legs have a
+    computable mark price (COALESCE(mark, (bid+ask)/2.0)).  Rows where any leg
+    mark is NULL are excluded so the caller always gets a clean four-leg set.
+
+    Columns returned:
+        snapshot_timestamp, spx, front_iv (decimal), back_iv (decimal),
+        iv_ratio, front_dte,
+        front_call_mark, back_call_mark, front_put_mark, back_put_mark.
+
+    IVs are in decimal form (as stored in atm_iv_by_expiry) — multiply ×100
+    at the caller if percentage display is needed.
+    """
+    with managed_conn(db_path) as conn:
+        return conn.execute(
+            """
+            SELECT
+                s.snapshot_timestamp,
+                s.underlying_price                              AS spx,
+                f.atm_avg_iv                                    AS front_iv,
+                b.atm_avg_iv                                    AS back_iv,
+                CASE WHEN f.atm_avg_iv > 0
+                     THEN b.atm_avg_iv / f.atm_avg_iv
+                     ELSE NULL END                              AS iv_ratio,
+                f.dte                                           AS front_dte,
+                COALESCE(ofc.mark, (ofc.bid + ofc.ask) / 2.0) AS front_call_mark,
+                COALESCE(obc.mark, (obc.bid + obc.ask) / 2.0) AS back_call_mark,
+                COALESCE(ofp.mark, (ofp.bid + ofp.ask) / 2.0) AS front_put_mark,
+                COALESCE(obp.mark, (obp.bid + obp.ask) / 2.0) AS back_put_mark
+            FROM snapshots s
+            JOIN atm_iv_by_expiry f
+                ON f.snapshot_id = s.snapshot_id AND f.expiry_date = ?
+            JOIN atm_iv_by_expiry b
+                ON b.snapshot_id = s.snapshot_id AND b.expiry_date = ?
+            LEFT JOIN option_rows ofc
+                ON ofc.snapshot_id = s.snapshot_id
+               AND ofc.expiry_date = ? AND ofc.strike = ? AND ofc.right = 'C'
+            LEFT JOIN option_rows obc
+                ON obc.snapshot_id = s.snapshot_id
+               AND obc.expiry_date = ? AND obc.strike = ? AND obc.right = 'C'
+            LEFT JOIN option_rows ofp
+                ON ofp.snapshot_id = s.snapshot_id
+               AND ofp.expiry_date = ? AND ofp.strike = ? AND ofp.right = 'P'
+            LEFT JOIN option_rows obp
+                ON obp.snapshot_id = s.snapshot_id
+               AND obp.expiry_date = ? AND obp.strike = ? AND obp.right = 'P'
+            WHERE s.status = 'COMPLETE'
+              AND s.snapshot_timestamp >= datetime('now', ?, 'utc')
+              AND COALESCE(ofc.mark, (ofc.bid + ofc.ask) / 2.0) IS NOT NULL
+              AND COALESCE(obc.mark, (obc.bid + obc.ask) / 2.0) IS NOT NULL
+              AND COALESCE(ofp.mark, (ofp.bid + ofp.ask) / 2.0) IS NOT NULL
+              AND COALESCE(obp.mark, (obp.bid + obp.ask) / 2.0) IS NOT NULL
+            ORDER BY s.snapshot_timestamp
+            """,
+            (
+                front_expiry, back_expiry,
+                front_expiry, float(call_strike),
+                back_expiry,  float(call_strike),
+                front_expiry, float(put_strike),
+                back_expiry,  float(put_strike),
+                f"-{days} days",
+            ),
+        ).fetchall()
+
+
 def get_gaps(db_path: str, start: str, end: str,
               exclude_reasons: list[str] | None = None) -> list:
     """Collection gaps within a date range."""

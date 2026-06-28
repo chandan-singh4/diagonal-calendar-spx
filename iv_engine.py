@@ -565,3 +565,135 @@ def expected_move_log_check(
         configured_window=window,
         window_adequate=em_2sd <= window,
     )
+
+
+# ---------------------------------------------------------------------------
+# Normalized Debit  (v3.2)
+# ---------------------------------------------------------------------------
+
+def atm_straddle_price(spx_price: float, atm_iv_pct: float, dte: int) -> float | None:
+    """
+    ATM straddle price approximation.
+
+    Formula:  S × σ × √(2T / π)
+    where σ = annualised IV (decimal) and T = DTE / 365.
+
+    atm_iv_pct: IV in PERCENTAGE form (e.g. 18.5 means 18.5%).
+    This matches the convention in chain_df after the ×100 load boundary.
+
+    Returns None if any input is non-positive (no valid straddle can be computed).
+    """
+    if atm_iv_pct <= 0 or dte <= 0 or spx_price <= 0:
+        return None
+    sigma = atm_iv_pct / 100.0
+    T     = dte / 365.0
+    return spx_price * sigma * math.sqrt(2.0 * T / math.pi)
+
+
+def normalized_debit(net_debit: float, straddle_price: float | None) -> float | None:
+    """
+    Normalize the diagonal entry cost by the ATM straddle price.
+
+    net_debit / atm_straddle_price
+
+    Removes the confounding effect of SPX price-level drift and vol-regime
+    shifts, making the trade cost comparable across different dates and market
+    environments.
+
+    Returns None if straddle_price is None or zero.
+    """
+    if straddle_price is None or straddle_price <= 0:
+        return None
+    return net_debit / straddle_price
+
+
+# ---------------------------------------------------------------------------
+# Theta Differential  (v3.2)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ThetaDifferential:
+    """
+    Position-level daily theta for the diagonal calendar spread.
+
+    Structure:
+        Short front call  +  Short front put   (we GAIN their daily decay)
+        Long  back  call  +  Long  back  put   (we LOSE their daily decay)
+
+    Theta convention: raw chain values are negative (the option loses value
+    per day against its holder). For short legs, the sign flips — we receive
+    that decay as profit.
+
+    net_daily_theta = −front_sum + back_sum
+        (−front_sum: front legs' decay magnitude, positive for us)
+        (+back_sum:  back legs' decay burden, negative for us)
+
+    Positive net_daily_theta means the position earns net time decay each day.
+    This is the usual case for a diagonal when front DTE < back DTE.
+
+    NOTE: theta_differential is a HYPOTHESIS metric (v3.2). Whether its
+    magnitude at entry predicts transform profit has not been validated.
+    Display raw values only — do not fold into any composite score.
+    """
+    front_call_theta:   float | None   # raw (negative)
+    front_put_theta:    float | None   # raw (negative)
+    back_call_theta:    float | None   # raw (negative)
+    back_put_theta:     float | None   # raw (negative)
+    front_sum:          float | None   # front_call + front_put (negative)
+    back_sum:           float | None   # back_call + back_put (negative)
+    net_daily_theta:    float | None   # per share / per day (+ve = position earns)
+    net_daily_theta_ct: float | None   # × 100 (one contract = 100 shares)
+    available:          bool           # False when Greeks absent from snapshot
+
+
+def theta_differential(
+    chain_df:      pd.DataFrame,
+    front_expiry:  str,
+    back_expiry:   str,
+    call_strike:   float,
+    put_strike:    float,
+) -> ThetaDifferential:
+    """
+    Compute position-level daily theta for the four-leg diagonal.
+
+    Positive net_daily_theta = the position earns time decay each day.
+    This is expected to be positive for a diagonal where the front
+    decays faster than the back, but magnitude depends on IV, DTE, and
+    how far strikes are from spot.
+    """
+    def _theta(expiry: str, strike: float, side: str) -> float | None:
+        rows = chain_df[
+            (chain_df["expiry"] == expiry)
+            & (chain_df["strike"] == float(strike))
+            & (chain_df["side"]   == side.upper())
+        ]
+        if rows.empty:
+            return None
+        v = rows.iloc[0].get("theta")
+        return float(v) if (v is not None and not pd.isna(v)) else None
+
+    fc_t = _theta(front_expiry, call_strike, "CALL")
+    fp_t = _theta(front_expiry, put_strike,  "PUT")
+    bc_t = _theta(back_expiry,  call_strike, "CALL")
+    bp_t = _theta(back_expiry,  put_strike,  "PUT")
+
+    f_sum = (fc_t + fp_t) if (fc_t is not None and fp_t is not None) else None
+    b_sum = (bc_t + bp_t) if (bc_t is not None and bp_t is not None) else None
+
+    # Short front → position gains -f_sum (positive, since f_sum is negative)
+    # Long back   → position pays   b_sum (negative, adding a loss)
+    # net = -f_sum + b_sum
+    net    = ((-f_sum) + b_sum) if (f_sum is not None and b_sum is not None) else None
+    net_ct = (net * 100)        if net is not None else None
+
+    return ThetaDifferential(
+        front_call_theta=fc_t,
+        front_put_theta=fp_t,
+        back_call_theta=bc_t,
+        back_put_theta=bp_t,
+        front_sum=f_sum,
+        back_sum=b_sum,
+        net_daily_theta=net,
+        net_daily_theta_ct=net_ct,
+        available=net is not None,
+    )

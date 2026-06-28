@@ -41,6 +41,7 @@ import logging
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -1114,32 +1115,280 @@ else:
 st.divider()
 
 # ═════════════════════════════════════════════════════════════════════════════
-# SECTION 8 — TRANSFORM CREDIT  (very bottom)
+# SECTION 8 — ENTRY ANALYSIS  (v3.2)
+# Normalized Debit, Theta Differential, IV Ratio vs. Norm. Debit scatter.
 # atm_merged already computed in Calendar Edge above.
 # ═════════════════════════════════════════════════════════════════════════════
 
-st.subheader("Transform Credit")
+st.subheader("Entry Analysis")
 
+# ── ATM Straddle (computable without strikes) ─────────────────────────────
+_straddle = iv_engine.atm_straddle_price(spx_price, front_iv_atm, front_dte)
+
+# ── Position metrics (require strikes) ───────────────────────────────────────
+_diag_mark:  float | None = None
+_norm_deb:   float | None = None
+_theta_diff: "iv_engine.ThetaDifferential | None" = None
+
+if strikes_set:
+    _efc = iv_engine.strike_contract(chain_df, front_expiry, call_strike, "CALL")
+    _ebc = iv_engine.strike_contract(chain_df, back_expiry,  call_strike, "CALL")
+    _efp = iv_engine.strike_contract(chain_df, front_expiry, put_strike,  "PUT")
+    _ebp = iv_engine.strike_contract(chain_df, back_expiry,  put_strike,  "PUT")
+
+    if all(m is not None for m in [_efc.mark, _ebc.mark, _efp.mark, _ebp.mark]):
+        _diag_mark = (_ebc.mark + _ebp.mark) - (_efc.mark + _efp.mark)
+        _norm_deb  = iv_engine.normalized_debit(_diag_mark, _straddle)
+
+    _theta_diff = iv_engine.theta_differential(
+        chain_df, front_expiry, back_expiry, call_strike, put_strike
+    )
+
+# ── Market condition metrics (always available) ───────────────────────────
 near_front = chain_df[chain_df["expiry"] == front_expiry]
 atm_row    = near_front.iloc[(near_front["strike"] - spx_price).abs().argsort()[:1]]
-liquidity  = iv_engine.liquidity_score(
+_liquidity = iv_engine.liquidity_score(
     atm_row["volume"].fillna(0).mean(),
     atm_row["open_interest"].fillna(0).mean(),
 )
-iv_pct = (
+_iv_pct = (
     iv_engine.percentile_rank(atm_merged["iv_ratio"], ts_now.ratio)
-    if not atm_merged.empty else 50
+    if not atm_merged.empty else None
 )
-theta_adv = 50
-score     = iv_engine.trade_quality_score(iv_pct, liquidity, theta_adv)
 
-s1, s2, s3, s4 = st.columns(4)
-s1.metric("Overall Score",            f"{score:.0f} / 100")
-s2.metric("IV Edge (percentile)",     f"{iv_pct:.0f}")
-s3.metric("Liquidity",                f"{liquidity:.0f}")
-s4.metric("Theta Adv. (placeholder)", f"{theta_adv:.0f}")
-
-st.caption(
-    "Full transform credit calculator (back-leg value − wing cost − entry debit) "
-    "coming in Phase 3."
+# ── Row 1: position cost metrics ─────────────────────────────────────────────
+r1a, r1b, r1c, r1d = st.columns(4)
+r1a.metric(
+    "Diagonal Mark",
+    f"${_diag_mark:.2f}" if _diag_mark is not None else "— (set strikes)",
+    help="Current cost to enter the diagonal: (back call mark + back put mark) "
+         "− (front call mark + front put mark).  Positive = debit to open.",
 )
+r1b.metric(
+    "ATM Straddle",
+    f"${_straddle:.2f}" if _straddle is not None else "—",
+    help="ATM straddle approximation: SPX × σ × √(2·DTE/365·π). "
+         "Uses front-expiry ATM IV.  The normalisation denominator.",
+)
+r1c.metric(
+    "Normalized Debit",
+    f"{_norm_deb:.4f}" if _norm_deb is not None else "— (set strikes)",
+    help="Diagonal Mark ÷ ATM Straddle. Removes the effect of SPX price drift "
+         "and vol-regime shifts, making trade cost comparable across dates. "
+         "HYPOTHESIS — not yet validated as a predictor of transform profit.",
+)
+
+# ── Row 1d: Theta differential ────────────────────────────────────────────────
+if _theta_diff is not None and _theta_diff.available:
+    _net_ct_s  = f"+${_theta_diff.net_daily_theta_ct:.2f}" if _theta_diff.net_daily_theta_ct >= 0                  else f"−${abs(_theta_diff.net_daily_theta_ct):.2f}"
+    r1d.metric(
+        "Net Daily θ / contract",
+        _net_ct_s,
+        help="Position-level daily time decay, per contract (100 shares). "
+             "Short front legs earn theta; long back legs pay theta. "
+             "Positive = position gains value from time alone each day. "
+             "HYPOTHESIS — magnitude at entry not yet validated as predictor.",
+    )
+else:
+    r1d.metric(
+        "Net Daily θ / contract",
+        "— (set strikes)" if not strikes_set else "— (Greeks unavailable)",
+        help="Greeks not present in current snapshot. Schwab sometimes omits "
+             "theta from quotes when options are deep OTM or illiquid.",
+    )
+
+# ── Theta breakdown caption ───────────────────────────────────────────────────
+if _theta_diff is not None and _theta_diff.available:
+    _fs = _theta_diff.front_sum
+    _bs = _theta_diff.back_sum
+    _net = _theta_diff.net_daily_theta
+    st.caption(
+        f"Theta breakdown — "
+        f"Front (short): {_fs:+.3f} /sh/day  ·  "
+        f"Back (long): {_bs:+.3f} /sh/day  ·  "
+        f"Net position: {_net:+.3f} /sh/day "
+        f"(call {_theta_diff.front_call_theta:+.3f} / {_theta_diff.back_call_theta:+.3f}  "
+        f"· put {_theta_diff.front_put_theta:+.3f} / {_theta_diff.back_put_theta:+.3f})"
+    )
+
+st.markdown("<div style='margin-bottom:4px'></div>", unsafe_allow_html=True)
+
+# ── Row 2: market condition metrics ──────────────────────────────────────────
+r2a, r2b, _, _ = st.columns(4)
+r2a.metric(
+    "IV Ratio Percentile",
+    f"{_iv_pct:.0f}th" if _iv_pct is not None else "— (need history)",
+    help="Where today's IV ratio sits within its 6-month distribution. "
+         "Higher = front IV is historically elevated relative to back IV.",
+)
+r2b.metric(
+    "Liquidity (ATM)",
+    f"{_liquidity:.0f}",
+    help="Composite of ATM front-strike volume and open interest, scored 0–100. "
+         "Higher = tighter spreads and easier fills at the ATM front strike.",
+)
+
+# ── Scatter: IV Ratio vs. Normalized Debit ───────────────────────────────────
+with st.expander("📈 Research — IV Ratio vs. Normalized Debit", expanded=False):
+    st.caption(
+        "Each point is one intraday snapshot. X = ATM IV Ratio (F/B); "
+        "Y = Normalized Debit (diagonal mark ÷ ATM straddle). "
+        "The amber diamond marks the current observation. "
+        "This is an observation tool — no predictive claim is made."
+    )
+
+    if not strikes_set:
+        st.info("Set call and put strikes in Controls to populate the scatter.")
+    else:
+        _hist_rows = db.get_diagonal_history(
+            config.DB_PATH, front_expiry, back_expiry,
+            call_strike, put_strike, days=90,
+        )
+        _hist = pd.DataFrame([dict(r) for r in _hist_rows]) if _hist_rows else pd.DataFrame()
+
+        if not _hist.empty:
+            _hist["net_debit"] = (
+                _hist["back_call_mark"] + _hist["back_put_mark"]
+                - _hist["front_call_mark"] - _hist["front_put_mark"]
+            )
+            # atm_straddle from DB: front_iv is decimal (as stored)
+            _hist["atm_straddle_hist"] = (
+                _hist["spx"]
+                * _hist["front_iv"]
+                * np.sqrt(2.0 * _hist["front_dte"] / (365.0 * np.pi))
+            )
+            _hist = _hist[_hist["atm_straddle_hist"] > 0].copy()
+            _hist["norm_debit_hist"] = _hist["net_debit"] / _hist["atm_straddle_hist"]
+            _hist["ts"] = pd.to_datetime(_hist["snapshot_timestamp"])
+            _hist["hover_date"] = _hist["ts"].dt.strftime("%Y-%m-%d %H:%M UTC")
+
+        MIN_SCATTER_PTS = 5
+        _has_data = not _hist.empty and len(_hist) >= MIN_SCATTER_PTS
+
+        fig_sc = go.Figure()
+
+        if _has_data:
+            # Historical scatter — muted teal, semi-transparent
+            fig_sc.add_trace(go.Scatter(
+                x=_hist["iv_ratio"],
+                y=_hist["norm_debit_hist"],
+                mode="markers",
+                marker=dict(
+                    color="#38b2ac",
+                    size=7,
+                    opacity=0.55,
+                    line=dict(color="#234e52", width=0.5),
+                ),
+                showlegend=True,
+                name="Historical",
+                hovertemplate=(
+                    "<b>%{customdata[0]}</b><br>"
+                    "SPX: %{customdata[1]:.0f}<br>"
+                    "IV Ratio: %{x:.4f}<br>"
+                    "Norm. Debit: %{y:.4f}<br>"
+                    "Raw Debit: $%{customdata[2]:.2f}"
+                    "<extra></extra>"
+                ),
+                customdata=list(zip(
+                    _hist["hover_date"],
+                    _hist["spx"],
+                    _hist["net_debit"],
+                )),
+            ))
+
+            # OLS trendline (descriptive, not predictive)
+            _valid = _hist[["iv_ratio", "norm_debit_hist"]].dropna()
+            if len(_valid) >= 5:
+                _m, _b = np.polyfit(_valid["iv_ratio"], _valid["norm_debit_hist"], 1)
+                _x_trend = np.linspace(_valid["iv_ratio"].min(), _valid["iv_ratio"].max(), 100)
+                _y_trend = _m * _x_trend + _b
+                fig_sc.add_trace(go.Scatter(
+                    x=_x_trend, y=_y_trend,
+                    mode="lines",
+                    line=dict(color="#718096", width=1.5, dash="dash"),
+                    showlegend=True,
+                    name="OLS trend (descriptive)",
+                    hoverinfo="skip",
+                ))
+
+        # Current observation
+        if _norm_deb is not None and ts_now.ratio is not None:
+            fig_sc.add_trace(go.Scatter(
+                x=[ts_now.ratio],
+                y=[_norm_deb],
+                mode="markers",
+                marker=dict(
+                    symbol="diamond",
+                    color="#f59e0b",
+                    size=14,
+                    line=dict(color="#78350f", width=1.5),
+                ),
+                showlegend=True,
+                name="Current",
+                hovertemplate=(
+                    "<b>Current observation</b><br>"
+                    f"SPX: {spx_price:.0f}<br>"
+                    "IV Ratio: %{x:.4f}<br>"
+                    "Norm. Debit: %{y:.4f}<br>"
+                    f"Diagonal Mark: ${_diag_mark:.2f}"
+                    "<extra></extra>"
+                ),
+            ))
+
+        # Reference line at IV Ratio = 1.0
+        fig_sc.add_vline(
+            x=1.0,
+            line=dict(color="#4a5568", width=1, dash="dot"),
+            annotation_text="ratio = 1.0",
+            annotation_font=dict(color="#718096", size=10),
+            annotation_position="top right",
+        )
+
+        if not _has_data and _norm_deb is None:
+            fig_sc.add_annotation(
+                x=0.5, y=0.5, xref="paper", yref="paper",
+                text="No data yet. Scatter will populate as snapshots accumulate.",
+                showarrow=False,
+                font=dict(color="#718096", size=13),
+            )
+
+        fig_sc.update_layout(
+            height=380,
+            paper_bgcolor="#0e1117",
+            plot_bgcolor="#0e1117",
+            margin=dict(l=60, r=20, t=20, b=44),
+            xaxis=dict(
+                title="ATM IV Ratio (Front / Back)",
+                title_font=dict(color="#c8d0dc", size=11),
+                tickfont=dict(color="#c8d0dc", size=11),
+                gridcolor="#1e2530",
+                showgrid=True, zeroline=False,
+            ),
+            yaxis=dict(
+                title="Normalized Debit (diagonal mark ÷ ATM straddle)",
+                title_font=dict(color="#c8d0dc", size=11),
+                tickfont=dict(color="#c8d0dc", size=11),
+                gridcolor="#1e2530",
+                showgrid=True, zeroline=False,
+            ),
+            legend=dict(
+                orientation="h", yanchor="bottom", y=1.01,
+                xanchor="left", x=0,
+                font=dict(color="#c8d0dc", size=11),
+                bgcolor="rgba(0,0,0,0)",
+            ),
+            hovermode="closest",
+            hoverlabel=dict(
+                bgcolor="#1a2035",
+                bordercolor="#334155",
+                font=dict(color="#c8d0dc", size=13),
+            ),
+        )
+
+        if not _has_data:
+            st.caption(
+                f"Fewer than {MIN_SCATTER_PTS} complete snapshots found for this "
+                "strike / expiry pair. The scatter will populate as more data is collected."
+            )
+
+        st.plotly_chart(fig_sc, use_container_width=True, config={"displayModeBar": False})
