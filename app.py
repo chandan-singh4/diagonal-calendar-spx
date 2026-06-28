@@ -226,6 +226,11 @@ def _load_contract_hist(expiry: str, strike: float,
     rows = db.get_contract_iv_history(
         config.DB_PATH, expiry, strike, right_char, days
     )
+    if not rows and days == 1:
+        # Weekend / holiday fallback: retry with 5 days and trim to last session
+        rows = db.get_contract_iv_history(
+            config.DB_PATH, expiry, strike, right_char, 5
+        )
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame([dict(r) for r in rows])
@@ -234,6 +239,9 @@ def _load_contract_hist(expiry: str, strike: float,
         pd.to_datetime(df["snapshot_timestamp"], format="ISO8601", utc=True)
         .dt.tz_convert(config.DISPLAY_TIMEZONE)
     )
+    if days == 1 and not df.empty:
+        last_date = df["timestamp"].dt.date.max()
+        df = df[df["timestamp"].dt.date == last_date]
     return df
 
 
