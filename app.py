@@ -651,12 +651,15 @@ if strikes_set:
         _diag_mark = (_ebc.mark + _ebp.mark) - (_efc.mark + _efp.mark)
         _norm_deb  = iv_engine.normalized_debit(_diag_mark, _straddle)
 
-    # Transform-to-IC wings (fixed width = 5 on back expiry)
-    _lc_wing = iv_engine.strike_contract(chain_df, back_expiry, call_strike + 5, "CALL")
-    _lp_wing = iv_engine.strike_contract(chain_df, back_expiry, put_strike  - 5, "PUT")
-    if all(m is not None for m in [_ebc.mark, _ebp.mark, _lc_wing.mark, _lp_wing.mark]):
-        # IC credit = short back legs − long wings (at ±5)
-        _ic_mark = (_ebc.mark + _ebp.mark) - (_lc_wing.mark + _lp_wing.mark)
+    # Transform-to-IC wings (fixed width = 5, on FRONT expiry — same expiry as the IC shorts)
+    # Full transformation order:
+    #   Sell to Close: back call + back put  (bc marks already fetched)
+    #   Buy to Open:   front call wing +5, front put wing -5  (new fetches below)
+    _fc_wing_call = iv_engine.strike_contract(chain_df, front_expiry, call_strike + 5, "CALL")
+    _fc_wing_put  = iv_engine.strike_contract(chain_df, front_expiry, put_strike  - 5, "PUT")
+    if all(m is not None for m in [_ebc.mark, _ebp.mark, _fc_wing_call.mark, _fc_wing_put.mark]):
+        # Transform Mark = credit from closing backs − cost of buying front wings
+        _ic_mark = (_ebc.mark + _ebp.mark) - (_fc_wing_call.mark + _fc_wing_put.mark)
 
     _theta_diff = iv_engine.theta_differential(
         chain_df, front_expiry, back_expiry, call_strike, put_strike
@@ -781,19 +784,19 @@ with r2c:
     st.caption("How easy will it be to get filled near the mark price?")
 
 with r2d:
-    if _straddle and _diag_mark is not None and _norm_deb is not None:
+    if strikes_set and _fc_wing_call.mark is not None and _fc_wing_put.mark is not None:
+        _wing_total = _fc_wing_call.mark + _fc_wing_put.mark
         st.metric(
-            "Wing Cost (±5)",
-            f"${(_lc_wing.mark + _lp_wing.mark):.2f}" if (
-                strikes_set and _lc_wing.mark and _lp_wing.mark
-            ) else "—",
-            help="Total mark price of the two IC wings (long call +5, long put −5). "
-                 "This is what you pay to add bounded protection when transforming.",
+            "Front Wing Cost (±5)",
+            f"${_wing_total:.2f}",
+            help=f"Cost to buy front-expiry wings: "
+                 f"Call {call_strike+5:.0f} + Put {put_strike-5:.0f}. "
+                 "These are the Buy to Open legs of your transformation order.",
         )
-        st.caption("Cost to add downside protection at ±5 strikes.")
+        st.caption(f"Call {call_strike+5:.0f} + Put {put_strike-5:.0f} on front expiry.")
     else:
-        st.metric("Wing Cost (±5)", "— (set strikes)")
-        st.caption("Cost to add downside protection at ±5 strikes.")
+        st.metric("Front Wing Cost (±5)", "— (set strikes)")
+        st.caption("Cost to add protection at ±5 strikes on front expiry.")
 
 st.divider()
 
