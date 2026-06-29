@@ -1904,21 +1904,17 @@ with tab_edge:
         fig_stack.update_yaxes(title_text="IV %",    row=1, col=1, gridcolor="#0c1928")
         fig_stack.update_yaxes(title_text="Ratio",   row=2, col=1, gridcolor="#0c1928")
         fig_stack.update_layout(
-        paper_bgcolor="#060b12",
-        plot_bgcolor="#060b12",
-        font=dict(family="Inter", color="#6d8fa8", size=11),
-        hovermode="x unified",
-        hoverlabel=dict(bgcolor="#111c2e", bordercolor="#1a2d45",
-                        font=dict(color="#dde6f1", size=12)),
             height=520,
             margin=dict(l=20, r=20, t=40, b=20),
-            legend=dict(orientation="h", yanchor="bottom", y=-0.18,
-                        xanchor="left", x=0, font=dict(size=10),
-                        bgcolor="rgba(0,0,0,0)"),
             paper_bgcolor="#060b12",
             plot_bgcolor="#060b12",
             font=dict(family="Inter", color="#6d8fa8", size=11),
             hovermode="x unified",
+            hoverlabel=dict(bgcolor="#111c2e", bordercolor="#1a2d45",
+                            font=dict(color="#dde6f1", size=12)),
+            legend=dict(orientation="h", yanchor="bottom", y=-0.18,
+                        xanchor="left", x=0, font=dict(size=10),
+                        bgcolor="rgba(0,0,0,0)"),
         )
         st.plotly_chart(fig_stack, use_container_width=True)
         st.caption(
