@@ -394,21 +394,18 @@ def _compute_transform_scanner(
             )
 
     def _nearest_mark(expiry: str, target: float, side: str) -> float | None:
-        """Return mark for the nearest available strike — same logic as
-        iv_engine.strike_contract() nearest-strike fallback."""
+        """Return mark only if the exact strike exists in the chain.
+        Returns None if the strike is absent — the combination is then
+        skipped entirely rather than silently using a neighbouring strike's
+        mark under the wrong label."""
         key = (expiry, side)
         if key not in _cache:
             return None
         strikes, marks = _cache[key]
         idx = bisect.bisect_left(strikes, target)
-        if idx == 0:
-            return marks[0]
-        if idx == len(strikes):
-            return marks[-1]
-        # Pick whichever neighbour is closer
-        before = strikes[idx - 1]
-        after  = strikes[idx]
-        return marks[idx - 1] if (target - before) <= (after - target) else marks[idx]
+        if idx < len(strikes) and strikes[idx] == target:
+            return marks[idx]
+        return None   # exact strike not in chain — skip this combination
 
     # ── ATM IV per expiry (same as dashboard header) ─────────────────────
     atm_iv_cache: dict[str, float | None] = {
