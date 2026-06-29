@@ -343,19 +343,24 @@ def _compute_pair_scanner(session_date: str) -> pd.DataFrame:
 def _compute_transform_scanner(
     chain_df: pd.DataFrame,
     spx_price: float,
-    strike_window: int = 100,
-    liquidity_pct: float = 0.40,
+    put_offset: int = 0,
+    call_offset: int = 0,
     max_rows: int = 50,
 ) -> pd.DataFrame:
     """
-    Batch version of Entry Analysis.  Uses the same nearest-strike logic
-    as iv_engine.strike_contract() but pre-builds the lookup once so the
-    inner loop does O(log n) bisect queries instead of per-call DataFrame
-    filters — critical for scanning thousands of combinations without hanging.
+    Batch version of Entry Analysis.
 
-    Validity rule: a combination is included iff all six legs (4 diagonal
-    + 2 wings) resolve to a non-None mark, which is exactly the condition
-    that makes Entry Analysis display numbers vs "— (wing strikes not in chain)".
+    For every valid expiry pair (back_DTE > front_DTE) find the nearest
+    available strike to (ATM - put_offset) and (ATM + call_offset) that
+    exists in BOTH expiries simultaneously, then compute:
+        Diagonal Mark   = (back_call + back_put) - (front_call + front_put)
+        Transform Mark  = (back_call + back_put) - (front_wing_call + front_wing_put)
+        Transform Diff  = Transform Mark - Diagonal Mark
+
+    Nearest-strike resolution is used for the main legs so the scan always
+    finds something close to the requested offsets.  Wing strikes (±5 from
+    the resolved actual strike) require exact matches — same rule as Entry
+    Analysis.  The table shows ACTUAL resolved strikes, never target offsets.
     """
     import bisect
 
@@ -365,9 +370,8 @@ def _compute_transform_scanner(
     expiries   = sorted(chain_df["expiry"].unique())
     dte_by_exp = chain_df.groupby("expiry")["dte"].first().to_dict()
 
-    # ── Build nearest-strike mark cache — computed once, O(log n) per query ──
-    # Structure: {(expiry, side): (sorted_strikes_list, marks_list)}
-    # Mirrors iv_engine.strike_contract() nearest-strike fallback exactly.
+    # ── Build per-(expiry, side) sorted strike + mark lists (built once) ──
+    # Structure: {(expiry, side): ([sorted_strikes], [marks])}
     _cache: dict[tuple, tuple] = {}
     for (expiry, side), grp in chain_df.groupby(["expiry", "side"]):
         pairs = []
@@ -389,15 +393,12 @@ def _compute_transform_scanner(
         if pairs:
             pairs.sort()
             _cache[(expiry, side)] = (
-                [p[0] for p in pairs],   # sorted strikes
-                [p[1] for p in pairs],   # corresponding marks
+                [p[0] for p in pairs],
+                [p[1] for p in pairs],
             )
 
-    def _nearest_mark(expiry: str, target: float, side: str) -> float | None:
-        """Return mark only if the exact strike exists in the chain.
-        Returns None if the strike is absent — the combination is then
-        skipped entirely rather than silently using a neighbouring strike's
-        mark under the wrong label."""
+    def _exact_mark(expiry: str, target: float, side: str):
+        """Return mark if the exact strike exists, else None."""
         key = (expiry, side)
         if key not in _cache:
             return None
@@ -405,42 +406,45 @@ def _compute_transform_scanner(
         idx = bisect.bisect_left(strikes, target)
         if idx < len(strikes) and strikes[idx] == target:
             return marks[idx]
-        return None   # exact strike not in chain — skip this combination
+        return None
 
-    # ── ATM IV per expiry (same as dashboard header) ─────────────────────
+    def _nearest_common(exp1: str, exp2: str, target: float, side: str):
+        """
+        Find the strike nearest to target that exists in BOTH expiries.
+        Returns (actual_strike, mark_exp1, mark_exp2) or (None, None, None).
+        Using the intersection guarantees both legs of the diagonal can be
+        filled at the same strike.
+        """
+        key1, key2 = (exp1, side), (exp2, side)
+        if key1 not in _cache or key2 not in _cache:
+            return None, None, None
+        common = sorted(set(_cache[key1][0]) & set(_cache[key2][0]))
+        if not common:
+            return None, None, None
+        idx = bisect.bisect_left(common, target)
+        if idx == 0:
+            actual = common[0]
+        elif idx == len(common):
+            actual = common[-1]
+        else:
+            b, a = common[idx - 1], common[idx]
+            actual = b if (target - b) <= (a - target) else a
+        m1 = _exact_mark(exp1, actual, side)
+        m2 = _exact_mark(exp2, actual, side)
+        return actual, m1, m2
+
+    # ── ATM IV per expiry (for IV Ratio column) ───────────────────────────
     atm_iv_cache: dict[str, float | None] = {
         exp: iv_engine.atm_iv(chain_df, exp, spx_price)
         for exp in expiries
     }
 
-    # ── Candidate symmetric distances ────────────────────────────────────
-    atm_lo      = spx_price - strike_window
-    atm_hi      = spx_price + strike_window
-    atm_rounded = round(spx_price / 5) * 5
-    all_distances = list(range(5, strike_window + 5, 5))
+    # ── Target strikes based on requested offsets ─────────────────────────
+    atm_rounded  = round(spx_price / 5) * 5
+    target_put   = float(atm_rounded - put_offset)
+    target_call  = float(atm_rounded + call_offset)
 
-    # Liquidity filter: identify which 5-point distances have at least one
-    # liquid strike nearby.  Falls back to all_distances if volume data is
-    # absent (pre-market, weekends) so the scanner never returns empty
-    # purely because of missing volume.
-    liquid_distances: set[int] = set()
-    for expiry, grp in chain_df.groupby("expiry"):
-        windowed = grp[(grp["strike"] >= atm_lo) & (grp["strike"] <= atm_hi)]
-        if windowed.empty:
-            continue
-        max_vol = windowed["volume"].fillna(0).max()
-        if max_vol > 0 and liquidity_pct > 0:
-            liquid = windowed[windowed["volume"].fillna(0) >= liquidity_pct * max_vol]
-        else:
-            liquid = windowed
-        for s in liquid["strike"].unique():
-            snapped = int(round(abs(float(s) - atm_rounded) / 5) * 5)
-            if 5 <= snapped <= strike_window:
-                liquid_distances.add(snapped)
-
-    active_distances = sorted(liquid_distances) if liquid_distances else all_distances
-
-    # ── Main loop — O(log n) per leg lookup ──────────────────────────────
+    # ── Main loop — one row per expiry pair ───────────────────────────────
     results = []
 
     for i, front in enumerate(expiries):
@@ -459,40 +463,34 @@ def _compute_transform_scanner(
                 if (front_iv and back_iv and back_iv != 0) else None
             )
 
-            for d in active_distances:
-                put_s  = float(atm_rounded - d)
-                call_s = float(atm_rounded + d)
+            # Resolve nearest common put and call strikes
+            put_s,  fp, bp = _nearest_common(front, back, target_put,  "PUT")
+            call_s, fc, bc = _nearest_common(front, back, target_call, "CALL")
 
-                # ── Same six legs as Entry Analysis ───────────────────
-                fc = _nearest_mark(front, call_s,     "CALL")
-                fp = _nearest_mark(front, put_s,      "PUT")
-                bc = _nearest_mark(back,  call_s,     "CALL")
-                bp = _nearest_mark(back,  put_s,      "PUT")
+            if any(v is None for v in (put_s, call_s, fp, bp, fc, bc)):
+                continue
 
-                if any(v is None for v in (fc, fp, bc, bp)):
-                    continue
+            diag_mark = (bc + bp) - (fc + fp)
 
-                diag_mark = (bc + bp) - (fc + fp)
+            # Wing strikes: exact match on front expiry (same as Entry Analysis)
+            wc = _exact_mark(front, call_s + 5, "CALL")
+            wp = _exact_mark(front, put_s  - 5, "PUT")
+            if wc is None or wp is None:
+                continue
 
-                wc = _nearest_mark(front, call_s + 5, "CALL")
-                wp = _nearest_mark(front, put_s  - 5, "PUT")
+            transform_mark = (bc + bp) - (wc + wp)
+            transform_diff = transform_mark - diag_mark
 
-                if wc is None or wp is None:
-                    continue
-
-                transform_mark = (bc + bp) - (wc + wp)
-                transform_diff = transform_mark - diag_mark
-
-                results.append({
-                    "Front Expiry":   f"{front} ({front_dte}d)",
-                    "Back Expiry":    f"{back} ({back_dte}d)",
-                    "Put Strike":     int(put_s),
-                    "Call Strike":    int(call_s),
-                    "Diagonal Mark":  round(diag_mark,      2),
-                    "Transform Mark": round(transform_mark, 2),
-                    "Transform Diff": round(transform_diff, 2),
-                    "IV Ratio":       iv_ratio,
-                })
+            results.append({
+                "Front Expiry":   f"{front} ({front_dte}d)",
+                "Back Expiry":    f"{back} ({back_dte}d)",
+                "Put Strike":     int(put_s),
+                "Call Strike":    int(call_s),
+                "Diagonal Mark":  round(diag_mark,      2),
+                "Transform Mark": round(transform_mark, 2),
+                "Transform Diff": round(transform_diff, 2),
+                "IV Ratio":       iv_ratio,
+            })
 
     if not results:
         return pd.DataFrame()
@@ -560,17 +558,34 @@ st_autorefresh(interval=poll_interval * 1000, key="autorefresh")
 
 st.sidebar.divider()
 st.sidebar.markdown("**🔭 Transform Scanner**")
-sc_strike_window = st.sidebar.number_input(
-    "Strike Window (±pts)", min_value=25, max_value=200, value=100, step=25,
-    key="sc_strike_window",
-    help="Only evaluate strikes within this many points of current SPX price.",
+
+_offset_options = [0] + list(range(5, 205, 5))   # 0 (ATM), 5, 10, ..., 200
+_offset_fmt     = lambda v: "ATM" if v == 0 else f"{v:+d}"
+
+_sc_put_col, _sc_call_col = st.sidebar.columns(2)
+with _sc_put_col:
+    sc_put_offset = st.selectbox(
+        "Put offset", options=_offset_options,
+        format_func=_offset_fmt, index=0,
+        key="sc_put_offset",
+        help="How far below ATM the put strike should be. "
+             "0 = nearest strike to ATM. Scanner finds the nearest "
+             "available strike in both expiries.",
+    )
+with _sc_call_col:
+    sc_call_offset = st.selectbox(
+        "Call offset", options=_offset_options,
+        format_func=_offset_fmt, index=0,
+        key="sc_call_offset",
+        help="How far above ATM the call strike should be.",
+    )
+
+sc_gap_pts = sc_put_offset + sc_call_offset
+st.sidebar.caption(
+    f"Strike gap: **{sc_gap_pts} pts** "
+    f"({'symmetric' if sc_put_offset == sc_call_offset else 'asymmetric'})"
 )
-sc_liquidity_pct = st.sidebar.slider(
-    "Min Liquidity (% of max vol)", min_value=0, max_value=100, value=40, step=5,
-    key="sc_liquidity_pct",
-    help="Only include strikes whose volume is at least this % of the highest-volume "
-         "strike in the ATM window for that expiry. Set to 0 to disable.",
-) / 100.0
+
 sc_max_rows = st.sidebar.number_input(
     "Max Results", min_value=10, max_value=200, value=50, step=10,
     key="sc_max_rows",
@@ -843,19 +858,20 @@ _ts_hdr, _ts_meta = st.columns([3, 2])
 with _ts_hdr:
     st.subheader("🔭 Transformation Opportunity Scanner")
 with _ts_meta:
+    _put_label  = "ATM" if sc_put_offset  == 0 else f"ATM−{sc_put_offset}"
+    _call_label = "ATM" if sc_call_offset == 0 else f"ATM+{sc_call_offset}"
     st.caption(
-        f"Strike window: ATM ±{sc_strike_window} pts  ·  "
-        f"Liquidity filter: ≥{int(sc_liquidity_pct * 100)}% of max vol  ·  "
-        f"Top {sc_max_rows} results"
+        f"Put: {_put_label}  ·  Call: {_call_label}  ·  "
+        f"Gap: {sc_gap_pts} pts  ·  Top {sc_max_rows} results"
     )
 
 with st.spinner("Scanning combinations…"):
     _ts_df = _compute_transform_scanner(
-        chain_df        = chain_df,
-        spx_price       = spx_price,
-        strike_window   = int(sc_strike_window),
-        liquidity_pct   = float(sc_liquidity_pct),
-        max_rows        = int(sc_max_rows),
+        chain_df     = chain_df,
+        spx_price    = spx_price,
+        put_offset   = int(sc_put_offset),
+        call_offset  = int(sc_call_offset),
+        max_rows     = int(sc_max_rows),
     )
 
 # _TSCAN_THRESHOLD is a visual signal only — never used as a filter.
