@@ -301,3 +301,32 @@ def filter_chain_by_strike_window(
             )
 
     return filtered
+
+
+def get_token_age_days() -> float | None:
+    """
+    Returns the age of the Schwab token in days since the initial OAuth login.
+
+    Reads `creation_timestamp` from the token JSON file — this is the field
+    schwab-py writes when client_from_manual_flow() completes.  It does NOT
+    update on routine access-token refreshes, so it accurately tracks the
+    7-day refresh-token clock regardless of how often the collector runs.
+
+    Returns None if the token file is missing (never authenticated or deleted).
+    Safe to call from app.py — does not touch the Schwab API.
+    """
+    import time as _time
+
+    token_path = Path(config.SCHWAB_TOKEN_PATH)
+    if not token_path.exists():
+        return None
+    try:
+        import json as _json
+        data = _json.loads(token_path.read_text())
+        created = data.get("creation_timestamp")
+        if created:
+            return (_time.time() - float(created)) / 86400
+        # Fallback: file creation time (less precise but better than nothing)
+        return (_time.time() - token_path.stat().st_mtime) / 86400
+    except Exception:
+        return None

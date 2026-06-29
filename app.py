@@ -38,8 +38,10 @@ IV SCALE NOTE
 
 import json
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, time as dt_time
 from pathlib import Path
+
+import streamlit.components.v1 as components
 
 import numpy as np
 import pandas as pd
@@ -51,6 +53,7 @@ from streamlit_autorefresh import st_autorefresh
 import config
 import db
 import iv_engine
+import schwab_client
 
 logger = logging.getLogger(__name__)
 
@@ -361,9 +364,32 @@ event_mode = st.sidebar.toggle(
         "Activate manually ~10–15 min before the announcement."
     ),
 )
-poll_interval = config.POLL_INTERVAL_EVENT if event_mode else config.POLL_INTERVAL_NORMAL
+
+# Detect the collector's high-frequency session windows (both 60s):
+#   OPEN  → 9:30–10:00 AM ET
+#   CLOSE → 3:30–4:00  PM ET
+# Dashboard auto-matches these so it never lags behind the collector.
+# Event Mode overrides everything.
+_now_et = pd.Timestamp.now(tz="America/New_York")
+_t = _now_et.time()
+_open_session  = dt_time(9, 30) <= _t < dt_time(10, 0)
+_close_session = dt_time(15, 30) <= _t < dt_time(16, 0)
+
 if event_mode:
+    poll_interval = config.POLL_INTERVAL_EVENT   # 60s — manual override
+    poll_label    = "60s ⚡ Event Mode"
     st.sidebar.caption("⚡ Event Mode active — refreshing every 60s.")
+elif _open_session:
+    poll_interval = config.POLL_INTERVAL_EVENT   # 60s — matches collector OPEN session
+    poll_label    = "60s (OPEN session)"
+    st.sidebar.caption("📈 OPEN session — auto-matched to collector (60s).")
+elif _close_session:
+    poll_interval = config.POLL_INTERVAL_EVENT   # 60s — matches collector CLOSE session
+    poll_label    = "60s (CLOSE session)"
+    st.sidebar.caption("📉 CLOSE session — auto-matched to collector (60s).")
+else:
+    poll_interval = config.POLL_INTERVAL_NORMAL  # 300s
+    poll_label    = "300s"
 
 st_autorefresh(interval=poll_interval * 1000, key="autorefresh")
 
@@ -546,9 +572,82 @@ with h_gex:
 with h_status:
     st.caption(
         f"{staleness}  |  {snap_ts_str} UTC  |  "
-        f"Refresh: {poll_interval}s"
-        + ("  |  ⚡ Event Mode" if event_mode else "")
+        f"Refresh: {poll_label}"
     )
+    components.html(
+        f"""
+        <div style="font-family:sans-serif;font-size:0.78em;color:#888;
+                    padding:0;margin:-6px 0 0 0;">
+            <span id="spx-cd">⏱ Next update in: {poll_interval}s</span>
+        </div>
+        <script>
+        (function(){{
+            var n = {poll_interval};
+            var el = document.getElementById('spx-cd');
+            if (window.__spxCD) clearInterval(window.__spxCD);
+            window.__spxCD = setInterval(function(){{
+                n = Math.max(0, n - 1);
+                if (el) el.textContent = '\u23f1 Next update in: ' + n + 's';
+            }}, 1000);
+        }})();
+        </script>
+        """,
+        height=28,
+    )
+
+# ── Token expiry warning banner ───────────────────────────────────────────────
+# Shown only when token is 6+ days old.  Schwab refresh tokens expire at 7 days.
+_token_age = schwab_client.get_token_age_days()
+if _token_age is not None and _token_age >= 6:
+    if _token_age >= 7:
+        st.markdown(
+            """
+<style>
+@keyframes _spx_flash {
+    0%,100% { background-color:#922b21; }
+    50%     { background-color:#e74c3c; }
+}
+.spx-token-emergency {
+    animation: _spx_flash 0.8s ease-in-out infinite;
+    color:#fff; padding:12px 18px; border-radius:6px;
+    font-weight:600; font-size:0.95em; margin:8px 0;
+}
+</style>
+<div class="spx-token-emergency">
+🚨 SCHWAB TOKEN EXPIRED — Collector is offline. Re-authenticate now:<br>
+<code style="background:rgba(0,0,0,0.3);padding:2px 6px;border-radius:3px;">
+python -c "import schwab_client; schwab_client.get_client()"
+</code>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+    else:
+        # Day 6 — pulsing yellow warning
+        st.markdown(
+            """
+<style>
+@keyframes _spx_pulse {
+    0%,100% { opacity:1; }
+    50%     { opacity:0.35; }
+}
+.spx-token-warning {
+    animation: _spx_pulse 1.6s ease-in-out infinite;
+    background-color:#b7770d; color:#fff;
+    padding:10px 18px; border-radius:6px;
+    font-weight:500; font-size:0.9em; margin:8px 0;
+}
+</style>
+<div class="spx-token-warning">
+⚠️ Schwab API token expires <strong>tomorrow</strong>.
+Re-authenticate today to avoid collector downtime:<br>
+<code style="background:rgba(0,0,0,0.25);padding:2px 6px;border-radius:3px;">
+python -c "import schwab_client; schwab_client.get_client()"
+</code>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
 
 st.divider()
 
