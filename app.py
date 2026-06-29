@@ -834,10 +834,96 @@ python -c "import schwab_client; schwab_client.get_client()"
             unsafe_allow_html=True,
         )
 
+# ═════════════════════════════════════════════════════════════════════════════
+# SECTION 2 — TRANSFORMATION OPPORTUNITY SCANNER
+# Runs immediately after the header — first thing visible after market data.
+# Evaluates every valid (front, back, symmetric strike pair) in the current
+# snapshot and surfaces the highest Transform Diff candidates.
+# Math is identical to Entry Analysis — single source of truth.
+# ═════════════════════════════════════════════════════════════════════════════
+
+_ts_hdr, _ts_meta = st.columns([3, 2])
+with _ts_hdr:
+    st.subheader("🔭 Transformation Opportunity Scanner")
+with _ts_meta:
+    st.caption(
+        f"Strike window: ATM ±{sc_strike_window} pts  ·  "
+        f"Liquidity filter: ≥{int(sc_liquidity_pct * 100)}% of max vol  ·  "
+        f"Top {sc_max_rows} results"
+    )
+
+with st.spinner("Scanning combinations…"):
+    _ts_df = _compute_transform_scanner(
+        chain_df        = chain_df,
+        spx_price       = spx_price,
+        strike_window   = int(sc_strike_window),
+        liquidity_pct   = float(sc_liquidity_pct),
+        max_rows        = int(sc_max_rows),
+    )
+
+# _TSCAN_THRESHOLD is a visual signal only — never used as a filter.
+# The table always shows every valid combination the scanner found,
+# sorted by Transform Diff descending.  Green rows simply mark the
+# combinations that are immediately actionable.
+_TSCAN_THRESHOLD = 5.0
+
+if _ts_df.empty:
+    st.caption(
+        "No valid combinations found — this means the current chain has no "
+        "strike/expiry pairs with marks available for all four diagonal legs "
+        "plus the two wing strikes. "
+        "The collector may not have run yet, or try widening the Strike Window "
+        "or reducing the Liquidity threshold in the sidebar."
+    )
+else:
+    def _ts_row_style(row):
+        if row["Transform Diff"] >= _TSCAN_THRESHOLD:
+            return ["background-color: #0d3320; color: #2ecc71"] * len(row)
+        return [""] * len(row)
+
+    _ts_display = _ts_df.style.apply(_ts_row_style, axis=1).format({
+        "Diagonal Mark":  "{:.2f}",
+        "Transform Mark": "{:.2f}",
+        "Transform Diff": "{:+.2f}",
+        "IV Ratio":       lambda v: f"{v:.4f}" if v is not None else "—",
+    })
+
+    _ready_count = int((_ts_df["Transform Diff"] >= _TSCAN_THRESHOLD).sum())
+    if _ready_count:
+        st.markdown(
+            f"<div style='margin-bottom:8px;padding:8px 14px;border-radius:6px;"
+            f"background:#0d3320;border:1px solid #2ecc71;display:inline-block;'>"
+            f"<span style='color:#2ecc71;font-weight:600;'>✓ {_ready_count} combination"
+            f"{'s' if _ready_count > 1 else ''} ready to transform</span>"
+            f"<span style='color:#aaa;font-size:0.85em;'>"
+            f"  ·  Transform Diff ≥ {_TSCAN_THRESHOLD}</span></div>",
+            unsafe_allow_html=True,
+        )
+
+    st.dataframe(
+        _ts_display,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Put Strike":     st.column_config.NumberColumn("Put Strike",     format="%d"),
+            "Call Strike":    st.column_config.NumberColumn("Call Strike",    format="%d"),
+            "Diagonal Mark":  st.column_config.NumberColumn("Diag Mark",      format="%.2f"),
+            "Transform Mark": st.column_config.NumberColumn("Transform Mark", format="%.2f"),
+            "Transform Diff": st.column_config.NumberColumn("Transform Diff", format="%+.2f"),
+            "IV Ratio":       st.column_config.NumberColumn("IV Ratio",       format="%.4f"),
+        },
+    )
+    st.caption(
+        f"{len(_ts_df)} combinations shown  ·  "
+        "Sorted by Transform Diff (descending)  ·  "
+        "Green = ready to transform (≥ 5)  ·  "
+        "Click any column header to re-sort"
+    )
+
 st.divider()
 
 # ═════════════════════════════════════════════════════════════════════════════
-# SECTION 2 — CONTROLS ROW
+# SECTION 3 — CONTROLS ROW
 # 4 columns: Front/Back Expiry, Call/Put Strike
 # Max Gap lives in the Pair Scanner filter row — not here
 # ═════════════════════════════════════════════════════════════════════════════
@@ -910,7 +996,7 @@ if not _fh90.empty and not _bh90.empty:
 st.divider()
 
 # ═════════════════════════════════════════════════════════════════════════════
-# SECTION 3 — ENTRY ANALYSIS
+# SECTION 4 — ENTRY ANALYSIS
 # First thing after controls: what is this position offering right now?
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -1106,7 +1192,7 @@ with r2d:
 st.divider()
 
 # ═════════════════════════════════════════════════════════════════════════════
-# SECTION 4 — CALENDAR EDGE
+# SECTION 5 — CALENDAR EDGE
 # Period radio lives here. atm_merged_period is computed from that selection.
 # session_date is used to pin the x-axis on "Today" view from 09:30 → 16:15.
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1599,101 +1685,6 @@ else:
         "No scanner data for this session yet. "
         "Make sure collector.py is running and has completed at least one cycle."
     )
-
-st.divider()
-
-# ═════════════════════════════════════════════════════════════════════════════
-# SECTION 9 — TRANSFORMATION OPPORTUNITY SCANNER
-# Evaluates every valid (front, back, symmetric strike pair) in the current
-# snapshot and surfaces the highest Transform Diff candidates.
-# Math is identical to Entry Analysis — single source of truth.
-# ═════════════════════════════════════════════════════════════════════════════
-
-_ts_hdr, _ts_meta = st.columns([3, 2])
-with _ts_hdr:
-    st.subheader("🔭 Transformation Opportunity Scanner")
-with _ts_meta:
-    st.caption(
-        f"Strike window: ATM ±{sc_strike_window} pts  ·  "
-        f"Liquidity filter: ≥{int(sc_liquidity_pct * 100)}% of max vol  ·  "
-        f"Top {sc_max_rows} results"
-    )
-
-with st.spinner("Scanning combinations…"):
-    _ts_df = _compute_transform_scanner(
-        chain_df        = chain_df,
-        spx_price       = spx_price,
-        strike_window   = int(sc_strike_window),
-        liquidity_pct   = float(sc_liquidity_pct),
-        max_rows        = int(sc_max_rows),
-    )
-
-# _TSCAN_THRESHOLD is a visual signal only — never used as a filter.
-# The table always shows every valid combination the scanner found,
-# sorted by Transform Diff descending.  Green rows simply mark the
-# combinations that are immediately actionable.
-_TSCAN_THRESHOLD = 5.0
-
-if _ts_df.empty:
-    # Only reached when there are genuinely no valid combinations to show:
-    # e.g. collector hasn't run, chain has no marks, all wing strikes missing.
-    # A Transform Diff below 5 never causes this branch.
-    st.caption(
-        "No valid combinations found — this means the current chain has no "
-        "strike/expiry pairs with marks available for all four diagonal legs "
-        "plus the two wing strikes. "
-        "The collector may not have run yet, or try widening the Strike Window "
-        "or reducing the Liquidity threshold in the sidebar."
-    )
-else:
-    # Visual signal: highlight rows at or above the transformation threshold.
-    # Rows below the threshold are still shown — they show how close each
-    # combination is and let you monitor progress as the market moves.
-    def _ts_row_style(row):
-        if row["Transform Diff"] >= _TSCAN_THRESHOLD:
-            return ["background-color: #0d3320; color: #2ecc71"] * len(row)
-        return [""] * len(row)
-
-    _ts_display = _ts_df.style.apply(_ts_row_style, axis=1).format({
-        "Diagonal Mark":  "{:.2f}",
-        "Transform Mark": "{:.2f}",
-        "Transform Diff": "{:+.2f}",
-        "IV Ratio":       lambda v: f"{v:.4f}" if v is not None else "—",
-    })
-
-    _ready_count = int((_ts_df["Transform Diff"] >= _TSCAN_THRESHOLD).sum())
-    if _ready_count:
-        st.markdown(
-            f"<div style='margin-bottom:8px;padding:8px 14px;border-radius:6px;"
-            f"background:#0d3320;border:1px solid #2ecc71;display:inline-block;'>"
-            f"<span style='color:#2ecc71;font-weight:600;'>✓ {_ready_count} combination"
-            f"{'s' if _ready_count > 1 else ''} ready to transform</span>"
-            f"<span style='color:#aaa;font-size:0.85em;'>"
-            f"  ·  Transform Diff ≥ {_TSCAN_THRESHOLD}</span></div>",
-            unsafe_allow_html=True,
-        )
-
-    st.dataframe(
-        _ts_display,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Put Strike":     st.column_config.NumberColumn("Put Strike",     format="%d"),
-            "Call Strike":    st.column_config.NumberColumn("Call Strike",    format="%d"),
-            "Diagonal Mark":  st.column_config.NumberColumn("Diag Mark",      format="%.2f"),
-            "Transform Mark": st.column_config.NumberColumn("Transform Mark", format="%.2f"),
-            "Transform Diff": st.column_config.NumberColumn("Transform Diff", format="%+.2f"),
-            "IV Ratio":       st.column_config.NumberColumn("IV Ratio",       format="%.4f"),
-        },
-    )
-    st.caption(
-        f"{len(_ts_df)} combinations shown  ·  "
-        "Sorted by Transform Diff (descending)  ·  "
-        "Green = ready to transform (≥ 5)  ·  "
-        "Click any column header to re-sort"
-    )
-
-st.divider()
 
 # ═════════════════════════════════════════════════════════════════════════════
 # SECTION 10 — RESEARCH: IV Ratio vs. Normalized Debit
