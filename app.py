@@ -850,12 +850,16 @@ h_spx, h_vix, h_gex, h_status = st.columns([5, 2, 2, 4])
 
 with h_spx:
     # SPX price + static combined change display (▲ +64.0 (0.87%))
+    _spx_style = (
+        "font-family:'JetBrains Mono',monospace;"
+        "font-size:2.6rem;font-weight:700;"
+        f"color:{day_color};"
+        "line-height:1.1;letter-spacing:-.03em;"
+    )
+    _chg_style = "font-size:.45em;font-weight:400;margin-left:.5em;opacity:.85;"
     st.markdown(
-        f"<div style='font-family:"JetBrains Mono",monospace;font-size:2.6rem;"
-        f"font-weight:700;color:{day_color};line-height:1.1;letter-spacing:-.03em;'>"
-        f"SPX {spx_price:,.2f}"
-        f"<span style='font-size:.45em;font-weight:400;margin-left:.5em;opacity:.85;'>"
-        f"{day_arrow} {chg_display}</span></div>",
+        f"<div style='{_spx_style}'>SPX {spx_price:,.2f}"
+        f"<span style='{_chg_style}'>{day_arrow} {chg_display}</span></div>",
         unsafe_allow_html=True,
     )
 
