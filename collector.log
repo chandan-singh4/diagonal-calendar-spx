@@ -463,3 +463,8 @@ For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/St
 2026-06-26 15:57:40  WARNING   2 SD expected move (±438 pts, IV=10.7%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
 2026-06-26 15:58:35  WARNING   2 SD expected move (±447 pts, IV=11.0%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
 2026-06-26 15:59:35  WARNING   2 SD expected move (±305 pts, IV=7.5%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-29 09:30:40  WARNING   Auth error detected — will re-authenticate next cycle. Error: unsupported_token_type: 400 Bad Request: "{"error_description":"Refresh token is invalid, expired or revoked","error":"invalid_grant"}"
+2026-06-29 09:31:11  WARNING   Auth error detected — will re-authenticate next cycle. Error: unsupported_token_type: 400 Bad Request: "{"error_description":"Refresh token is invalid, expired or revoked","error":"invalid_grant"}"
+2026-06-29 09:31:41  WARNING   Auth error detected — will re-authenticate next cycle. Error: unsupported_token_type: 400 Bad Request: "{"error_description":"Refresh token is invalid, expired or revoked","error":"invalid_grant"}"
+2026-06-29 09:32:13  WARNING   Auth error detected — will re-authenticate next cycle. Error: unsupported_token_type: 400 Bad Request: "{"error_description":"Refresh token is invalid, expired or revoked","error":"invalid_grant"}"
+2026-06-29 09:32:44  WARNING   Auth error detected — will re-authenticate next cycle. Error: unsupported_token_type: 400 Bad Request: "{"error_description":"Refresh token is invalid, expired or revoked","error":"invalid_grant"}"
