@@ -63,18 +63,272 @@ st.set_page_config(
     layout="wide",
 )
 
-# ─── v3 compaction: tighter top padding + section rhythm (not crushed) ─────────
-st.markdown(
-    """
-    <style>
-      .block-container { padding-top: 1.2rem; padding-bottom: 2rem; }
-      div[data-testid="stVerticalBlock"] { gap: 0.6rem; }
-      hr { margin: 0.4rem 0; opacity: 0.18; }
-      div[data-testid="stMetricLabel"] { opacity: 0.78; }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+# ─── Design system ───────────────────────────────────────────────────────────
+# Bloomberg Terminal × TradingView dark theme.
+# Single injection point — all visual polish lives here.
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+/* ── Design tokens ──────────────────────────────────────────────────── */
+:root {
+  --bg:          #0a0e1a;
+  --bg-surface:  #0f172a;
+  --bg-card:     #111827;
+  --bg-hover:    #162032;
+  --bg-raised:   #1a2234;
+  --border:      #1e293b;
+  --border-hi:   #3b82f6;
+  --text:        #f1f5f9;
+  --text-2:      #94a3b8;
+  --text-3:      #475569;
+  --green:       #10b981;
+  --red:         #ef4444;
+  --blue:        #3b82f6;
+  --amber:       #f59e0b;
+  --mono:        'JetBrains Mono', 'Roboto Mono', 'Courier New', monospace;
+  --sans:        'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --r:           8px;
+  --r-sm:        5px;
+  --shadow:      0 4px 6px -1px rgba(0,0,0,.45), 0 2px 4px -1px rgba(0,0,0,.25);
+  --shadow-lg:   0 10px 20px -4px rgba(0,0,0,.6);
+  --ease:        cubic-bezier(.4,0,.2,1);
+}
+
+/* ── Animations ─────────────────────────────────────────────────────── */
+@keyframes fadeUp   { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:none} }
+@keyframes fadeIn   { from{opacity:0} to{opacity:1} }
+@keyframes shimmer  { 0%{background-position:-400% center} 100%{background-position:400% center} }
+@keyframes pulse-ring { 0%,100%{box-shadow:0 0 0 0 rgba(16,185,129,0)} 50%{box-shadow:0 0 0 5px rgba(16,185,129,.12)} }
+
+/* ── Base ───────────────────────────────────────────────────────────── */
+.stApp { background: var(--bg) !important; font-family: var(--sans) !important; }
+.main .block-container {
+  padding: 1.25rem 2rem 3rem !important;
+  max-width: 1600px !important;
+}
+div[data-testid="stVerticalBlock"] { gap: 0.5rem !important; }
+
+/* page-level fade on every refresh */
+.main .block-container > div { animation: fadeIn .35s var(--ease) both; }
+
+/* ── Typography ─────────────────────────────────────────────────────── */
+h1,h2,h3,h4 { font-family:var(--sans)!important; letter-spacing:-.025em!important; color:var(--text)!important; }
+h1 { font-size:1.7rem!important; font-weight:700!important; }
+h2 { font-size:1.2rem!important; font-weight:600!important; }
+h3 {
+  font-size:.95rem!important; font-weight:600!important;
+  border-bottom:1px solid var(--border);
+  padding-bottom:.45rem; margin-bottom:.6rem;
+}
+p,span,li { font-family:var(--sans)!important; color:var(--text-2); }
+
+/* numbers → monospace everywhere */
+[data-testid="stMetricValue"],
+[data-testid="stMetricDelta"] {
+  font-family: var(--mono) !important;
+  letter-spacing: -.03em !important;
+}
+
+/* ── Metric cards ───────────────────────────────────────────────────── */
+[data-testid="metric-container"] {
+  background:    var(--bg-card) !important;
+  border:        1px solid var(--border) !important;
+  border-radius: var(--r) !important;
+  padding:       .9rem 1.1rem !important;
+  box-shadow:    var(--shadow) !important;
+  transition:    border-color .2s var(--ease), box-shadow .2s var(--ease), transform .2s var(--ease) !important;
+  animation:     fadeUp .4s var(--ease) both;
+}
+[data-testid="metric-container"]:hover {
+  border-color: var(--border-hi) !important;
+  box-shadow:   0 0 0 1px rgba(59,130,246,.15), var(--shadow-lg) !important;
+  transform:    translateY(-2px) !important;
+}
+[data-testid="stMetricLabel"] div {
+  color:          var(--text-3) !important;
+  font-size:      .7rem !important;
+  font-weight:    600 !important;
+  text-transform: uppercase !important;
+  letter-spacing: .06em !important;
+}
+[data-testid="stMetricValue"] {
+  color:       var(--text) !important;
+  font-size:   1.45rem !important;
+  font-weight: 600 !important;
+  transition:  color .3s ease !important;
+}
+
+/* ── Tables (Streamlit DataFrames) ─────────────────────────────────── */
+[data-testid="stDataFrame"] {
+  border:        1px solid var(--border) !important;
+  border-radius: var(--r) !important;
+  overflow:      hidden !important;
+  box-shadow:    var(--shadow) !important;
+  animation:     fadeUp .45s var(--ease) both;
+}
+
+/* ── Inputs & Selects ───────────────────────────────────────────────── */
+[data-baseweb="select"] > div:first-child {
+  background:    var(--bg-card) !important;
+  border:        1px solid var(--border) !important;
+  border-radius: var(--r-sm) !important;
+  color:         var(--text) !important;
+  transition:    border-color .18s ease, box-shadow .18s ease !important;
+}
+[data-baseweb="select"] > div:first-child:hover       { border-color: var(--border-hi) !important; }
+[data-baseweb="select"] > div:first-child:focus-within {
+  border-color: var(--border-hi) !important;
+  box-shadow:   0 0 0 3px rgba(59,130,246,.18) !important;
+}
+[data-baseweb="select"] span { color: var(--text) !important; font-family: var(--sans) !important; }
+
+input[type="number"], input[type="text"] {
+  background:    var(--bg-card) !important;
+  border:        1px solid var(--border) !important;
+  border-radius: var(--r-sm) !important;
+  color:         var(--text) !important;
+  font-family:   var(--mono) !important;
+  transition:    border-color .18s ease, box-shadow .18s ease !important;
+}
+input:focus {
+  border-color: var(--border-hi) !important;
+  box-shadow:   0 0 0 3px rgba(59,130,246,.18) !important;
+  outline:      none !important;
+}
+
+/* ── Buttons ────────────────────────────────────────────────────────── */
+.stButton > button {
+  background:     var(--bg-raised) !important;
+  border:         1px solid var(--border) !important;
+  border-radius:  var(--r-sm) !important;
+  color:          var(--text-2) !important;
+  font-family:    var(--sans) !important;
+  font-size:      .8rem !important;
+  font-weight:    500 !important;
+  padding:        .35rem .85rem !important;
+  transition:     all .18s var(--ease) !important;
+  letter-spacing: .02em !important;
+}
+.stButton > button:hover {
+  background:   var(--bg-hover) !important;
+  border-color: var(--border-hi) !important;
+  color:        var(--text) !important;
+  transform:    translateY(-1px) !important;
+  box-shadow:   var(--shadow) !important;
+}
+.stButton > button:active { transform: none !important; }
+
+/* ── Sidebar ────────────────────────────────────────────────────────── */
+section[data-testid="stSidebar"] {
+  background:   #07090f !important;
+  border-right: 1px solid var(--border) !important;
+}
+section[data-testid="stSidebar"] .block-container { padding: 1.25rem .9rem !important; }
+section[data-testid="stSidebar"] hr {
+  border:   none !important;
+  border-top: 1px solid var(--border) !important;
+  opacity: 1 !important;
+  margin: .9rem 0 !important;
+}
+section[data-testid="stSidebar"] h1,
+section[data-testid="stSidebar"] h2,
+section[data-testid="stSidebar"] h3 {
+  font-size:      .72rem !important;
+  font-weight:    700 !important;
+  text-transform: uppercase !important;
+  letter-spacing: .09em !important;
+  color:          var(--text-3) !important;
+  border:         none !important;
+  padding:        0 !important;
+  margin-bottom:  .5rem !important;
+}
+section[data-testid="stSidebar"] label {
+  font-size:   .78rem !important;
+  color:       var(--text-2) !important;
+  font-weight: 500 !important;
+}
+
+/* ── Dividers ───────────────────────────────────────────────────────── */
+hr {
+  border:     none !important;
+  border-top: 1px solid var(--border) !important;
+  opacity:    1 !important;
+  margin:     1.25rem 0 !important;
+}
+
+/* ── Captions ───────────────────────────────────────────────────────── */
+[data-testid="stCaptionContainer"] p,
+.stCaption p, .stCaption {
+  color:       var(--text-3) !important;
+  font-size:   .72rem !important;
+  line-height: 1.55 !important;
+}
+
+/* ── Progress bar ───────────────────────────────────────────────────── */
+[data-testid="stProgress"] > div > div {
+  border-radius: 999px !important;
+  transition:    width .6s var(--ease) !important;
+}
+
+/* ── Alerts ─────────────────────────────────────────────────────────── */
+[data-testid="stAlert"] { border-radius: var(--r) !important; }
+
+/* ── Number input steppers ──────────────────────────────────────────── */
+[data-testid="stNumberInput"] button {
+  background:  var(--bg-raised) !important;
+  border-color: var(--border) !important;
+  color:        var(--text-2) !important;
+  transition:   var(--ease) .15s !important;
+}
+[data-testid="stNumberInput"] button:hover {
+  background:   var(--bg-hover) !important;
+  border-color: var(--border-hi) !important;
+  color:        var(--text) !important;
+}
+
+/* ── Spinner ────────────────────────────────────────────────────────── */
+[data-testid="stSpinner"] p { color: var(--blue) !important; }
+
+/* ── Columns — consistent gutters ──────────────────────────────────── */
+[data-testid="column"] { padding: 0 .4rem !important; }
+[data-testid="column"]:first-child { padding-left:  0 !important; }
+[data-testid="column"]:last-child  { padding-right: 0 !important; }
+
+/* ── Scrollbars ─────────────────────────────────────────────────────── */
+::-webkit-scrollbar            { width:5px; height:5px; }
+::-webkit-scrollbar-track      { background:var(--bg); }
+::-webkit-scrollbar-thumb      { background:var(--border); border-radius:3px; }
+::-webkit-scrollbar-thumb:hover{ background:var(--text-3); }
+
+/* ── Code blocks ────────────────────────────────────────────────────── */
+code {
+  background:    var(--bg-raised) !important;
+  border:        1px solid var(--border) !important;
+  border-radius: var(--r-sm) !important;
+  color:         #93c5fd !important;
+  font-family:   var(--mono) !important;
+  font-size:     .8em !important;
+  padding:       .1em .4em !important;
+}
+
+/* ── Text selection ─────────────────────────────────────────────────── */
+::selection { background:rgba(59,130,246,.28); color:var(--text); }
+
+/* ── IFrames (countdown, etc) — no border ──────────────────────────── */
+iframe { border:none !important; }
+
+/* ── Token warning keyframes (keep in sync with Python inline styles) ─ */
+@keyframes _spx_flash {
+  0%,100% { background-color:#922b21; }
+  50%     { background-color:#e74c3c; }
+}
+@keyframes _spx_pulse {
+  0%,100% { opacity:1; }
+  50%     { opacity:.35; }
+}
+</style>
+""", unsafe_allow_html=True)
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 PINNED_PAIRS_FILE = Path(__file__).parent / "pinned_pairs.json"
@@ -773,10 +1027,6 @@ if _token_age is not None and _token_age >= 6:
         st.markdown(
             """
 <style>
-@keyframes _spx_flash {
-    0%,100% { background-color:#922b21; }
-    50%     { background-color:#e74c3c; }
-}
 .spx-token-emergency {
     animation: _spx_flash 0.8s ease-in-out infinite;
     color:#fff; padding:12px 18px; border-radius:6px;
@@ -797,10 +1047,6 @@ python -c "import schwab_client; schwab_client.get_client()"
         st.markdown(
             """
 <style>
-@keyframes _spx_pulse {
-    0%,100% { opacity:1; }
-    50%     { opacity:0.35; }
-}
 .spx-token-warning {
     animation: _spx_pulse 1.6s ease-in-out infinite;
     background-color:#b7770d; color:#fff;
