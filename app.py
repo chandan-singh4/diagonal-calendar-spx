@@ -348,53 +348,84 @@ def _compute_transform_scanner(
     max_rows: int = 50,
 ) -> pd.DataFrame:
     """
-    Batch version of Entry Analysis: iterates every valid
-    (front_expiry, back_expiry, symmetric_strike_distance) combination
-    and computes Diagonal Mark, Transform Mark, Transform Diff, IV Ratio
-    using iv_engine.strike_contract() — the exact same function Entry
-    Analysis calls.  There is one source of truth for mark prices.
+    Batch version of Entry Analysis.  Uses the same nearest-strike logic
+    as iv_engine.strike_contract() but pre-builds the lookup once so the
+    inner loop does O(log n) bisect queries instead of per-call DataFrame
+    filters — critical for scanning thousands of combinations without hanging.
 
-    A combination is included if and only if strike_contract() returns a
-    non-None mark for all six legs (4 diagonal + 2 wings), which is
-    exactly the condition that makes Entry Analysis show numbers rather
-    than "— (wing strikes not in chain)".
-
-    Candidate distances are symmetric multiples of 5 within strike_window.
-    The liquidity filter narrows WHICH distances to try; it does not gate
-    whether a found combination is valid.  If no liquid strikes are found
-    (e.g. pre-market, no volume data) the filter is bypassed and all
-    distances in window are evaluated.
+    Validity rule: a combination is included iff all six legs (4 diagonal
+    + 2 wings) resolve to a non-None mark, which is exactly the condition
+    that makes Entry Analysis display numbers vs "— (wing strikes not in chain)".
     """
+    import bisect
+
     if chain_df.empty:
         return pd.DataFrame()
 
     expiries   = sorted(chain_df["expiry"].unique())
     dte_by_exp = chain_df.groupby("expiry")["dte"].first().to_dict()
 
-    # Pre-split chain by expiry so iv_engine.strike_contract() works on a
-    # small sub-DataFrame instead of the full chain on every call.
-    chain_by_exp: dict[str, pd.DataFrame] = {
-        exp: chain_df[chain_df["expiry"] == exp]
-        for exp in expiries
-    }
+    # ── Build nearest-strike mark cache — computed once, O(log n) per query ──
+    # Structure: {(expiry, side): (sorted_strikes_list, marks_list)}
+    # Mirrors iv_engine.strike_contract() nearest-strike fallback exactly.
+    _cache: dict[tuple, tuple] = {}
+    for (expiry, side), grp in chain_df.groupby(["expiry", "side"]):
+        pairs = []
+        for row in grp.itertuples(index=False):
+            m = getattr(row, "mark", None)
+            if m is None or (isinstance(m, float) and pd.isna(m)):
+                bid = getattr(row, "bid", None)
+                ask = getattr(row, "ask", None)
+                if bid is not None and ask is not None:
+                    try:
+                        m = (float(bid) + float(ask)) / 2.0
+                    except (TypeError, ValueError):
+                        m = None
+            if m is not None:
+                try:
+                    pairs.append((float(row.strike), float(m)))
+                except (TypeError, ValueError):
+                    pass
+        if pairs:
+            pairs.sort()
+            _cache[(expiry, side)] = (
+                [p[0] for p in pairs],   # sorted strikes
+                [p[1] for p in pairs],   # corresponding marks
+            )
 
-    # ATM IV per expiry — same call as the dashboard header section.
+    def _nearest_mark(expiry: str, target: float, side: str) -> float | None:
+        """Return mark for the nearest available strike — same logic as
+        iv_engine.strike_contract() nearest-strike fallback."""
+        key = (expiry, side)
+        if key not in _cache:
+            return None
+        strikes, marks = _cache[key]
+        idx = bisect.bisect_left(strikes, target)
+        if idx == 0:
+            return marks[0]
+        if idx == len(strikes):
+            return marks[-1]
+        # Pick whichever neighbour is closer
+        before = strikes[idx - 1]
+        after  = strikes[idx]
+        return marks[idx - 1] if (target - before) <= (after - target) else marks[idx]
+
+    # ── ATM IV per expiry (same as dashboard header) ─────────────────────
     atm_iv_cache: dict[str, float | None] = {
         exp: iv_engine.atm_iv(chain_df, exp, spx_price)
         for exp in expiries
     }
 
     # ── Candidate symmetric distances ────────────────────────────────────
-    # Start with every multiple of 5 in the window.
     atm_lo      = spx_price - strike_window
     atm_hi      = spx_price + strike_window
     atm_rounded = round(spx_price / 5) * 5
     all_distances = list(range(5, strike_window + 5, 5))
 
-    # Liquidity filter: collect which distances have at least one liquid
-    # strike nearby across any expiry.  If the filter produces nothing
-    # (no volume data, pre-market) fall back to all_distances so the
-    # scanner always has candidates to evaluate.
+    # Liquidity filter: identify which 5-point distances have at least one
+    # liquid strike nearby.  Falls back to all_distances if volume data is
+    # absent (pre-market, weekends) so the scanner never returns empty
+    # purely because of missing volume.
     liquid_distances: set[int] = set()
     for expiry, grp in chain_df.groupby("expiry"):
         windowed = grp[(grp["strike"] >= atm_lo) & (grp["strike"] <= atm_hi)]
@@ -404,65 +435,55 @@ def _compute_transform_scanner(
         if max_vol > 0 and liquidity_pct > 0:
             liquid = windowed[windowed["volume"].fillna(0) >= liquidity_pct * max_vol]
         else:
-            liquid = windowed   # no volume data — treat all as liquid
+            liquid = windowed
         for s in liquid["strike"].unique():
-            raw_d = abs(float(s) - atm_rounded)
-            # Map to nearest multiple of 5 so it aligns with all_distances
-            snapped = int(round(raw_d / 5) * 5)
+            snapped = int(round(abs(float(s) - atm_rounded) / 5) * 5)
             if 5 <= snapped <= strike_window:
                 liquid_distances.add(snapped)
 
-    active_distances = (
-        sorted(liquid_distances) if liquid_distances else all_distances
-    )
+    active_distances = sorted(liquid_distances) if liquid_distances else all_distances
 
-    # ── Main loop ────────────────────────────────────────────────────────
+    # ── Main loop — O(log n) per leg lookup ──────────────────────────────
     results = []
 
     for i, front in enumerate(expiries):
-        front_dte  = int(dte_by_exp.get(front, 0))
+        front_dte = int(dte_by_exp.get(front, 0))
         if front_dte < 0:
             continue
-        fc_chain   = chain_by_exp[front]   # pre-filtered sub-DataFrame
-        front_iv   = atm_iv_cache.get(front)
+        front_iv = atm_iv_cache.get(front)
 
         for back in expiries[i + 1:]:
             back_dte = int(dte_by_exp.get(back, 0))
             if back_dte <= front_dte:
-                continue              # back must have strictly greater DTE
-            bc_chain = chain_by_exp[back]
+                continue
             back_iv  = atm_iv_cache.get(back)
             iv_ratio = (
                 round(front_iv / back_iv, 4)
-                if (front_iv and back_iv and back_iv != 0)
-                else None
+                if (front_iv and back_iv and back_iv != 0) else None
             )
 
             for d in active_distances:
                 put_s  = float(atm_rounded - d)
                 call_s = float(atm_rounded + d)
 
-                # ── Identical to Entry Analysis calculation block ──────
-                # iv_engine.strike_contract() uses nearest-strike fallback,
-                # so this matches exactly what Entry Analysis would show.
-                efc = iv_engine.strike_contract(fc_chain, front, call_s, "CALL")
-                efp = iv_engine.strike_contract(fc_chain, front, put_s,  "PUT")
-                ebc = iv_engine.strike_contract(bc_chain, back,  call_s, "CALL")
-                ebp = iv_engine.strike_contract(bc_chain, back,  put_s,  "PUT")
+                # ── Same six legs as Entry Analysis ───────────────────
+                fc = _nearest_mark(front, call_s,     "CALL")
+                fp = _nearest_mark(front, put_s,      "PUT")
+                bc = _nearest_mark(back,  call_s,     "CALL")
+                bp = _nearest_mark(back,  put_s,      "PUT")
 
-                if any(c.mark is None for c in (efc, efp, ebc, ebp)):
+                if any(v is None for v in (fc, fp, bc, bp)):
                     continue
 
-                diag_mark = (ebc.mark + ebp.mark) - (efc.mark + efp.mark)
+                diag_mark = (bc + bp) - (fc + fp)
 
-                # Wing strikes on FRONT expiry (identical to Entry Analysis)
-                wc = iv_engine.strike_contract(fc_chain, front, call_s + 5, "CALL")
-                wp = iv_engine.strike_contract(fc_chain, front, put_s  - 5, "PUT")
+                wc = _nearest_mark(front, call_s + 5, "CALL")
+                wp = _nearest_mark(front, put_s  - 5, "PUT")
 
-                if wc.mark is None or wp.mark is None:
-                    continue   # wing strikes genuinely missing from chain
+                if wc is None or wp is None:
+                    continue
 
-                transform_mark = (ebc.mark + ebp.mark) - (wc.mark + wp.mark)
+                transform_mark = (bc + bp) - (wc + wp)
                 transform_diff = transform_mark - diag_mark
 
                 results.append({
