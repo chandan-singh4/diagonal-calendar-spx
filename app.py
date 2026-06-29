@@ -574,21 +574,30 @@ with h_status:
         f"{staleness}  |  {snap_ts_str} UTC  |  "
         f"Refresh: {poll_label}"
     )
+    # secs_remaining is anchored to the collector's last DB write (snap_age_secs),
+    # not the Streamlit session.  Opening/closing/refreshing the browser never
+    # resets the clock — only a new collector snapshot does.
+    secs_remaining = max(0, int(poll_interval - snap_age_secs))
+    overdue = snap_age_secs > poll_interval * 1.5
+    countdown_init = "overdue" if overdue else f"{secs_remaining}s"
     components.html(
         f"""
         <div style="font-family:sans-serif;font-size:0.78em;color:#888;
                     padding:0;margin:-6px 0 0 0;">
-            <span id="spx-cd">⏱ Next update in: {poll_interval}s</span>
+            <span id="spx-cd">⏱ Next update in: {countdown_init}</span>
         </div>
         <script>
         (function(){{
-            var n = {poll_interval};
+            var n = {secs_remaining};
+            var overdue = {"true" if overdue else "false"};
             var el = document.getElementById('spx-cd');
             if (window.__spxCD) clearInterval(window.__spxCD);
-            window.__spxCD = setInterval(function(){{
-                n = Math.max(0, n - 1);
-                if (el) el.textContent = '\u23f1 Next update in: ' + n + 's';
-            }}, 1000);
+            if (!overdue) {{
+                window.__spxCD = setInterval(function(){{
+                    n = Math.max(0, n - 1);
+                    if (el) el.textContent = '\u23f1 Next update in: ' + n + 's';
+                }}, 1000);
+            }}
         }})();
         </script>
         """,
