@@ -41,6 +41,7 @@
 | 1.2 | 2026-06-26 | Chandan Singh | **Dashboard v2 — complete layout rewrite.** (1) Replaced single-pair static layout with a Pair Scanner showing all valid (front, back) expiry combinations from the current session, ranked by intraday Drop%. (2) Added Pinned Pairs persistent watchlist (`pinned_pairs.json`). (3) Added GEX display (Max \|Net GEX\| strike + call/put dominated) computed from `option_rows.gamma` — no schema change required. (4) SPX daily change corrected to use prior session's last COMPLETE snapshot (`get_prior_session_close`) rather than the first intraday snapshot. (5) Mini SPX intraday sparkline embedded in the header. (6) Expiry Detail + Strike Detail panel restored (ATM IV + tick-change per expiry; per-leg IV + mark price at selected strikes). (7) Calendar Edge moved above Historical Statistics — now immediately follows the IV chart. (8) Max Gap filter moved from Controls Row to the Pair Scanner filter row. (9) Three new DB read functions added: `get_prior_session_close`, `get_spx_intraday_today`, `get_all_expiry_atm_iv_today`. (10) Section 5 of this document fully rewritten for v2. |
 | 1.3 | 2026-06-26 | Chandan Singh | **Dashboard v3 — layout polish + IV-ratio/level analytics.** Layout: (1) compaction CSS (tighter top padding + section rhythm); (2) removed the header sparkline; (3) moved the `pts ↔ %` toggle beside the change value; (4) DTE shown in both expiry dropdowns, e.g. `2026-06-29 (3D)`; (5) Expiry Detail shows date + DTE together; (6) the Today/5D/10D/20D selector moved to the right of the chart (shared across both charts). Multi-day charts: (7) non-trading time (overnight/weekend/holiday via `config.MARKET_HOLIDAYS`) collapsed with Plotly `rangebreaks` so multi-day lines are continuous, not diagonal ramps. New analytics (Calendar Edge, additive — the original dual-axis chart is **kept**): (8) a **stacked panel** (Front/Back IV on one axis + a regime-colored ratio line); (9) a **Front-vs-Back scatter** colored by time of day. New **Regime Analysis** sub-tab on the Trade Journal page: (10) a Front-vs-Back entry scatter split into four quadrants by **median level (√(F·B))** and **median ratio**, colored by realized transform credit, plus a stratified 2×2 cell-mean table — the test for whether IV Ratio adds outcome information beyond IV level. (11) New DB read helper `get_entry_iv_context` reconstructs entry-time term structure from snapshots (no schema change; works retroactively). See new Section 11 for detailed explanations and examples. |
 | 1.4 | 2026-06-27 | Chandan Singh | **Dashboard v3.1 — Trade Journal CRUD, guided edit wizard, direct-close path, live IC P&L, P&L terminology standardisation.** Added Section 12 covering: trade lifecycle (Open/Transformed/Closed/Expired), `close_type` field, full `trades` table schema, P&L terminology definitions (Realized/Unrealized/Net), strategy statistics formulas, all CRUD operations, the two-step guided edit wizard, unsaved-changes protection, inspect-trade auto-navigation, live IC per-leg P&L, and new code surfaces in `pages/journal.py` and `db.py`. |
+| 1.5 | 2026-06-29 | Chandan Singh | **Dashboard v3.2 — Entry Analysis overhaul, layout reorder, IC payoff chart, normalized metrics, Transform Order Mark, weekend fallbacks.** (1) "Transform Credit" panel replaced by "Entry Analysis" with six real metrics: Diagonal Mark (dual-format pts+$), ATM Straddle, Normalized Debit, Net Daily θ/contract, Transform Order Mark, Transform Difference (with progress indicator + green signal at ≥5). (2) Section order rewritten: Entry Analysis→Calendar Edge→Historical Stats→Strike Detail→Pinned Pairs→Scanner→Research scatter. (3) IC Risk Profile payoff-at-expiration chart added to journal.py (replaces P&L by Expiry Zone table). (4) Three new `iv_engine.py` functions: `atm_straddle_price`, `normalized_debit`, `theta_differential` (+ `ThetaDifferential` dataclass). (5) New `db.py` function: `get_diagonal_history` for research scatter. (6) Put/Call order swapped to Put-left, Call-right throughout. (7) Period radio moved into Calendar Edge section header; `atm_merged_90d` (fixed 90-day) used for Entry Analysis percentile. (8) Weekend/gap fallback added to `_load_atm_hist_fb` and `_load_contract_hist`: Today falls back to last available session. (9) Historical Stats enhanced: percentile rank + LOW/MID/HIGH label per column. (10) Calendar Edge expanders removed — stacked view and intraday scatter now inline. (11) x-axis pinned to 09:30–16:15 ET on Today view. Added Section 13. |
 
 ---
 
@@ -258,7 +259,7 @@ Minimum Transform Credit at which transformation is considered viable. **$5.00 p
 
 ## 5. Dashboard Reference
 
-> **Version note:** this section describes Dashboard v2 (current). The v1 layout (two-column with sidebar panels) is retired. The v2 layout is a single linear flow — all sections are full-width or use an explicit 2-column split.
+> **Version note:** this section describes Dashboard v3.2 (current). The v1 layout (two-column with sidebar panels) and v2 layout are retired. The v3.2 layout is a single linear flow — all sections are full-width or use an explicit 2-column split.
 
 ### 5.1 Header
 
@@ -273,15 +274,19 @@ Minimum Transform Credit at which transformation is considered viable. **$5.00 p
 
 ### 5.2 Controls Row
 
-Four columns: **Front Expiry**, **Back Expiry**, **Call Strike**, **Put Strike**.
+Four columns: **Front Expiry**, **Back Expiry**, **Put Strike**, **Call Strike**.
 
-Same call/put strike applies to both front and back legs. Defaults are convenience values, not recommendations. A brief per-leg summary line appears below the controls: `IV → F x.xx% / B x.xx% · Ratio x.xxxx`.
+Column order is Put-left, Call-right throughout the dashboard — matching the standard options visualization convention (puts to the left of the underlying price, calls to the right). Same strike applies to both front and back legs for each side. Defaults are convenience values, not recommendations.
 
 > **Max Gap is not here.** It lives in the Pair Scanner filter row (§5.8). It is a scanner parameter, not a trade-setup parameter.
 
 ### 5.3 Period Radio
 
-Range selector: **Today / 5D / 10D / 20D**. Controls the time window for both the Selected-Strike IV chart (§5.4) and the Calendar Edge ATM chart (§5.5). Historical Statistics (§5.6) always displays all four windows independently and is not affected by this control.
+Range selector: **Today / 5D / 10D / 20D**. Rendered in the Calendar Edge section header (right-aligned, next to the "Calendar Edge" subheader). Controls the time window for the Calendar Edge ATM charts and the Selected-Strike IV chart (§5.6). Historical Statistics (§5.5) always displays all four windows independently and is not affected.
+
+**Weekend / holiday fallback:** when Today (days=1) returns no data, both `_load_atm_hist_fb` and `_load_contract_hist` automatically retry with a 5-day window and trim to the most recent session date with data. Friday is shown on Saturday; Thursday is shown when Friday is a holiday.
+
+**x-axis bounds:** when Today is selected, all time-series charts pin their x-axis to `[session_date 09:30, session_date 16:15]` ET, forcing the axis to start at open and fill dynamically. Prior-session data is never carried into the current-day view.
 
 ### 5.4 Expiry Detail + Strike Detail / Selected-Strike IV Chart
 
@@ -335,9 +340,13 @@ Full-width section. The ATM IV chart — macro context for the overall term-stru
 
 ### 5.6 Historical Statistics
 
-Always shows **Today / 5 Days / 10 Days / 20 Days** — four range bars, one per column. Not controlled by the period radio.
+Section 5 of the dashboard. Always shows **Today / 5 Days / 10 Days / 20 Days** — four columns, one per window. Not controlled by the period radio. Weekend/gap fallback (`_load_atm_hist_fb`) applies to all four columns including Today.
 
-Each bar shows: `[low ──●── high]` where ● is the current ATM IV ratio position within the range. Formula: `(current − low) / (high − low) × 100` (see §6.10). **Descriptive only** — a position near an extreme is not labeled good or bad.
+Each column shows:
+- Range bar: `[low ──●── high]` where ● is the current position. Formula: `(current − low) / (high − low) × 100` (§6.10).
+- **Current value** (numeric, e.g. `1.1362`).
+- **Percentile rank** within the window's distribution (§6.8), e.g. `82nd pct`.
+- **Context label**: `LOW` (< 25th pct) / `MID` (25–75th) / `HIGH` (> 75th pct). Non-valenced — describes position in range, makes no favorability claim.
 
 Source: `db.get_atm_iv_history()` for front and back, merged on timestamp, ratio computed in-app.
 
@@ -375,18 +384,36 @@ Default sort: Drop% ascending (biggest intraday drop first). Click any column he
 
 > **Session boundary:** `session_date = snap_ts_str[:10]` — the date of the latest snapshot, not the current UTC clock. This ensures the scanner populates after market hours without returning 0 rows.
 
-### 5.9 Transform Credit
+### 5.9 Entry Analysis
 
-Bottom panel. Placeholder pending Phase 3.
+Section 3 of the dashboard (immediately after Controls). Answers the decision question: *what is this position offering right now, and am I close to the transformation threshold?*
 
-| Element | Formula | Status |
-|---------|---------|--------|
-| Overall Score | `0.45×IV_Edge_Pct + 0.30×Liquidity + 0.25×Theta_Adv` | Non-authoritative (§5.10 caveat applies) |
-| IV Edge (percentile) | Percentile rank of current ATM ratio vs `period_days` history | Direction unvalidated — see §9.4 |
-| Liquidity | `min(Vol/500,1)×50 + min(OI/2000,1)×50` | Thresholds unvalidated — see §6.7 |
-| Theta Adv. | 50 (fixed placeholder) | Will be `Net Theta Advantage` in Phase 3 |
+**`atm_merged_90d`** — computed before Entry Analysis using a fixed 90-day window, independent of the period selector. Used for IV Ratio Percentile so the percentile reflects long-run context regardless of chart zoom.
 
-Full transform credit calculator (back-leg value − wing cost − entry debit) deferred to Phase 3 once per-leg Greeks are confirmed reliable.
+**Row 1 — position cost + theta (require strikes):**
+
+| Metric | Formula | Notes |
+|--------|---------|-------|
+| Diagonal Mark | `(bc_call.mark + bc_put.mark) − (fc_call.mark + fc_put.mark)` | Dual display: `X.XX pts · $X,XXX`. Dollar = pts × 100. |
+| ATM Straddle | `SPX × (front_iv/100) × √(2·front_dte / 365·π)` | Normalization denominator. See §6.12. |
+| Normalized Debit | `Diagonal Mark / ATM Straddle` | 4 decimal places. HYPOTHESIS. See §6.13. |
+| Net Daily θ / contract | `(−front_sum + back_sum) × 100` | `front_sum = fc_call.theta + fc_put.theta`. Theta breakdown in caption. HYPOTHESIS. See §6.14. |
+
+**Row 2 — transform signal + market conditions:**
+
+| Metric | Formula | Notes |
+|--------|---------|-------|
+| Transform Order Mark | `(bc_call.mark + bc_put.mark) − (fc_wing_call.mark + fc_wing_put.mark)` | Wings on **front expiry** at `call_strike+5` / `put_strike−5`. Dual display. HYPOTHESIS. See §6.15. |
+| Transform Difference | `Transform Order Mark − Diagonal Mark` | = `fc_call.mark + fc_put.mark − fc_wing_call.mark − fc_wing_put.mark`. Signal threshold = 5.0. HYPOTHESIS. See §6.16. |
+| IV Ratio Percentile | `percentile_rank(atm_merged_90d["iv_ratio"], ts_now.ratio)` | Fixed 90-day window. HYPOTHESIS (§9.4). |
+| Liquidity (ATM) | `min(Vol/500,1)×50 + min(OI/2000,1)×50` | Thresholds unvalidated (§6.7). |
+
+**Transform Difference visual states:**
+
+- *Difference < 5.0:* amber Unicode block progress bar `████░░░░░░ 40%` + "X.XX pts until threshold" sub-caption.
+- *Difference ≥ 5.0:* dark-green pill `✓ Transformation threshold reached · Ready to transform · +X.XX pts above threshold`.
+
+**Research scatter** (§5.10) is placed at the very bottom of the page (Section 9) — not in Entry Analysis.
 
 ---
 
@@ -441,6 +468,53 @@ Range 0–100. **Thresholds (500 / 2000) are initial estimates, not validated** 
 
 ### 6.11 Expected Move (informational)
 `EM_1SD = Spot × (ATM_IV/100) × √(DTE/365)`; `EM_2SD = 2 × EM_1SD`. Logged only, never gated.
+
+### 6.12 ATM Straddle Price
+```
+ATM_Straddle = SPX × (atm_iv_pct / 100) × √(2 × dte / (365 × π))
+```
+`atm_iv_pct` in percentage form (e.g. 18.5); `dte` in calendar days. Simplified Black-Scholes ATM straddle approximation. Equals the market's implied ±1σ move expressed in dollar terms. Used as the normalization denominator for Normalized Debit. Returns None if any input is ≤ 0.
+
+### 6.13 Normalized Debit
+```
+Normalized_Debit = Diagonal_Mark / ATM_Straddle_Price
+```
+`Diagonal_Mark = (bc_call.mark + bc_put.mark) − (fc_call.mark + fc_put.mark)`.  
+Removes SPX price-level drift and vol-regime shift — a $12 debit at SPX 5500 and a $12 debit at SPX 7500 represent different exposure fractions; Normalized Debit expresses both as a fraction of the expected move. Typical range: 0.08–0.14 for SPX diagonals.  
+**HYPOTHESIS — not yet validated as a predictor of transform profit.**
+
+### 6.14 Theta Differential (Net Daily Position Theta)
+```
+front_sum = fc_call.theta + fc_put.theta          (raw chain theta — negative)
+back_sum  = bc_call.theta + bc_put.theta           (raw chain theta — negative)
+Net_Daily_Theta   = (−front_sum) + back_sum        (per share per day)
+Net_Daily_Theta_$ = Net_Daily_Theta × 100          (per contract per day)
+```
+Convention: raw chain theta is always negative (the option loses value per day against its holder). For the diagonal, front legs are short (their decay earns us −front_sum > 0) and back legs are long (their decay costs us +back_sum < 0). Positive net = position gains time value each calendar day.  
+**HYPOTHESIS — whether magnitude at entry predicts transform speed or profit has not been validated.**
+
+### 6.15 Transform Order Mark
+```
+Transform_Order_Mark = (bc_call.mark + bc_put.mark) − (fc_wing_call.mark + fc_wing_put.mark)
+```
+Where:
+- `fc_wing_call` = front-expiry call at `call_strike + 5`
+- `fc_wing_put`  = front-expiry put  at `put_strike − 5`
+
+Represents the net credit value of the transformation order: credit from closing back legs (Sell to Close) minus cost of buying front-expiry protective wings (Buy to Open). Both wing legs are on the **front expiry** — matching the actual transformation order that is placed alongside the diagonal entry.  
+Dual display: `X.XX pts · $X,XXX` (pts × 100).  
+**HYPOTHESIS — signal threshold and favorability not yet validated.**
+
+### 6.16 Transform Difference
+```
+Transform_Difference = Transform_Order_Mark − Diagonal_Mark
+                     = fc_call.mark + fc_put.mark − fc_wing_call.mark − fc_wing_put.mark
+```
+The algebraic simplification shows this equals the short front legs' current premium minus the wing cost. Economically: how much more the position's existing short legs are worth relative to the wings needed to cap the risk.
+
+**Signal rule:** `Transform_Difference ≥ 5.0` → green "Transformation threshold reached" state.  
+**Threshold = 5.0** is a working assumption (matching the §6.5 Transform Credit framework). Calibrate from live fills once 10+ transformations are completed.  
+**HYPOTHESIS — threshold magnitude not yet validated against actual fill economics.**
 
 ---
 
@@ -1022,3 +1096,91 @@ The Iron Condor tab shows per-leg fill prices and unrealized P&L alongside the e
 ---
 
 *End of Section 12 — added in DOCUMENTATION.md v1.4 (2026-06-27)*
+
+---
+
+## 13. Dashboard v3.2 — Entry Analysis, Layout Reorder, Normalized Metrics (detailed)
+
+Added in DOCUMENTATION.md v1.5 (2026-06-29).
+
+### 13.1 Layout Order (v3.2)
+
+The complete top-to-bottom section order as of v3.2:
+
+| # | Section | Key decision question answered |
+|---|---------|-------------------------------|
+| 1 | Header | Is the market open? What is the broad environment? |
+| 2 | Controls | What setup am I analyzing? |
+| 3 | Entry Analysis | What is this position offering? Am I near the transform threshold? |
+| 4 | Calendar Edge | Why is the setup priced this way? (macro vol context) |
+| 5 | Historical Statistics | Is today's ratio unusual or normal? |
+| 6 | Strike Detail + Selected-Strike IV | Do the individual legs support what I think I'm building? |
+| 7 | Pinned Pairs | Saved pair watchlist |
+| 8 | Pair Scanner | Discovery tool |
+| 9 | Research — IV Ratio vs. Normalized Debit | Long-run scatter for hypothesis observation |
+
+The guiding principle: *decision-critical information first, deeper analytics below*.
+
+### 13.2 Dependency Architecture (v3.2 `app.py`)
+
+Two pre-computation blocks run between Controls and Entry Analysis:
+
+```
+Controls (expiry + strikes)
+  │
+  ├── ts_now = iv_engine.term_structure(front_iv_atm, back_iv_atm)   ← always early
+  │
+  ├── atm_merged_90d  (fixed 90-day, no radio) ─────────────────────► Entry Analysis IV pct
+  │
+  ▼ Calendar Edge renders period radio
+  │
+  ├── period_days (from radio)
+  ├── atm_merged (period-specific, from _load_atm_hist_fb) ──────────► Calendar Edge charts
+  │
+  ▼ Strike Detail (inherits period_days) ──────────────────────────► Strike IV chart
+```
+
+The `atm_merged_90d` / `atm_merged` split ensures the IV Ratio Percentile in Entry Analysis always reflects 90-day context regardless of the chart zoom the user has selected.
+
+### 13.3 IC Risk Profile Chart (`pages/journal.py`)
+
+The Inspect Trade → Iron Condor tab now shows an interactive payoff-at-expiration chart instead of the P&L by Expiry Zone table. The chart uses piecewise-linear payoff (the only correct form for IC at expiry):
+
+```
+price ≤ lp          →  wing_val (−max_loss or +wc if rf=True)
+lp < price ≤ sp     →  linear from wing_val to +mp
+sp < price ≤ sc     →  +mp (max profit plateau)
+sc < price ≤ lc     →  linear from +mp to wing_val
+price > lc          →  wing_val
+```
+
+Breakevens: `BE_lower = lp + wc·(sp−lp)/(mp+wc)`, `BE_upper = sc + mp·(lc−sc)/(mp+wc)`.
+
+Five rendering layers: green fill (profit zone), red fill (loss zone), green curve, red curve, invisible 24px hover trace. Amber vertical marks current SPX from `marks["spx"]` (hoisted before chart). Function: `_ic_payoff_chart(lp, sp, sc, lc, mp, wc, rf, current_spx=None) → go.Figure`.
+
+### 13.4 New Code Surfaces (v3.2)
+
+| Item | File | Notes |
+|------|------|-------|
+| `_ic_payoff_chart()` | `pages/journal.py` | Pure function — no `st` calls. Returns `go.Figure`. |
+| `atm_straddle_price()` | `iv_engine.py` | §6.12. Takes IV in pct form. |
+| `normalized_debit()` | `iv_engine.py` | §6.13. Returns None if straddle zero. |
+| `ThetaDifferential` dataclass | `iv_engine.py` | Full decomposition: per-leg, per-side, net, contract. |
+| `theta_differential()` | `iv_engine.py` | §6.14. `available=False` when Greeks absent. |
+| `get_diagonal_history()` | `db.py` | Four-leg mark history for research scatter. Excludes rows where any leg mark is NULL. |
+| `_load_atm_hist_fb()` | `app.py` | Weekend/holiday fallback for ATM IV history. |
+| `_load_contract_hist()` | `app.py` | Same fallback added inline. |
+| `atm_merged_90d` | `app.py` | Fixed 90-day merge; pre-computed before Entry Analysis. |
+
+### 13.5 HYPOTHESIS Metrics Register (v3.2)
+
+All four new metrics are explicitly labeled HYPOTHESIS throughout the dashboard and this document. They display raw values for observation; none are wired into any composite score or automatic decision rule.
+
+| Metric | What it would need to graduate from HYPOTHESIS |
+|--------|----------------------------------------------|
+| Normalized Debit | ≥20 completed trades with logged entry norm_debit; regression showing significant correlation with transform credit or holding time |
+| Theta Differential | ≥20 trades with valid Greeks at entry; correlation with days-to-transformation |
+| Transform Order Mark / Difference | ≥10 transformations with before/after difference logged; calibration of threshold vs actual fill economics |
+| IV Ratio Percentile | Already under test via Regime Analysis (§11.4); awaiting cell population |
+
+*End of Section 13 — added in DOCUMENTATION.md v1.5 (2026-06-29)*
