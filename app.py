@@ -1606,16 +1606,27 @@ with st.spinner("Scanning combinations…"):
         max_rows        = int(sc_max_rows),
     )
 
+# _TSCAN_THRESHOLD is a visual signal only — never used as a filter.
+# The table always shows every valid combination the scanner found,
+# sorted by Transform Diff descending.  Green rows simply mark the
+# combinations that are immediately actionable.
+_TSCAN_THRESHOLD = 5.0
+
 if _ts_df.empty:
+    # Only reached when there are genuinely no valid combinations to show:
+    # e.g. collector hasn't run, chain has no marks, all wing strikes missing.
+    # A Transform Diff below 5 never causes this branch.
     st.caption(
-        "No combinations found. The collector may not have run yet, or "
-        "all wing strikes are missing from the current chain. "
-        "Try widening the Strike Window or reducing the Liquidity threshold."
+        "No valid combinations found — this means the current chain has no "
+        "strike/expiry pairs with marks available for all four diagonal legs "
+        "plus the two wing strikes. "
+        "The collector may not have run yet, or try widening the Strike Window "
+        "or reducing the Liquidity threshold in the sidebar."
     )
 else:
-    # Highlight rows where Transform Diff >= 5 (transformation signal)
-    _TSCAN_THRESHOLD = 5.0
-
+    # Visual signal: highlight rows at or above the transformation threshold.
+    # Rows below the threshold are still shown — they show how close each
+    # combination is and let you monitor progress as the market moves.
     def _ts_row_style(row):
         if row["Transform Diff"] >= _TSCAN_THRESHOLD:
             return ["background-color: #0d3320; color: #2ecc71"] * len(row)
@@ -1655,7 +1666,8 @@ else:
     )
     st.caption(
         f"{len(_ts_df)} combinations shown  ·  "
-        "Green rows = Transform Diff ≥ 5 (ready to transform)  ·  "
+        "Sorted by Transform Diff (descending)  ·  "
+        "Green = ready to transform (≥ 5)  ·  "
         "Click any column header to re-sort"
     )
 
