@@ -1844,9 +1844,8 @@ with tab_edge:
         hovermode="x unified",
         hoverlabel=dict(bgcolor="#111c2e", bordercolor="#1a2d45",
                         font=dict(color="#dde6f1", size=12)),
-        xaxis=dict(gridcolor="#0c1928", zeroline=False),
-        yaxis=dict(gridcolor="#0c1928", zeroline=False),
     )
+    # xaxis / yaxis excluded from _PLOTLY_LAYOUT — each chart passes its own.
 
     if not atm_merged.empty:
         _xaxis_today = (
