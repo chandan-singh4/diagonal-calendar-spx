@@ -1338,10 +1338,11 @@ _iv_pct = (
 
 _TSCAN_THRESHOLD = 5.0
 
-tab_scanner, tab_entry, tab_edge, tab_hist, tab_research = st.tabs([
+tab_scanner, tab_entry, tab_edge, tab_strike, tab_hist, tab_research = st.tabs([
     "🔭  Scanner",
     "📊  Entry Analysis",
     "📈  Calendar Edge",
+    "🎯  Strike Detail",
     "📉  Historical Stats",
     "🔬  Research",
 ])
@@ -1833,18 +1834,34 @@ with tab_edge:
     else:
         st.caption(f"No ATM IV history for {front_expiry} / {back_expiry} in the selected range.")
 
-    # Strike detail section
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB — STRIKE DETAIL
+# Own period selector independent of Calendar Edge.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+with tab_strike:
+
     st.markdown(
-        f'<div class="sh" style="margin-top:1.25rem">'
-        f'<span class="sh-ico">🎯</span>'
-        f'<span class="sh-ttl">Strike Detail</span>'
-        f'</div>',
+        '<div class="sh"><span class="sh-ico">🎯</span>'
+        '<span class="sh-ttl">Strike Detail</span></div>',
         unsafe_allow_html=True,
     )
 
-    left_col, right_col = st.columns([1, 3])
+    _sd_info_col, _sd_radio_col = st.columns([4, 1])
+    with _sd_radio_col:
+        sd_period_label = st.radio(
+            "Period",
+            ["Today", "5D", "10D", "20D"],
+            horizontal=False,
+            label_visibility="collapsed",
+            key="sd_period_radio",
+        )
+    sd_period_days = {"Today": 1, "5D": 5, "10D": 10, "20D": 20}[sd_period_label]
 
-    with left_col:
+    sd_left, sd_right = st.columns([1, 3])
+
+    with sd_left:
         st.markdown("**Expiry Detail**")
         for exp_label_s, exp_date, dte_val in [
             ("Front", front_expiry, front_dte),
@@ -1908,15 +1925,15 @@ with tab_edge:
         else:
             st.caption("Set call and put strikes in Controls above.")
 
-    with right_col:
+    with sd_right:
         st.markdown("**Selected-Strike IV**")
         st.caption("Front vs back IV at your trade strikes — ratio on right axis.")
 
         if strikes_set:
-            fch = _load_contract_hist(front_expiry, call_strike, "CALL", period_days)
-            bch = _load_contract_hist(back_expiry,  call_strike, "CALL", period_days)
-            fph = _load_contract_hist(front_expiry, put_strike,  "PUT",  period_days)
-            bph = _load_contract_hist(back_expiry,  put_strike,  "PUT",  period_days)
+            fch = _load_contract_hist(front_expiry, call_strike, "CALL", sd_period_days)
+            bch = _load_contract_hist(back_expiry,  call_strike, "CALL", sd_period_days)
+            fph = _load_contract_hist(front_expiry, put_strike,  "PUT",  sd_period_days)
+            bph = _load_contract_hist(back_expiry,  put_strike,  "PUT",  sd_period_days)
 
             call_ready = not fch.empty and not bch.empty
             put_ready  = not fph.empty and not bph.empty
@@ -1961,22 +1978,22 @@ with tab_edge:
                         x=pm["timestamp"], y=pm["put_ratio"],
                         name="Put Ratio (F/B)",
                         line=dict(color="#f05252", width=1.5, dash="dot"), yaxis="y2"))
-                _str_xaxis = (
+                _sd_xaxis = (
                     dict(range=[f"{session_date} 09:30", f"{session_date} 16:15"],
                          rangebreaks=_SESSION_RANGEBREAKS, gridcolor="#0c1928")
-                    if period_label == "Today"
+                    if sd_period_label == "Today"
                     else dict(rangebreaks=_SESSION_RANGEBREAKS, gridcolor="#0c1928")
                 )
                 fig_str.update_layout(
-                paper_bgcolor="#060b12",
-        plot_bgcolor="#060b12",
-        font=dict(family="Inter", color="#6d8fa8", size=11),
-        hovermode="x unified",
-        hoverlabel=dict(bgcolor="#111c2e", bordercolor="#1a2d45",
-                        font=dict(color="#dde6f1", size=12)),
-                    height=360,
+                    height=420,
                     margin=dict(l=20, r=20, t=10, b=20),
-                    xaxis=_str_xaxis,
+                    paper_bgcolor="#060b12",
+                    plot_bgcolor="#060b12",
+                    font=dict(family="Inter", color="#6d8fa8", size=11),
+                    hovermode="x unified",
+                    hoverlabel=dict(bgcolor="#111c2e", bordercolor="#1a2d45",
+                                    font=dict(color="#dde6f1", size=12)),
+                    xaxis=_sd_xaxis,
                     yaxis=dict(title="IV %", side="left",  gridcolor="#0c1928"),
                     yaxis2=dict(title="Ratio", side="right", overlaying="y", showgrid=False),
                     legend=dict(orientation="h", yanchor="bottom", y=1.02,
@@ -1990,7 +2007,6 @@ with tab_edge:
                 )
         else:
             st.caption("Enter call and put strikes in the Controls row above.")
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAB 4 — HISTORICAL STATISTICS
