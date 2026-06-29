@@ -39,6 +39,79 @@ Local path: wherever your spx-diagonal-dashboard folder lives (parent folder con
 
 Newest entries begins from here - 
 
+## 2026-06-29 — Dashboard v3.3: Transformation Scanner, UX polish, layout cleanup
+
+**Status:** Complete — all changes confirmed in this session.
+**Files changed:** `app.py`, `.streamlit/config.toml`, `schwab_client.py`
+
+---
+
+### Summary of all changes this session
+
+#### 1. Schwab API token expiry banner (`schwab_client.py`, `app.py`)
+Added `get_token_age_days()` to `schwab_client.py` — reads `creation_timestamp` from the token JSON file (written once at initial OAuth flow, never updated on access-token refresh) to accurately track the 7-day refresh-token clock. Dashboard renders a pulsing amber warning on day 6 and a flashing red emergency on day 7+ with the re-auth command inline. Re-auth procedure documented: delete `data/token.json`, run `python -c "import schwab_client; schwab_client.get_client()"`, follow the manual-flow URL redirect.
+
+#### 2. Collector-aware dashboard refresh interval (`app.py`)
+The dashboard previously showed "Refresh: 300s" and actually refreshed every 300s even during the collector's high-frequency windows. Fixed with time-aware session detection:
+- OPEN session (9:30–10:00 AM ET): auto-switches to 60s — matches collector
+- CLOSE session (3:30–4:00 PM ET): auto-switches to 60s — matches collector
+- MIDDAY and outside market hours: 300s
+Event Mode toggle overrides all of these. Sidebar caption confirms which session is active.
+
+#### 3. Collector-anchored countdown timer (`app.py`)
+Replaced the session-anchored "Next update in: Xs" countdown (which reset on every browser open/refresh) with one anchored to the collector's last DB write. Formula: `secs_remaining = max(0, poll_interval − snap_age_secs)`. JavaScript ticks it down every second; each Streamlit rerun recomputes from the DB timestamp. Shows "overdue" if collector is 1.5× interval late.
+
+#### 4. SPX change display simplified (`app.py`)
+Removed the `pts ↔ %` toggle and `show_pct` session state. Replaced with a static combined label: `▲ +64.0 (0.87%)`. Both values always visible. `pts` label removed per user preference.
+
+#### 5. Staleness text removed from header (`app.py`)
+"16s ago" text removed from the status caption — the countdown timer already communicates freshness. Staleness dot (🟢/🟡/🔴) retained.
+
+#### 6. Transformation Opportunity Scanner — new feature (`app.py`)
+Core feature of the dashboard. `_compute_transform_scanner()` is a batch version of Entry Analysis: iterates every valid (front_expiry, back_expiry) pair and evaluates the put/call strike combination specified by the user's offset controls. Key implementation decisions:
+- **Single source of truth:** uses the same six-leg mark logic as Entry Analysis — no independent pricing engine
+- **Performance:** pre-builds a `_cache` dict of `{(expiry, side): (sorted_strikes, marks)}` once; all leg lookups are O(log n) bisect queries, not per-call DataFrame filters (previous approach caused a visible hang at ~22,800 iterations)
+- **Exact match for wings:** wing strikes (±5 from actual resolved strike) require exact match — same rule as Entry Analysis. If absent, combination is skipped
+- **Nearest-common-strike for main legs:** finds the nearest strike present in BOTH expiries simultaneously, avoiding the phantom-strike bug (where a strike existed in one expiry but not the other, producing wrong numbers)
+- Scanner placed at top of dashboard (Section 2) — it is the primary discovery tool
+
+#### 7. Strike Gap filter with offset dropdowns (`app.py`)
+Two inline dropdowns above the scanner table — Put offset and Call offset from ATM (0, 5, 10, ..., 200). Nearest-common-strike resolution means the scanner always finds something close to the requested offsets even if the exact strike doesn't exist. Auto-computes and displays "Strike gap: N pts (symmetric/asymmetric)".
+
+#### 8. Strike selectors changed from number_input to selectbox (`app.py`)
+Entry Analysis put and call strike inputs replaced with dropdowns showing only strikes present in BOTH front and back expiry (intersection). Eliminates the phantom-strike bug where manually typing a non-existent strike caused wrong calculations via nearest-strike fallback. Default selection is nearest available to ATM−100 (put) and ATM (call).
+
+#### 9. Design system v2 (`app.py`, `.streamlit/config.toml`)
+Complete CSS rewrite based on Bloomberg Terminal / TradingView aesthetic:
+- `config.toml` sets the Streamlit base dark theme so native widgets inherit the palette
+- Inter (UI text) + JetBrains Mono (all numbers) via Google Fonts
+- Metric values at 2rem — 3× larger than labels — creates genuine size-based hierarchy
+- `hr { display: none }` — all dividers hidden; section separation via spacing only
+- `h3 { border: none }` — no decorative lines on headings (fixes broken lines-through-text)
+- Metric cards: border, shadow, hover lift (translateY −2px, blue glow)
+- Page icon changed to 📈
+- `fadeUp` animation on cards and tables (350ms, 10px translateY)
+
+#### 10. Pinned Pairs and Pair Scanner removed (`app.py`)
+Removed at user request: `_load_pinned`, `_save_pinned`, `_compute_pair_scanner`, `_table_col_config` helper functions; `PINNED_PAIRS_FILE`, `_TABLE_DISPLAY_COLS` constants; Section 7 (Pinned Pairs) and Section 8 (Pair Scanner) rendering blocks. The Transformation Opportunity Scanner supersedes the Pair Scanner for the primary use case.
+
+#### 11. Front ATM IV / Back ATM IV metrics removed (`app.py`)
+The two `st.metric` cards shown just above Historical Statistics (and below the Front vs Back IV scatter chart) were removed. These duplicated information already visible in the Calendar Edge metrics row (m2/m3 — Front ATM IV and Back ATM IV with current values).
+
+#### 12. Period radio moved (`app.py`)
+Today/5D/10D/20D selector moved from the Calendar Edge section header to an inline position alongside the Contango/Backwardation `st.info()` block. The radio now sits at the same visual level as the regime interpretation text, making the connection between the selected period and the chart below more intuitive. Code restructured so `period_label` is defined before `period_days` and `atm_merged` are computed (previously caused a forward-reference issue).
+
+#### 13. SPX price font increased (`app.py`)
+SPX price display increased from h2 (1.2rem via CSS) to a custom inline div at 2.6rem, JetBrains Mono, weight 700. Makes the primary market data immediately visible without scanning.
+
+---
+
+**Open questions / follow-ups:**
+- Live trading threshold calibration from real fills (expected ~$6.50–$7.00 vs $5.00 paper)
+- Validate IV Ratio favorability hypothesis through logged trade outcomes (designated HYPOTHESIS in docs)
+- Future: asymmetric strike pairs in the scanner (v1 uses symmetric/nearest-common only)
+
+
 ## 2026-06-29 — Dashboard v3.2: Entry Analysis overhaul, layout reorder, IC payoff chart, normalized metrics, weekend fallbacks
 
 **Status:** Complete — all changes confirmed working by Chandan (live data verified in screenshots).

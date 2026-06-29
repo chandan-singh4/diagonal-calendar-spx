@@ -334,9 +334,7 @@ iframe { border: none !important; }
 """, unsafe_allow_html=True)
 
 # ─── Constants ────────────────────────────────────────────────────────────────
-PINNED_PAIRS_FILE = Path(__file__).parent / "pinned_pairs.json"
 _SPARK_BARS = "▁▂▃▄▅▆▇█"
-_TABLE_DISPLAY_COLS = ["Front", "Back", "Ratio", "Day Chg", "Drop%", "Rise%", "Chart"]
 
 # Collapse non-trading time on multi-day time-series charts so sessions sit
 # adjacent and the line stays continuous across the (now-removed) empty bands.
@@ -367,25 +365,6 @@ _RATIO_BANDS = [
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Helper — pinned pairs persistence
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _load_pinned() -> list[dict]:
-    try:
-        if PINNED_PAIRS_FILE.exists():
-            return json.loads(PINNED_PAIRS_FILE.read_text())
-    except Exception:
-        pass
-    return []
-
-
-def _save_pinned(pairs: list[dict]) -> None:
-    try:
-        PINNED_PAIRS_FILE.write_text(json.dumps(pairs, indent=2))
-    except Exception as e:
-        st.error(f"Could not save pinned pairs: {e}")
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper — unicode sparkline
 # ─────────────────────────────────────────────────────────────────────────────
@@ -506,97 +485,6 @@ def _load_contract_hist(expiry: str, strike: float,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Helper — pair scanner computation
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _compute_pair_scanner(session_date: str) -> pd.DataFrame:
-    """
-    Build the IV-ratio scanner DataFrame for the given trading session.
-
-    session_date: 'YYYY-MM-DD' UTC date string derived from the latest
-    snapshot's timestamp so the scanner shows data even after-hours.
-    """
-    rows = db.get_all_expiry_atm_iv_today(config.DB_PATH, session_date)
-    if not rows:
-        return pd.DataFrame()
-
-    df = pd.DataFrame([dict(r) for r in rows])
-    df["atm_avg_iv"] = df["atm_avg_iv"] * 100
-    df = df[df["atm_avg_iv"].notna() & (df["atm_avg_iv"] > 0)]
-
-    if df.empty:
-        return pd.DataFrame()
-
-    pivot = df.pivot_table(
-        index="snapshot_timestamp",
-        columns="expiry_date",
-        values="atm_avg_iv",
-        aggfunc="mean",
-    )
-    if pivot.empty:
-        return pd.DataFrame()
-
-    dte_map = (
-        df.sort_values("snapshot_timestamp")
-        .groupby("expiry_date")["dte"]
-        .last()
-        .to_dict()
-    )
-
-    expiries = sorted(pivot.columns.tolist())
-    results = []
-
-    for i, front in enumerate(expiries):
-        for back in expiries[i + 1:]:
-            try:
-                front_date = date.fromisoformat(front)
-                back_date  = date.fromisoformat(back)
-            except ValueError:
-                continue
-
-            gap       = (back_date - front_date).days
-            front_dte = dte_map.get(front, 0)
-            back_dte  = dte_map.get(back, 0)
-
-            if front_dte < 0 or back_dte < 0:
-                continue
-
-            ratio_s = (
-                pivot[front] / pivot[back]
-            ).replace(
-                [float("inf"), float("-inf")], float("nan")
-            ).dropna()
-
-            if ratio_s.empty:
-                continue
-
-            vals          = ratio_s.tolist()
-            current_ratio = vals[-1]
-            today_high    = max(vals)
-            today_low     = min(vals)
-            day_change    = current_ratio - vals[0]
-            drop_pct = (current_ratio - today_high) / today_high * 100 if today_high != 0 else 0.0
-            rise_pct = (current_ratio - today_low)  / today_low  * 100 if today_low  != 0 else 0.0
-
-            results.append({
-                "Front":        f"{front} ({front_dte}d)",
-                "Back":         f"{back} ({back_dte}d)",
-                "front_expiry": front,
-                "back_expiry":  back,
-                "front_dte":    front_dte,
-                "back_dte":     back_dte,
-                "gap":          gap,
-                "Ratio":        round(current_ratio, 4),
-                "Day Chg":      round(day_change, 4),
-                "Drop%":        round(drop_pct, 2),
-                "Rise%":        round(rise_pct, 2),
-                "Chart":        _sparkline(vals),
-                "snapshots":    len(vals),
-            })
-
-    return pd.DataFrame(results) if results else pd.DataFrame()
-
-
 def _compute_transform_scanner(
     chain_df: pd.DataFrame,
     spx_price: float,
@@ -758,16 +646,6 @@ def _compute_transform_scanner(
         .head(max_rows)
         .reset_index(drop=True)
     )
-
-
-def _table_col_config() -> dict:
-    return {
-        "Ratio":    st.column_config.NumberColumn(format="%.4f"),
-        "Day Chg":  st.column_config.NumberColumn(format="%.4f"),
-        "Drop%":    st.column_config.NumberColumn("Drop %", format="%.2f"),
-        "Rise%":    st.column_config.NumberColumn("Rise %", format="%.2f"),
-        "Chart":    st.column_config.TextColumn("Chart", width="small"),
-    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -973,10 +851,11 @@ h_spx, h_vix, h_gex, h_status = st.columns([5, 2, 2, 4])
 with h_spx:
     # SPX price + static combined change display (▲ +64.0 (0.87%))
     st.markdown(
-        f"<h2 style='margin:0;padding:0;color:{day_color};line-height:1.1;'>"
-        f"SPX {spx_price:,.2f} "
-        f"<span style='font-size:0.65em;font-weight:400;'>"
-        f"{day_arrow} {chg_display}</span></h2>",
+        f"<div style='font-family:"JetBrains Mono",monospace;font-size:2.6rem;"
+        f"font-weight:700;color:{day_color};line-height:1.1;letter-spacing:-.03em;'>"
+        f"SPX {spx_price:,.2f}"
+        f"<span style='font-size:.45em;font-weight:400;margin-left:.5em;opacity:.85;'>"
+        f"{day_arrow} {chg_display}</span></div>",
         unsafe_allow_html=True,
     )
 
@@ -1487,20 +1366,31 @@ st.divider()
 # session_date is used to pin the x-axis on "Today" view from 09:30 → 16:15.
 # ═════════════════════════════════════════════════════════════════════════════
 
-_ce_hdr, _ce_radio = st.columns([3, 1])
-with _ce_hdr:
-    st.subheader("Calendar Edge")
-with _ce_radio:
+st.subheader("Calendar Edge")
+
+# Metrics + Contango/Backwardation info first, then period selector
+iv_index = float(chain_df.groupby("expiry")["iv"].mean().mean())
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("ATM IV Ratio (F/B)", f"{ts_now.ratio:.4f}")
+m2.metric("Front ATM IV",       f"{ts_now.front_iv:.2f}%")
+m3.metric("Back ATM IV",        f"{ts_now.back_iv:.2f}%")
+m4.metric("IV Index (avg)",     f"{iv_index:.2f}%")
+
+# Period radio sits inline with Contango/Backwardation — defines period_label
+_info_col, _radio_col = st.columns([3, 1])
+with _info_col:
+    st.info(iv_engine.interpret_curve(ts_now))
+with _radio_col:
     period_label = st.radio(
         "Chart Range",
         ["Today", "5D", "10D", "20D"],
-        horizontal=True,
+        horizontal=False,
         label_visibility="collapsed",
         key="period_radio",
     )
-period_days = {"Today": 1, "5D": 5, "10D": 10, "20D": 20}[period_label]
 
-# Build atm_merged_period — respects weekend/gap fallback for "Today"
+# Build atm_merged — depends on period_label so must come after the radio
+period_days = {"Today": 1, "5D": 5, "10D": 10, "20D": 20}[period_label]
 _fhp = _load_atm_hist_fb(front_expiry, period_days)
 _bhp = _load_atm_hist_fb(back_expiry,  period_days)
 atm_merged = pd.DataFrame()
@@ -1511,15 +1401,6 @@ if not _fhp.empty and not _bhp.empty:
         on="timestamp", how="inner",
     )
     atm_merged["iv_ratio"] = atm_merged["front_iv"] / atm_merged["back_iv"]
-
-iv_index = float(chain_df.groupby("expiry")["iv"].mean().mean())
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("ATM IV Ratio (F/B)", f"{ts_now.ratio:.4f}")
-m2.metric("Front ATM IV",       f"{ts_now.front_iv:.2f}%")
-m3.metric("Back ATM IV",        f"{ts_now.back_iv:.2f}%")
-m4.metric("IV Index (avg)",     f"{iv_index:.2f}%")
-
-st.info(iv_engine.interpret_curve(ts_now))
 
 if not atm_merged.empty:
     # x-axis bounds: on "Today" pin from 09:30 to 16:15 of session_date
@@ -1623,25 +1504,6 @@ if not atm_merged.empty:
 
 else:
     st.caption(f"No ATM IV history for {front_expiry} / {back_expiry} in the selected range.")
-
-dc1, dc2 = st.columns(2)
-for col, label, exp, dte in [
-    (dc1, "Front", front_expiry, front_dte),
-    (dc2, "Back",  back_expiry,  back_dte),
-]:
-    latest_rows = db.get_latest_atm_iv_snapshots(config.DB_PATH, exp, n=2)
-    with col:
-        if latest_rows:
-            lat_iv = latest_rows[0]["atm_avg_iv"] * 100
-            chg_iv = (
-                (latest_rows[0]["atm_avg_iv"] - latest_rows[1]["atm_avg_iv"]) * 100
-                if len(latest_rows) == 2 else 0.0
-            )
-            st.metric(f"{label} ATM IV  ({dte} DTE)", f"{lat_iv:.2f}%", f"{chg_iv:+.2f}%")
-        else:
-            st.metric(f"{label} ATM IV  ({dte} DTE)", "N/A")
-
-st.divider()
 
 # ═════════════════════════════════════════════════════════════════════════════
 # SECTION 5 — HISTORICAL STATISTICS
@@ -1843,139 +1705,6 @@ with right_col:
 st.divider()
 
 # ═════════════════════════════════════════════════════════════════════════════
-# PAIR SCANNER DATA — computed once, shared by Pinned Pairs and Pair Scanner
-# ═════════════════════════════════════════════════════════════════════════════
-
-full_scanner_df = _compute_pair_scanner(session_date)
-scanner_total   = len(full_scanner_df)
-scanner_snaps   = (
-    int(full_scanner_df["snapshots"].max())
-    if not full_scanner_df.empty else 0
-)
-
-# ═════════════════════════════════════════════════════════════════════════════
-# SECTION 7 — PINNED PAIRS
-# ═════════════════════════════════════════════════════════════════════════════
-
-pinned = _load_pinned()
-st.subheader(f"⭐ Pinned Pairs  ({len(pinned)} pinned)")
-
-if pinned and not full_scanner_df.empty:
-    pinned_keys = {(p["front_expiry"], p["back_expiry"]) for p in pinned}
-    pinned_df = full_scanner_df[
-        full_scanner_df.apply(
-            lambda r: (r["front_expiry"], r["back_expiry"]) in pinned_keys, axis=1
-        )
-    ].copy()
-    if not pinned_df.empty:
-        pin_event = st.dataframe(
-            pinned_df[_TABLE_DISPLAY_COLS],
-            use_container_width=True, hide_index=True,
-            on_select="rerun", selection_mode="multi-row",
-            key="pinned_table", column_config=_table_col_config(),
-        )
-        sel_pinned = (
-            pin_event.selection.rows if hasattr(pin_event, "selection") else []
-        )
-        if sel_pinned:
-            to_remove_df = pinned_df.iloc[sel_pinned]
-            remove_keys  = set(zip(to_remove_df["front_expiry"], to_remove_df["back_expiry"]))
-            if st.button(f"🗑️ Unpin {len(sel_pinned)} Selected", key="unpin_btn"):
-                _save_pinned([p for p in pinned
-                              if (p["front_expiry"], p["back_expiry"]) not in remove_keys])
-                st.rerun()
-    else:
-        st.caption(
-            "Pinned pairs have no data for the current session "
-            "(may have expired or collector hasn't run yet)."
-        )
-elif pinned:
-    st.caption("No scanner data yet for this session.")
-else:
-    st.caption(
-        "No pinned pairs yet. "
-        "Select rows in the Pair Scanner below and click **Pin Selected**."
-    )
-
-st.divider()
-
-# ═════════════════════════════════════════════════════════════════════════════
-# SECTION 8 — PAIR SCANNER
-# ═════════════════════════════════════════════════════════════════════════════
-
-sc_hdr, sc_meta = st.columns([3, 2])
-with sc_hdr:
-    st.subheader("🔍 Pair Scanner")
-with sc_meta:
-    st.caption(f"{scanner_total} pairs  ·  {scanner_snaps} snapshots today")
-
-sf1, sf2, sf3, sf4 = st.columns([2, 2, 2, 1])
-with sf1:
-    min_dte = st.number_input(
-        "Min DTE", min_value=0, max_value=60, value=0, step=1, key="min_dte"
-    )
-with sf2:
-    max_dte_filter = st.number_input(
-        "Max DTE", min_value=1, max_value=60, value=20, step=1, key="max_dte"
-    )
-with sf3:
-    max_gap = st.number_input(
-        "Max Gap (days)", min_value=1, max_value=30, value=1, step=1,
-        key="max_gap_input",
-        help=(
-            "Maximum calendar days between front and back expiry.\n"
-            "SPX daily expirations: Mon→Tue = 1d, Fri→Mon = 3d."
-        ),
-    )
-with sf4:
-    st.button("↺ Rescan", key="rescan_btn")
-
-if not full_scanner_df.empty:
-    filtered_df = full_scanner_df[
-        (full_scanner_df["front_dte"] >= min_dte)
-        & (full_scanner_df["front_dte"] <= max_dte_filter)
-        & (full_scanner_df["gap"] <= max_gap)
-    ].copy()
-    filtered_df = filtered_df.sort_values("Drop%", ascending=True)
-
-    if not filtered_df.empty:
-        scan_event = st.dataframe(
-            filtered_df[_TABLE_DISPLAY_COLS],
-            use_container_width=True, hide_index=True,
-            on_select="rerun", selection_mode="multi-row",
-            key="scanner_table", column_config=_table_col_config(),
-        )
-        sel_scan = (
-            scan_event.selection.rows if hasattr(scan_event, "selection") else []
-        )
-        if sel_scan:
-            to_pin_df           = filtered_df.iloc[sel_scan]
-            current_pinned      = _load_pinned()
-            current_pinned_keys = {
-                (p["front_expiry"], p["back_expiry"]) for p in current_pinned
-            }
-            new_entries = [
-                {"front_expiry": r["front_expiry"], "back_expiry": r["back_expiry"]}
-                for _, r in to_pin_df.iterrows()
-                if (r["front_expiry"], r["back_expiry"]) not in current_pinned_keys
-            ]
-            if new_entries:
-                if st.button(f"📌 Pin {len(new_entries)} New", key="pin_btn"):
-                    _save_pinned(current_pinned + new_entries)
-                    st.rerun()
-            else:
-                st.caption("All selected pairs are already pinned.")
-    else:
-        st.caption(
-            f"No pairs match: Min DTE {min_dte}, Max DTE {max_dte_filter}, "
-            f"Max Gap {int(max_gap)}d.  Try increasing Max Gap or DTE range."
-        )
-else:
-    st.caption(
-        "No scanner data for this session yet. "
-        "Make sure collector.py is running and has completed at least one cycle."
-    )
-
 # ═════════════════════════════════════════════════════════════════════════════
 # SECTION 10 — RESEARCH: IV Ratio vs. Normalized Debit
 # Observation tool placed at bottom — not part of the primary decision flow.
