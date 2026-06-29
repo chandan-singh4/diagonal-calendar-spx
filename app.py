@@ -348,124 +348,126 @@ def _compute_transform_scanner(
     max_rows: int = 50,
 ) -> pd.DataFrame:
     """
-    Evaluate every valid (front_expiry, back_expiry, symmetric_strike_pair)
-    combination using the same mark math as Entry Analysis, and return a
-    ranked DataFrame sorted by Transform Difference descending.
+    Batch version of Entry Analysis: iterates every valid
+    (front_expiry, back_expiry, symmetric_strike_distance) combination
+    and computes Diagonal Mark, Transform Mark, Transform Diff, IV Ratio
+    using iv_engine.strike_contract() — the exact same function Entry
+    Analysis calls.  There is one source of truth for mark prices.
 
-    Filters applied before iterating:
-      1. ATM ± strike_window (SPX points)
-      2. Volume >= liquidity_pct × max volume within the ATM window (per expiry)
-      3. back_DTE > front_DTE  (min 1-day gap)
-      4. Wing strikes (front ±5) must have marks in chain — else row is dropped
+    A combination is included if and only if strike_contract() returns a
+    non-None mark for all six legs (4 diagonal + 2 wings), which is
+    exactly the condition that makes Entry Analysis show numbers rather
+    than "— (wing strikes not in chain)".
 
-    Symmetric strike rule:
-      atm_rounded = round(spx_price / 5) * 5
-      for d in [5, 10, 15, ..., strike_window]:
-          put_strike  = atm_rounded - d
-          call_strike = atm_rounded + d
+    Candidate distances are symmetric multiples of 5 within strike_window.
+    The liquidity filter narrows WHICH distances to try; it does not gate
+    whether a found combination is valid.  If no liquid strikes are found
+    (e.g. pre-market, no volume data) the filter is bypassed and all
+    distances in window are evaluated.
     """
     if chain_df.empty:
         return pd.DataFrame()
 
-    # ── Build O(1) mark lookup ────────────────────────────────────────────
-    mark_lookup: dict[tuple, float] = {}
-    for row in chain_df.itertuples(index=False):
-        mark = getattr(row, "mark", None)
-        if mark is None or (isinstance(mark, float) and pd.isna(mark)):
-            bid = getattr(row, "bid", None)
-            ask = getattr(row, "ask", None)
-            if bid is not None and ask is not None:
-                try:
-                    mark = (float(bid) + float(ask)) / 2.0
-                except (TypeError, ValueError):
-                    mark = None
-        if mark is not None:
-            try:
-                mark_lookup[(row.expiry, float(row.strike), row.side)] = float(mark)
-            except (TypeError, ValueError):
-                pass
+    expiries   = sorted(chain_df["expiry"].unique())
+    dte_by_exp = chain_df.groupby("expiry")["dte"].first().to_dict()
 
-    # ── Candidate strikes per expiry (ATM window + liquidity filter) ──────
-    atm_lo = spx_price - strike_window
-    atm_hi = spx_price + strike_window
+    # Pre-split chain by expiry so iv_engine.strike_contract() works on a
+    # small sub-DataFrame instead of the full chain on every call.
+    chain_by_exp: dict[str, pd.DataFrame] = {
+        exp: chain_df[chain_df["expiry"] == exp]
+        for exp in expiries
+    }
 
-    liquid_strikes: dict[str, set[float]] = {}
-    for expiry, grp in chain_df.groupby("expiry"):
-        windowed = grp[(grp["strike"] >= atm_lo) & (grp["strike"] <= atm_hi)]
-        if windowed.empty:
-            continue
-        max_vol = windowed["volume"].fillna(0).max()
-        if max_vol > 0:
-            liquid = windowed[windowed["volume"].fillna(0) >= liquidity_pct * max_vol]
-        else:
-            liquid = windowed          # no volume data — include all in window
-        liquid_strikes[expiry] = set(liquid["strike"].unique())
-
-    # ── ATM IV per expiry (for IV Ratio column) ───────────────────────────
-    expiries      = sorted(chain_df["expiry"].unique())
-    dte_by_exp    = chain_df.groupby("expiry")["dte"].first().to_dict()
+    # ATM IV per expiry — same call as the dashboard header section.
     atm_iv_cache: dict[str, float | None] = {
         exp: iv_engine.atm_iv(chain_df, exp, spx_price)
         for exp in expiries
     }
 
-    # ── Symmetric strike distances to evaluate ───────────────────────────
+    # ── Candidate symmetric distances ────────────────────────────────────
+    # Start with every multiple of 5 in the window.
+    atm_lo      = spx_price - strike_window
+    atm_hi      = spx_price + strike_window
     atm_rounded = round(spx_price / 5) * 5
-    distances   = range(5, strike_window + 5, 5)
+    all_distances = list(range(5, strike_window + 5, 5))
 
+    # Liquidity filter: collect which distances have at least one liquid
+    # strike nearby across any expiry.  If the filter produces nothing
+    # (no volume data, pre-market) fall back to all_distances so the
+    # scanner always has candidates to evaluate.
+    liquid_distances: set[int] = set()
+    for expiry, grp in chain_df.groupby("expiry"):
+        windowed = grp[(grp["strike"] >= atm_lo) & (grp["strike"] <= atm_hi)]
+        if windowed.empty:
+            continue
+        max_vol = windowed["volume"].fillna(0).max()
+        if max_vol > 0 and liquidity_pct > 0:
+            liquid = windowed[windowed["volume"].fillna(0) >= liquidity_pct * max_vol]
+        else:
+            liquid = windowed   # no volume data — treat all as liquid
+        for s in liquid["strike"].unique():
+            raw_d = abs(float(s) - atm_rounded)
+            # Map to nearest multiple of 5 so it aligns with all_distances
+            snapped = int(round(raw_d / 5) * 5)
+            if 5 <= snapped <= strike_window:
+                liquid_distances.add(snapped)
+
+    active_distances = (
+        sorted(liquid_distances) if liquid_distances else all_distances
+    )
+
+    # ── Main loop ────────────────────────────────────────────────────────
     results = []
 
     for i, front in enumerate(expiries):
-        front_dte = int(dte_by_exp.get(front, 0))
+        front_dte  = int(dte_by_exp.get(front, 0))
         if front_dte < 0:
             continue
-        front_set = liquid_strikes.get(front, set())
-        if not front_set:
-            continue
+        fc_chain   = chain_by_exp[front]   # pre-filtered sub-DataFrame
+        front_iv   = atm_iv_cache.get(front)
 
         for back in expiries[i + 1:]:
             back_dte = int(dte_by_exp.get(back, 0))
             if back_dte <= front_dte:
-                continue
-            back_set = liquid_strikes.get(back, set())
-            if not back_set:
-                continue
+                continue              # back must have strictly greater DTE
+            bc_chain = chain_by_exp[back]
+            back_iv  = atm_iv_cache.get(back)
+            iv_ratio = (
+                round(front_iv / back_iv, 4)
+                if (front_iv and back_iv and back_iv != 0)
+                else None
+            )
 
-            for d in distances:
+            for d in active_distances:
                 put_s  = float(atm_rounded - d)
                 call_s = float(atm_rounded + d)
 
-                # All four diagonal legs must be in their expiry's liquid set
-                if not (put_s  in front_set and call_s in front_set and
-                        put_s  in back_set  and call_s in back_set):
+                # ── Identical to Entry Analysis calculation block ──────
+                # iv_engine.strike_contract() uses nearest-strike fallback,
+                # so this matches exactly what Entry Analysis would show.
+                efc = iv_engine.strike_contract(fc_chain, front, call_s, "CALL")
+                efp = iv_engine.strike_contract(fc_chain, front, put_s,  "PUT")
+                ebc = iv_engine.strike_contract(bc_chain, back,  call_s, "CALL")
+                ebp = iv_engine.strike_contract(bc_chain, back,  put_s,  "PUT")
+
+                if any(c.mark is None for c in (efc, efp, ebc, ebp)):
                     continue
 
-                fc = mark_lookup.get((front, call_s, "CALL"))
-                fp = mark_lookup.get((front, put_s,  "PUT"))
-                bc = mark_lookup.get((back,  call_s, "CALL"))
-                bp = mark_lookup.get((back,  put_s,  "PUT"))
+                diag_mark = (ebc.mark + ebp.mark) - (efc.mark + efp.mark)
 
-                if any(v is None for v in (fc, fp, bc, bp)):
-                    continue
+                # Wing strikes on FRONT expiry (identical to Entry Analysis)
+                wc = iv_engine.strike_contract(fc_chain, front, call_s + 5, "CALL")
+                wp = iv_engine.strike_contract(fc_chain, front, put_s  - 5, "PUT")
 
-                diag_mark = (bc + bp) - (fc + fp)
+                if wc.mark is None or wp.mark is None:
+                    continue   # wing strikes genuinely missing from chain
 
-                # Wings are ±5 on the FRONT expiry (matches Entry Analysis exactly)
-                wc = mark_lookup.get((front, call_s + 5, "CALL"))
-                wp = mark_lookup.get((front, put_s  - 5, "PUT"))
-                if wc is None or wp is None:
-                    continue          # wing strikes not in chain — skip
-
-                transform_mark = (bc + bp) - (wc + wp)
+                transform_mark = (ebc.mark + ebp.mark) - (wc.mark + wp.mark)
                 transform_diff = transform_mark - diag_mark
-
-                fiv = atm_iv_cache.get(front)
-                biv = atm_iv_cache.get(back)
-                iv_ratio = round(fiv / biv, 4) if (fiv and biv and biv != 0) else None
 
                 results.append({
                     "Front Expiry":   f"{front} ({front_dte}d)",
-                    "Back Expiry":    f"{back}  ({back_dte}d)",
+                    "Back Expiry":    f"{back} ({back_dte}d)",
                     "Put Strike":     int(put_s),
                     "Call Strike":    int(call_s),
                     "Diagonal Mark":  round(diag_mark,      2),
@@ -477,13 +479,12 @@ def _compute_transform_scanner(
     if not results:
         return pd.DataFrame()
 
-    out = (
+    return (
         pd.DataFrame(results)
         .sort_values("Transform Diff", ascending=False)
         .head(max_rows)
         .reset_index(drop=True)
     )
-    return out
 
 
 def _table_col_config() -> dict:
