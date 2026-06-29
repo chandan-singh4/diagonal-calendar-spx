@@ -559,33 +559,6 @@ st_autorefresh(interval=poll_interval * 1000, key="autorefresh")
 st.sidebar.divider()
 st.sidebar.markdown("**🔭 Transform Scanner**")
 
-_offset_options = [0] + list(range(5, 205, 5))   # 0 (ATM), 5, 10, ..., 200
-_offset_fmt     = lambda v: "ATM" if v == 0 else f"{v:+d}"
-
-_sc_put_col, _sc_call_col = st.sidebar.columns(2)
-with _sc_put_col:
-    sc_put_offset = st.selectbox(
-        "Put offset", options=_offset_options,
-        format_func=_offset_fmt, index=0,
-        key="sc_put_offset",
-        help="How far below ATM the put strike should be. "
-             "0 = nearest strike to ATM. Scanner finds the nearest "
-             "available strike in both expiries.",
-    )
-with _sc_call_col:
-    sc_call_offset = st.selectbox(
-        "Call offset", options=_offset_options,
-        format_func=_offset_fmt, index=0,
-        key="sc_call_offset",
-        help="How far above ATM the call strike should be.",
-    )
-
-sc_gap_pts = sc_put_offset + sc_call_offset
-st.sidebar.caption(
-    f"Strike gap: **{sc_gap_pts} pts** "
-    f"({'symmetric' if sc_put_offset == sc_call_offset else 'asymmetric'})"
-)
-
 sc_max_rows = st.sidebar.number_input(
     "Max Results", min_value=10, max_value=200, value=50, step=10,
     key="sc_max_rows",
@@ -854,16 +827,36 @@ python -c "import schwab_client; schwab_client.get_client()"
 # Math is identical to Entry Analysis — single source of truth.
 # ═════════════════════════════════════════════════════════════════════════════
 
-_ts_hdr, _ts_meta = st.columns([3, 2])
-with _ts_hdr:
-    st.subheader("🔭 Transformation Opportunity Scanner")
-with _ts_meta:
-    _put_label  = "ATM" if sc_put_offset  == 0 else f"ATM−{sc_put_offset}"
-    _call_label = "ATM" if sc_call_offset == 0 else f"ATM+{sc_call_offset}"
-    st.caption(
-        f"Put: {_put_label}  ·  Call: {_call_label}  ·  "
-        f"Gap: {sc_gap_pts} pts  ·  Top {sc_max_rows} results"
+st.subheader("🔭 Transformation Opportunity Scanner")
+
+# Strike controls sit inline directly above the table — same visual position
+# as the Put Strike / Call Strike columns they target.
+_offset_options = [0] + list(range(5, 205, 5))
+_offset_fmt     = lambda v: "ATM" if v == 0 else f"−{v}" if False else ("ATM" if v == 0 else str(v))
+
+_sc_c1, _sc_c2, _sc_c3, _sc_c4 = st.columns([2, 1, 1, 2])
+with _sc_c1:
+    st.caption("**Strike Selection**")
+with _sc_c2:
+    sc_put_offset = st.selectbox(
+        "Put Strike (offset from ATM)",
+        options=_offset_options,
+        format_func=lambda v: "ATM" if v == 0 else f"ATM − {v}",
+        index=0,
+        key="sc_put_offset",
     )
+with _sc_c3:
+    sc_call_offset = st.selectbox(
+        "Call Strike (offset from ATM)",
+        options=_offset_options,
+        format_func=lambda v: "ATM" if v == 0 else f"ATM + {v}",
+        index=0,
+        key="sc_call_offset",
+    )
+with _sc_c4:
+    sc_gap_pts = sc_put_offset + sc_call_offset
+    _sym = "symmetric" if sc_put_offset == sc_call_offset else "asymmetric"
+    st.caption(f"**Strike gap: {sc_gap_pts} pts** ({_sym})")
 
 with st.spinner("Scanning combinations…"):
     _ts_df = _compute_transform_scanner(
