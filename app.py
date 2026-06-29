@@ -340,6 +340,152 @@ def _compute_pair_scanner(session_date: str) -> pd.DataFrame:
     return pd.DataFrame(results) if results else pd.DataFrame()
 
 
+def _compute_transform_scanner(
+    chain_df: pd.DataFrame,
+    spx_price: float,
+    strike_window: int = 100,
+    liquidity_pct: float = 0.40,
+    max_rows: int = 50,
+) -> pd.DataFrame:
+    """
+    Evaluate every valid (front_expiry, back_expiry, symmetric_strike_pair)
+    combination using the same mark math as Entry Analysis, and return a
+    ranked DataFrame sorted by Transform Difference descending.
+
+    Filters applied before iterating:
+      1. ATM ± strike_window (SPX points)
+      2. Volume >= liquidity_pct × max volume within the ATM window (per expiry)
+      3. back_DTE > front_DTE  (min 1-day gap)
+      4. Wing strikes (front ±5) must have marks in chain — else row is dropped
+
+    Symmetric strike rule:
+      atm_rounded = round(spx_price / 5) * 5
+      for d in [5, 10, 15, ..., strike_window]:
+          put_strike  = atm_rounded - d
+          call_strike = atm_rounded + d
+    """
+    if chain_df.empty:
+        return pd.DataFrame()
+
+    # ── Build O(1) mark lookup ────────────────────────────────────────────
+    mark_lookup: dict[tuple, float] = {}
+    for row in chain_df.itertuples(index=False):
+        mark = getattr(row, "mark", None)
+        if mark is None or (isinstance(mark, float) and pd.isna(mark)):
+            bid = getattr(row, "bid", None)
+            ask = getattr(row, "ask", None)
+            if bid is not None and ask is not None:
+                try:
+                    mark = (float(bid) + float(ask)) / 2.0
+                except (TypeError, ValueError):
+                    mark = None
+        if mark is not None:
+            try:
+                mark_lookup[(row.expiry, float(row.strike), row.side)] = float(mark)
+            except (TypeError, ValueError):
+                pass
+
+    # ── Candidate strikes per expiry (ATM window + liquidity filter) ──────
+    atm_lo = spx_price - strike_window
+    atm_hi = spx_price + strike_window
+
+    liquid_strikes: dict[str, set[float]] = {}
+    for expiry, grp in chain_df.groupby("expiry"):
+        windowed = grp[(grp["strike"] >= atm_lo) & (grp["strike"] <= atm_hi)]
+        if windowed.empty:
+            continue
+        max_vol = windowed["volume"].fillna(0).max()
+        if max_vol > 0:
+            liquid = windowed[windowed["volume"].fillna(0) >= liquidity_pct * max_vol]
+        else:
+            liquid = windowed          # no volume data — include all in window
+        liquid_strikes[expiry] = set(liquid["strike"].unique())
+
+    # ── ATM IV per expiry (for IV Ratio column) ───────────────────────────
+    expiries      = sorted(chain_df["expiry"].unique())
+    dte_by_exp    = chain_df.groupby("expiry")["dte"].first().to_dict()
+    atm_iv_cache: dict[str, float | None] = {
+        exp: iv_engine.atm_iv(chain_df, exp, spx_price)
+        for exp in expiries
+    }
+
+    # ── Symmetric strike distances to evaluate ───────────────────────────
+    atm_rounded = round(spx_price / 5) * 5
+    distances   = range(5, strike_window + 5, 5)
+
+    results = []
+
+    for i, front in enumerate(expiries):
+        front_dte = int(dte_by_exp.get(front, 0))
+        if front_dte < 0:
+            continue
+        front_set = liquid_strikes.get(front, set())
+        if not front_set:
+            continue
+
+        for back in expiries[i + 1:]:
+            back_dte = int(dte_by_exp.get(back, 0))
+            if back_dte <= front_dte:
+                continue
+            back_set = liquid_strikes.get(back, set())
+            if not back_set:
+                continue
+
+            for d in distances:
+                put_s  = float(atm_rounded - d)
+                call_s = float(atm_rounded + d)
+
+                # All four diagonal legs must be in their expiry's liquid set
+                if not (put_s  in front_set and call_s in front_set and
+                        put_s  in back_set  and call_s in back_set):
+                    continue
+
+                fc = mark_lookup.get((front, call_s, "CALL"))
+                fp = mark_lookup.get((front, put_s,  "PUT"))
+                bc = mark_lookup.get((back,  call_s, "CALL"))
+                bp = mark_lookup.get((back,  put_s,  "PUT"))
+
+                if any(v is None for v in (fc, fp, bc, bp)):
+                    continue
+
+                diag_mark = (bc + bp) - (fc + fp)
+
+                # Wings are ±5 on the FRONT expiry (matches Entry Analysis exactly)
+                wc = mark_lookup.get((front, call_s + 5, "CALL"))
+                wp = mark_lookup.get((front, put_s  - 5, "PUT"))
+                if wc is None or wp is None:
+                    continue          # wing strikes not in chain — skip
+
+                transform_mark = (bc + bp) - (wc + wp)
+                transform_diff = transform_mark - diag_mark
+
+                fiv = atm_iv_cache.get(front)
+                biv = atm_iv_cache.get(back)
+                iv_ratio = round(fiv / biv, 4) if (fiv and biv and biv != 0) else None
+
+                results.append({
+                    "Front Expiry":   f"{front} ({front_dte}d)",
+                    "Back Expiry":    f"{back}  ({back_dte}d)",
+                    "Put Strike":     int(put_s),
+                    "Call Strike":    int(call_s),
+                    "Diagonal Mark":  round(diag_mark,      2),
+                    "Transform Mark": round(transform_mark, 2),
+                    "Transform Diff": round(transform_diff, 2),
+                    "IV Ratio":       iv_ratio,
+                })
+
+    if not results:
+        return pd.DataFrame()
+
+    out = (
+        pd.DataFrame(results)
+        .sort_values("Transform Diff", ascending=False)
+        .head(max_rows)
+        .reset_index(drop=True)
+    )
+    return out
+
+
 def _table_col_config() -> dict:
     return {
         "Ratio":    st.column_config.NumberColumn(format="%.4f"),
@@ -392,6 +538,25 @@ else:
     poll_label    = "300s"
 
 st_autorefresh(interval=poll_interval * 1000, key="autorefresh")
+
+st.sidebar.divider()
+st.sidebar.markdown("**🔭 Transform Scanner**")
+sc_strike_window = st.sidebar.number_input(
+    "Strike Window (±pts)", min_value=25, max_value=200, value=100, step=25,
+    key="sc_strike_window",
+    help="Only evaluate strikes within this many points of current SPX price.",
+)
+sc_liquidity_pct = st.sidebar.slider(
+    "Min Liquidity (% of max vol)", min_value=0, max_value=100, value=40, step=5,
+    key="sc_liquidity_pct",
+    help="Only include strikes whose volume is at least this % of the highest-volume "
+         "strike in the ATM window for that expiry. Set to 0 to disable.",
+) / 100.0
+sc_max_rows = st.sidebar.number_input(
+    "Max Results", min_value=10, max_value=200, value=50, step=10,
+    key="sc_max_rows",
+    help="Cap the number of rows returned (sorted by Transform Diff descending).",
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Database init + latest complete snapshot
@@ -523,33 +688,26 @@ if (
 # Session-state defaults
 # ─────────────────────────────────────────────────────────────────────────────
 
-if "show_pct" not in st.session_state:
-    st.session_state["show_pct"] = False
-
-
 # ═════════════════════════════════════════════════════════════════════════════
 # SECTION 1 — HEADER
-# Left column: SPX price + daily change + mini intraday sparkline
+# Left column: SPX price + daily change (static: ▲ +64.0 (0.87%))
 # ═════════════════════════════════════════════════════════════════════════════
 
 sign = "+" if daily_chg_pts >= 0 else ""
-chg_display = (
-    f"{sign}{daily_chg_pct:.2f}%"
-    if st.session_state["show_pct"]
-    else f"{sign}{daily_chg_pts:.1f} pts"
-)
+chg_display = f"{sign}{daily_chg_pts:.1f} ({sign}{daily_chg_pct:.2f}%)"
 
+# staleness dot retained for h_status display only (no text label)
 if snap_age_secs < 600:
-    staleness = f"🟢 {snap_age_secs:.0f}s ago"
+    _stale_dot = "🟢"
 elif snap_age_secs < 3600:
-    staleness = f"🟡 {snap_age_secs / 60:.0f}m ago — stale"
+    _stale_dot = "🟡"
 else:
-    staleness = f"🔴 {snap_age_secs / 3600:.1f}h ago — collector offline?"
+    _stale_dot = "🔴"
 
 h_spx, h_vix, h_gex, h_status = st.columns([5, 2, 2, 4])
 
 with h_spx:
-    # SPX price + change text
+    # SPX price + static combined change display (▲ +64.0 (0.87%))
     st.markdown(
         f"<h2 style='margin:0;padding:0;color:{day_color};line-height:1.1;'>"
         f"SPX {spx_price:,.2f} "
@@ -557,10 +715,6 @@ with h_spx:
         f"{day_arrow} {chg_display}</span></h2>",
         unsafe_allow_html=True,
     )
-    # Toggle sits directly beneath the change value for quick clicking
-    if st.button("pts ↔ %", key="toggle_chg"):
-        st.session_state["show_pct"] = not st.session_state["show_pct"]
-        st.rerun()
 
 with h_vix:
     vix_str = f"{vix_value:.2f}" if vix_value else "N/A"
@@ -571,7 +725,7 @@ with h_gex:
 
 with h_status:
     st.caption(
-        f"{staleness}  |  {snap_ts_str} UTC  |  "
+        f"{_stale_dot}  {snap_ts_str} UTC  |  "
         f"Refresh: {poll_label}"
     )
     # secs_remaining is anchored to the collector's last DB write (snap_age_secs),
@@ -1427,7 +1581,88 @@ else:
 st.divider()
 
 # ═════════════════════════════════════════════════════════════════════════════
-# SECTION 9 — RESEARCH: IV Ratio vs. Normalized Debit
+# SECTION 9 — TRANSFORMATION OPPORTUNITY SCANNER
+# Evaluates every valid (front, back, symmetric strike pair) in the current
+# snapshot and surfaces the highest Transform Diff candidates.
+# Math is identical to Entry Analysis — single source of truth.
+# ═════════════════════════════════════════════════════════════════════════════
+
+_ts_hdr, _ts_meta = st.columns([3, 2])
+with _ts_hdr:
+    st.subheader("🔭 Transformation Opportunity Scanner")
+with _ts_meta:
+    st.caption(
+        f"Strike window: ATM ±{sc_strike_window} pts  ·  "
+        f"Liquidity filter: ≥{int(sc_liquidity_pct * 100)}% of max vol  ·  "
+        f"Top {sc_max_rows} results"
+    )
+
+with st.spinner("Scanning combinations…"):
+    _ts_df = _compute_transform_scanner(
+        chain_df        = chain_df,
+        spx_price       = spx_price,
+        strike_window   = int(sc_strike_window),
+        liquidity_pct   = float(sc_liquidity_pct),
+        max_rows        = int(sc_max_rows),
+    )
+
+if _ts_df.empty:
+    st.caption(
+        "No combinations found. The collector may not have run yet, or "
+        "all wing strikes are missing from the current chain. "
+        "Try widening the Strike Window or reducing the Liquidity threshold."
+    )
+else:
+    # Highlight rows where Transform Diff >= 5 (transformation signal)
+    _TSCAN_THRESHOLD = 5.0
+
+    def _ts_row_style(row):
+        if row["Transform Diff"] >= _TSCAN_THRESHOLD:
+            return ["background-color: #0d3320; color: #2ecc71"] * len(row)
+        return [""] * len(row)
+
+    _ts_display = _ts_df.style.apply(_ts_row_style, axis=1).format({
+        "Diagonal Mark":  "{:.2f}",
+        "Transform Mark": "{:.2f}",
+        "Transform Diff": "{:+.2f}",
+        "IV Ratio":       lambda v: f"{v:.4f}" if v is not None else "—",
+    })
+
+    _ready_count = int((_ts_df["Transform Diff"] >= _TSCAN_THRESHOLD).sum())
+    if _ready_count:
+        st.markdown(
+            f"<div style='margin-bottom:8px;padding:8px 14px;border-radius:6px;"
+            f"background:#0d3320;border:1px solid #2ecc71;display:inline-block;'>"
+            f"<span style='color:#2ecc71;font-weight:600;'>✓ {_ready_count} combination"
+            f"{'s' if _ready_count > 1 else ''} ready to transform</span>"
+            f"<span style='color:#aaa;font-size:0.85em;'>"
+            f"  ·  Transform Diff ≥ {_TSCAN_THRESHOLD}</span></div>",
+            unsafe_allow_html=True,
+        )
+
+    st.dataframe(
+        _ts_display,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Put Strike":     st.column_config.NumberColumn("Put Strike",     format="%d"),
+            "Call Strike":    st.column_config.NumberColumn("Call Strike",    format="%d"),
+            "Diagonal Mark":  st.column_config.NumberColumn("Diag Mark",      format="%.2f"),
+            "Transform Mark": st.column_config.NumberColumn("Transform Mark", format="%.2f"),
+            "Transform Diff": st.column_config.NumberColumn("Transform Diff", format="%+.2f"),
+            "IV Ratio":       st.column_config.NumberColumn("IV Ratio",       format="%.4f"),
+        },
+    )
+    st.caption(
+        f"{len(_ts_df)} combinations shown  ·  "
+        "Green rows = Transform Diff ≥ 5 (ready to transform)  ·  "
+        "Click any column header to re-sort"
+    )
+
+st.divider()
+
+# ═════════════════════════════════════════════════════════════════════════════
+# SECTION 10 — RESEARCH: IV Ratio vs. Normalized Debit
 # Observation tool placed at bottom — not part of the primary decision flow.
 # ═════════════════════════════════════════════════════════════════════════════
 
