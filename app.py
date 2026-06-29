@@ -1622,7 +1622,7 @@ with tab_scanner:
                     margin=dict(l=4, r=4, t=6, b=20),
                     paper_bgcolor="#0c1421",
                     plot_bgcolor="#0c1421",
-                    xaxis=dict(tickfont=dict(size=9, color="#2f4459"), gridcolor="transparent"),
+                    xaxis=dict(tickfont=dict(size=9, color="#2f4459"), gridcolor="rgba(0,0,0,0)"),
                     yaxis=dict(tickfont=dict(size=9, color="#2f4459"), gridcolor="#0f1e30"),
                     bargap=.3,
                 )
