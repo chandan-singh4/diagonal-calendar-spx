@@ -1416,10 +1416,8 @@ with tab_scanner:
         _kpi1_hl = " kpi-hl" if _best_diff >= _TSCAN_THRESHOLD else ""
         _kpi2_hl = " kpi-hl" if _ready_count > 0 else ""
 
-        snap_ts_et = snap_ts_str[11:16] + " UTC"
-
         kpi_html = f"""
-<div class="kpi-grid">
+<div class="kpi-grid" style="grid-template-columns:repeat(4,1fr)">
   <div class="kpi-card{_kpi2_hl}">
     <span class="kpi-icon">📡</span>
     <span class="kpi-v c-blue">{len(_ts_df):,}</span>
@@ -1441,19 +1439,7 @@ with tab_scanner:
     <span class="kpi-v c-amber">{_avg_ratio_str}</span>
     <span class="kpi-l">Avg IV Ratio</span>
   </div>
-  <div class="kpi-card">
-    <span class="kpi-icon">🕐</span>
-    <span class="kpi-v" style="font-size:1.1rem;letter-spacing:-.01em">{snap_ts_et}</span>
-    <span class="kpi-l">Last Updated</span>
-  </div>
-  <div class="kpi-card">
-    <span class="kpi-icon">🔄</span>
-    <span class="kpi-v c-blue">{poll_interval}s</span>
-    <span class="kpi-l">Auto Refresh</span>
-    <span class="kpi-sub">{poll_label}</span>
-  </div>
 </div>"""
-        st.markdown(kpi_html, unsafe_allow_html=True)
 
     # ── Ready badge ───────────────────────────────────────────────────────────
     if not _ts_df.empty and _ready_count > 0:
@@ -1473,165 +1459,47 @@ with tab_scanner:
             "or Liquidity threshold in the sidebar."
         )
     else:
-        _tbl_col, _side_col = st.columns([4, 1.5])
+        st.markdown(
+            '<div class="sh">'
+            '<span class="sh-ico">📋</span>'
+            '<span class="sh-ttl">Transformation Opportunities</span>'
+            '<span class="sh-bdg">Sorted by Diff ↓</span>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
 
-        with _tbl_col:
-            st.markdown(
-                '<div class="sh">'
-                '<span class="sh-ico">📋</span>'
-                '<span class="sh-ttl">Transformation Opportunities</span>'
-                '<span class="sh-bdg">Sorted by Diff ↓</span>'
-                '</div>',
-                unsafe_allow_html=True,
-            )
+        def _ts_row_style(row):
+            if row["Transform Diff"] >= _TSCAN_THRESHOLD:
+                return ["background-color: #0a1d14; color: #10d4a3"] * len(row)
+            elif row["Transform Diff"] < 0:
+                return ["color: #f05252"] * len(row)
+            return [""] * len(row)
 
-            def _ts_row_style(row):
-                if row["Transform Diff"] >= _TSCAN_THRESHOLD:
-                    return ["background-color: #0a1d14; color: #10d4a3"] * len(row)
-                elif row["Transform Diff"] < 0:
-                    return ["color: #f05252"] * len(row)
-                return [""] * len(row)
+        _ts_display = _ts_df.style.apply(_ts_row_style, axis=1).format({
+            "Diagonal Mark":  "{:.2f}",
+            "Transform Mark": "{:.2f}",
+            "Transform Diff": "{:+.2f}",
+            "IV Ratio":       lambda v: f"{v:.4f}" if v is not None else "—",
+        })
 
-            _ts_display = _ts_df.style.apply(_ts_row_style, axis=1).format({
-                "Diagonal Mark":  "{:.2f}",
-                "Transform Mark": "{:.2f}",
-                "Transform Diff": "{:+.2f}",
-                "IV Ratio":       lambda v: f"{v:.4f}" if v is not None else "—",
-            })
-
-            st.dataframe(
-                _ts_display,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Put Strike":     st.column_config.NumberColumn("Put Strike",     format="%d"),
-                    "Call Strike":    st.column_config.NumberColumn("Call Strike",    format="%d"),
-                    "Diagonal Mark":  st.column_config.NumberColumn("Diag Mark",      format="%.2f"),
-                    "Transform Mark": st.column_config.NumberColumn("Transform Mark", format="%.2f"),
-                    "Transform Diff": st.column_config.NumberColumn("Transform Diff", format="%+.2f"),
-                    "IV Ratio":       st.column_config.NumberColumn("IV Ratio",       format="%.4f"),
-                },
-            )
-            st.caption(
-                f"{len(_ts_df)} combinations  ·  "
-                "Green = ready to transform (≥ 5)  ·  "
-                "Click any header to re-sort"
-            )
-
-        with _side_col:
-
-            # Market Snapshot
-            _chg_cls = "p" if daily_chg_pts >= 0 else "n"
-            _vix_chg_cls = ""  # VIX delta not tracked intraday here
-            st.markdown(
-                f"""<div class="spanel">
-  <div class="spanel-ttl">Market Snapshot</div>
-  <div class="mkt-grid">
-    <div class="mkt-cell">
-      <span class="mc-l">SPX</span>
-      <span class="mc-v">{spx_price:,.1f}</span>
-      <span class="mc-c {_chg_cls}">{day_arrow} {chg_display}</span>
-    </div>
-    <div class="mkt-cell">
-      <span class="mc-l">VIX</span>
-      <span class="mc-v">{vix_str}</span>
-      <span class="mc-c" style="color:var(--text-3)">implied vol</span>
-    </div>
-    <div class="mkt-cell">
-      <span class="mc-l">IV Ratio</span>
-      <span class="mc-v">{ts_now.ratio:.4f}</span>
-      <span class="mc-c" style="color:var(--text-3)">F/B ATM</span>
-    </div>
-    <div class="mkt-cell">
-      <span class="mc-l">Max |GEX|</span>
-      <span class="mc-v" style="font-size:.78rem">{gex_label}</span>
-      <span class="mc-c" style="color:var(--text-3)">strike</span>
-    </div>
-  </div>
-</div>""",
-                unsafe_allow_html=True,
-            )
-
-            # IV Ratio snapshot donut
-            if "IV Ratio" in _ts_df.columns:
-                _iv_ratios = _ts_df["IV Ratio"].dropna()
-                if len(_iv_ratios) > 0:
-                    _gt15 = int((_iv_ratios >= 1.5).sum())
-                    _mid  = int(((_iv_ratios >= 1.2) & (_iv_ratios < 1.5)).sum())
-                    _lt12 = int((_iv_ratios < 1.2).sum())
-                    _total_r = max(_gt15 + _mid + _lt12, 1)
-                    fig_donut = go.Figure(go.Pie(
-                        labels=["≥ 1.5", "1.2 – 1.5", "< 1.2"],
-                        values=[_gt15, _mid, _lt12],
-                        hole=.62,
-                        marker=dict(colors=["#10d4a3", "#5b9cff", "#f05252"],
-                                    line=dict(color="#060b12", width=2)),
-                        textinfo="none",
-                        hovertemplate="%{label}: %{value}<extra></extra>",
-                        sort=False,
-                    ))
-                    fig_donut.add_annotation(
-                        text=f"<b>{_avg_iv_ratio:.2f}</b>" if _avg_iv_ratio else "",
-                        x=.5, y=.5, xref="paper", yref="paper",
-                        showarrow=False,
-                        font=dict(size=15, color="#dde6f1", family="JetBrains Mono"),
-                    )
-                    fig_donut.update_layout(
-                        height=170,
-                        margin=dict(l=4, r=4, t=4, b=4),
-                        paper_bgcolor="#0c1421",
-                        plot_bgcolor="#0c1421",
-                        showlegend=False,
-                        font=dict(family="Inter", color="#6d8fa8", size=10),
-                    )
-                    st.markdown('<div class="spanel"><div class="spanel-ttl">IV Ratio Snapshot</div>',
-                                unsafe_allow_html=True)
-                    st.plotly_chart(fig_donut, use_container_width=True,
-                                    config={"displayModeBar": False})
-                    st.markdown(
-                        f"<div style='font-size:.64rem;color:#2f4459;margin:-8px 0 4px;'>"
-                        f"<span style='color:#10d4a3'>■</span> ≥1.5: {_gt15} &nbsp;"
-                        f"<span style='color:#5b9cff'>■</span> 1.2–1.5: {_mid} &nbsp;"
-                        f"<span style='color:#f05252'>■</span> &lt;1.2: {_lt12}"
-                        f"</div></div>",
-                        unsafe_allow_html=True,
-                    )
-
-            # Diff distribution bar chart
-            if "Transform Diff" in _ts_df.columns and len(_ts_df) > 0:
-                _diffs = _ts_df["Transform Diff"]
-                _bins  = [
-                    ("≤ 0",   int((_diffs <= 0).sum()),           "#f05252"),
-                    ("0–2",   int(((_diffs > 0)  & (_diffs <= 2)).sum()), "#6d8fa8"),
-                    ("2–5",   int(((_diffs > 2)  & (_diffs <= 5)).sum()), "#5b9cff"),
-                    ("5–10",  int(((_diffs > 5)  & (_diffs <= 10)).sum()), "#10d4a3"),
-                    ("10–15", int(((_diffs > 10) & (_diffs <= 15)).sum()), "#10d4a3"),
-                    ("15+",   int((_diffs > 15).sum()),           "#10d4a3"),
-                ]
-                _bl = [b[0] for b in _bins]
-                _bv = [b[1] for b in _bins]
-                _bc = [b[2] for b in _bins]
-
-                fig_bar = go.Figure(go.Bar(
-                    x=_bl, y=_bv,
-                    marker=dict(color=_bc, line=dict(width=0)),
-                    hovertemplate="%{x}: %{y}<extra></extra>",
-                ))
-                fig_bar.update_layout(
-                    height=150,
-                    margin=dict(l=4, r=4, t=6, b=20),
-                    paper_bgcolor="#0c1421",
-                    plot_bgcolor="#0c1421",
-                    xaxis=dict(tickfont=dict(size=9, color="#2f4459"), gridcolor="rgba(0,0,0,0)"),
-                    yaxis=dict(tickfont=dict(size=9, color="#2f4459"), gridcolor="#0f1e30"),
-                    bargap=.3,
-                )
-                st.markdown('<div class="spanel"><div class="spanel-ttl">Difference Distribution</div>',
-                            unsafe_allow_html=True)
-                st.plotly_chart(fig_bar, use_container_width=True,
-                                config={"displayModeBar": False})
-                st.markdown("</div>", unsafe_allow_html=True)
-
+        st.dataframe(
+            _ts_display,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Put Strike":     st.column_config.NumberColumn("Put Strike",     format="%d"),
+                "Call Strike":    st.column_config.NumberColumn("Call Strike",    format="%d"),
+                "Diagonal Mark":  st.column_config.NumberColumn("Diag Mark",      format="%.2f"),
+                "Transform Mark": st.column_config.NumberColumn("Transform Mark", format="%.2f"),
+                "Transform Diff": st.column_config.NumberColumn("Transform Diff", format="%+.2f"),
+                "IV Ratio":       st.column_config.NumberColumn("IV Ratio",       format="%.4f"),
+            },
+        )
+        st.caption(
+            f"{len(_ts_df)} combinations  ·  "
+            "Green = ready to transform (≥ 5)  ·  "
+            "Click any header to re-sort"
+        )
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAB 2 — ENTRY ANALYSIS
