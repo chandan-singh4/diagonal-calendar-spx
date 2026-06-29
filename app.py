@@ -941,22 +941,57 @@ with c2:
         index=min(1, len(available_expiries) - 1),
         format_func=_exp_label, key="back_expiry_select",
     )
+
+# Build strike lists from actual chain data for the selected expiry pair.
+# Only strikes present in BOTH front and back expiry are offered — a
+# diagonal requires the same strike in both legs, so showing strikes that
+# exist in only one expiry would guarantee a broken calculation.
+_put_strikes = sorted(set(
+    chain_df[(chain_df["expiry"] == front_expiry) & (chain_df["side"] == "PUT")]["strike"].unique()
+) & set(
+    chain_df[(chain_df["expiry"] == back_expiry)  & (chain_df["side"] == "PUT")]["strike"].unique()
+))
+_call_strikes = sorted(set(
+    chain_df[(chain_df["expiry"] == front_expiry) & (chain_df["side"] == "CALL")]["strike"].unique()
+) & set(
+    chain_df[(chain_df["expiry"] == back_expiry)  & (chain_df["side"] == "CALL")]["strike"].unique()
+))
+
+def _nearest_idx(strikes: list, target: float) -> int:
+    """Return the index of the strike closest to target, or 0 if list is empty."""
+    if not strikes:
+        return 0
+    return min(range(len(strikes)), key=lambda i: abs(strikes[i] - target))
+
 with c3:
-    default_put = float(round((spx_price - 100) / 5) * 5)
-    put_strike = st.number_input(
-        "Put Strike", min_value=1000.0, max_value=15000.0,
-        value=default_put, step=5.0, format="%.0f",
-        key="put_strike_input",
-        help="Sell front PUT / Buy back PUT",
-    )
+    if _put_strikes:
+        _put_default_idx = _nearest_idx(_put_strikes, spx_price - 100)
+        put_strike = st.selectbox(
+            "Put Strike",
+            options=_put_strikes,
+            index=_put_default_idx,
+            format_func=lambda s: f"{int(s):,}",
+            key="put_strike_select",
+            help="Only strikes present in both front and back expiry are shown.",
+        )
+    else:
+        st.warning("No PUT strikes available for this expiry pair.")
+        put_strike = 0.0
+
 with c4:
-    default_call = float(round(spx_price / 5) * 5)
-    call_strike = st.number_input(
-        "Call Strike", min_value=1000.0, max_value=15000.0,
-        value=default_call, step=5.0, format="%.0f",
-        key="call_strike_input",
-        help="Sell front CALL / Buy back CALL",
-    )
+    if _call_strikes:
+        _call_default_idx = _nearest_idx(_call_strikes, spx_price)
+        call_strike = st.selectbox(
+            "Call Strike",
+            options=_call_strikes,
+            index=_call_default_idx,
+            format_func=lambda s: f"{int(s):,}",
+            key="call_strike_select",
+            help="Only strikes present in both front and back expiry are shown.",
+        )
+    else:
+        st.warning("No CALL strikes available for this expiry pair.")
+        call_strike = 0.0
 
 if back_expiry <= front_expiry:
     st.warning("Back expiry ≤ Front — unusual for a diagonal, shown anyway.")
