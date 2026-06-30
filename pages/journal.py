@@ -160,7 +160,74 @@ def get_close_type(t) -> str | None:
         return None
 
 
-def total_fees(t) -> float:
+def row_get(row, key, default=None):
+    """
+    sqlite3.Row objects do not have a .get() method.
+    This helper mirrors dict.get() behaviour and is safe against
+    both missing columns (legacy schema rows) and None values.
+    """
+    try:
+        return row[key] if key in row.keys() else default
+    except Exception:
+        return default
+
+
+def ic_expiry_pnl_per_share(spx: float, lp: float, sp: float,
+                              sc: float, lc: float) -> float:
+    """
+    Per-share IC assignment cost at expiration. Always 0 or negative —
+    the credit was already captured in profit_locked_in at transformation
+    time, so this represents ONLY the assignment liability.
+
+    IC structure:  lp (long put) < sp (short put) < sc (short call) < lc (long call)
+
+    Regions:
+      spx <= lp      → max put-wing loss:  −(sp − lp)
+      lp < spx < sp  → partial put loss:   −(sp − spx)
+      sp <= spx <= sc → both shorts worthless: 0  (full locked profit)
+      sc < spx < lc  → partial call loss:  −(spx − sc)
+      spx >= lc      → max call-wing loss: −(lc − sc)
+    """
+    if spx <= lp:
+        return -(sp - lp)
+    elif spx < sp:
+        return -(sp - spx)
+    elif spx <= sc:
+        return 0.0
+    elif spx < lc:
+        return -(spx - sc)
+    else:
+        return -(lc - sc)
+
+
+def auto_final_pl(t, spx_at_expiry: float) -> float | None:
+    """
+    Full lifecycle P&L per contract for a Transformed trade at expiration.
+
+    Two components:
+      1. Transformation gain:  profit_locked_in × 100 × contracts
+         (already realized at transformation — cannot be lost regardless of IC outcome)
+      2. IC expiry adjustment: per-share assignment cost × 100 × contracts
+         (0 when SPX between shorts; negative when assignment occurs)
+
+    Returns None when required data is missing (Open trades, missing IC strikes,
+    zero SPX price) so the caller can fall back to manual entry.
+    """
+    if t["status"] != "Transformed":
+        return None
+    try:
+        locked     = float(t["profit_locked_in"] or 0.0)
+        contracts  = int(t["contracts"])
+        lp = float(t["ic_long_put"]);  sp = float(t["ic_short_put"])
+        sc = float(t["ic_short_call"]); lc = float(t["ic_long_call"])
+    except (TypeError, KeyError):
+        return None
+    if spx_at_expiry <= 0:
+        return None
+    adj = ic_expiry_pnl_per_share(spx_at_expiry, lp, sp, sc, lc)
+    return (locked + adj) * 100 * contracts
+
+
     """Sum of all commission/fee fields across the trade lifecycle."""
     entry = float(t["commissions"] or 0.0)
     tf_comm = 0.0
@@ -997,13 +1064,60 @@ if page_mode == "📊 Overview":
                     c2.metric("SPX at Expiry",      f"{t['spx_at_expiry']:.2f}" if t["spx_at_expiry"] else "—")
                     c3.metric("Final Realized P&L", fmt_pl(t["final_pl"]))
                     c4.metric("Outcome",            t["outcome"] or "—")
-                    if t.get("expired_inside_wings") is not None:
+                    # row_get() used here because expired_inside_wings and
+                    # expired_between_shorts were added after initial schema —
+                    # legacy sqlite3.Row objects don't have .get().
+                    _eiw = row_get(t, "expired_inside_wings")
+                    _ebs = row_get(t, "expired_between_shorts")
+                    if _eiw is not None:
                         c1,c2 = st.columns(2)
-                        c1.metric("Inside Wings",   bool_icon(t["expired_inside_wings"]))
-                        c2.metric("Between Shorts", bool_icon(t["expired_between_shorts"]))
+                        c1.metric("Inside Wings",   bool_icon(_eiw))
+                        c2.metric("Between Shorts", bool_icon(_ebs))
                     _tf = total_fees(t)
                     if t["final_pl"] is not None and _tf > 0:
                         st.metric("Net P&L (after fees)", fmt_pl(t["final_pl"] - _tf))
+
+                    # ── P&L lifecycle breakdown (transformed trades only) ────
+                    if t["status"] == "Expired" and row_get(t, "profit_locked_in") is not None and t["spx_at_expiry"]:
+                        spx_ex = float(t["spx_at_expiry"])
+                        contracts = int(t["contracts"])
+                        locked = float(t["profit_locked_in"])
+                        locked_ct = locked * 100 * contracts
+                        try:
+                            adj_sh = ic_expiry_pnl_per_share(
+                                spx_ex,
+                                float(t["ic_long_put"]), float(t["ic_short_put"]),
+                                float(t["ic_short_call"]), float(t["ic_long_call"]),
+                            )
+                        except (TypeError, ValueError):
+                            adj_sh = None
+                        if adj_sh is not None:
+                            adj_ct = adj_sh * 100 * contracts
+                            st.markdown(
+                                "<div style='background:#1a2035;border:1px solid #2a3f56;"
+                                "border-radius:8px;padding:12px 16px;margin-top:8px'>"
+                                "<div style='color:#64748b;font-size:11px;text-transform:uppercase;"
+                                "letter-spacing:.08em;margin-bottom:8px'>P&L Lifecycle Breakdown</div>"
+                                "<table style='width:100%;font-family:monospace;font-size:13px;"
+                                "border-collapse:collapse'>"
+                                f"<tr><td style='color:#94a3b8;padding:3px 0'>1. Transformation gain</td>"
+                                f"<td style='text-align:right;color:{'#4ade80' if locked_ct >= 0 else '#f87171'}'>"
+                                f"{fmt_pl(locked_ct)}</td></tr>"
+                                f"<tr><td style='color:#94a3b8;padding:3px 0'>2. IC expiry adjustment"
+                                f"&nbsp;<span style='color:#64748b;font-size:11px'>"
+                                f"(SPX {spx_ex:.0f} vs shorts {t['ic_short_put']:.0f}–{t['ic_short_call']:.0f})"
+                                f"</span></td>"
+                                f"<td style='text-align:right;color:{'#4ade80' if adj_ct >= 0 else '#f87171'}'>"
+                                f"{fmt_pl(adj_ct)}</td></tr>"
+                                "<tr><td colspan='2'><hr style='border:none;border-top:1px solid #2a3f56;"
+                                "margin:6px 0'></td></tr>"
+                                f"<tr><td style='color:#e2e8f0;font-weight:600;padding:3px 0'>Total Realized P&L</td>"
+                                f"<td style='text-align:right;font-weight:600;"
+                                f"color:{'#4ade80' if (t['final_pl'] or 0) >= 0 else '#f87171'}'>"
+                                f"{fmt_pl(t['final_pl'])}</td></tr>"
+                                "</table></div>",
+                                unsafe_allow_html=True,
+                            )
 
             # ── Tab 4: Notes ──────────────────────────────────────────────
             with tabs[4]:
@@ -1429,31 +1543,112 @@ elif page_mode == "⏰ Mark Expired":
         chosen_id = st.selectbox("Select Active Trade", list(trade_map.keys()))
         base = trade_map[chosen_id]
         ic_exp = base["ic_expiry_date"]
-        spx_s  = db.get_eod_spx(config.DB_PATH, ic_exp) if ic_exp else None
+        is_transformed = base["status"] == "Transformed" and base["ic_short_call"] is not None
+
+        spx_s = db.get_eod_spx(config.DB_PATH, ic_exp) if ic_exp else None
         if spx_s:
             st.info(f"📈 Last recorded SPX on IC expiry date ({ic_exp}): **{spx_s:.2f}**")
+
         with st.form("expire_form"):
-            c1,c2,c3 = st.columns(3)
-            result_date = c1.date_input("Expiration Date", value=date.fromisoformat(ic_exp) if ic_exp else date.today())
-            spx_expiry  = c2.number_input("SPX at Expiry", min_value=0.0, step=0.01, value=float(spx_s) if spx_s else 0.0)
-            final_pl    = c3.number_input("Final Realized P&L / contract ($)", step=1.0)
+            c1, c2 = st.columns(2)
+            result_date = c1.date_input(
+                "Expiration Date",
+                value=date.fromisoformat(ic_exp) if ic_exp else date.today(),
+            )
+            spx_expiry = c2.number_input(
+                "SPX at Expiry",
+                min_value=0.0, step=0.01,
+                value=float(spx_s) if spx_s else 0.0,
+            )
+
+            # ── Outcome detection ─────────────────────────────────────────
             outcome = "—"; exp_inside = exp_shorts = None
-            if spx_expiry > 0 and base["ic_short_call"]:
-                sc,lc,sp,lp = base["ic_short_call"],base["ic_long_call"],base["ic_short_put"],base["ic_long_put"]
-                exp_inside = 1 if (spx_expiry>lp and spx_expiry<lc) else 0
-                exp_shorts = 1 if (spx_expiry>=sp and spx_expiry<=sc) else 0
-                outcome = ("Maximum Profit" if exp_shorts else
-                           ("Minimum Profit (Risk-Free)" if (not exp_inside and base["ic_risk_free"]) else
-                            ("Maximum Loss" if not exp_inside else "Partial Profit")))
-            st.markdown(f"**Auto-detected:** `{outcome}` · Wings: {bool_icon(exp_inside)} · Shorts: {bool_icon(exp_shorts)}")
+            adj_sh = None
+            if spx_expiry > 0 and is_transformed:
+                sc = float(base["ic_short_call"]); lc = float(base["ic_long_call"])
+                sp = float(base["ic_short_put"]);  lp = float(base["ic_long_put"])
+                exp_inside = 1 if (spx_expiry > lp and spx_expiry < lc) else 0
+                exp_shorts = 1 if (spx_expiry >= sp and spx_expiry <= sc) else 0
+                outcome = (
+                    "Maximum Profit" if exp_shorts else
+                    "Minimum Profit (Risk-Free)" if (not exp_inside and base["ic_risk_free"]) else
+                    "Maximum Loss" if not exp_inside else
+                    "Partial Profit"
+                )
+                adj_sh = ic_expiry_pnl_per_share(spx_expiry, lp, sp, sc, lc)
+
+            st.markdown(
+                f"**Auto-detected:** `{outcome}` · "
+                f"Wings: {bool_icon(exp_inside)} · Shorts: {bool_icon(exp_shorts)}"
+            )
+
+            # ── Auto-calculated P&L breakdown (Transformed trades only) ──
+            _auto_pl = None
+            if is_transformed and spx_expiry > 0 and adj_sh is not None:
+                locked     = float(base["profit_locked_in"] or 0.0)
+                contracts  = int(base["contracts"])
+                locked_ct  = locked * 100 * contracts
+                adj_ct     = adj_sh * 100 * contracts
+                _auto_pl   = locked_ct + adj_ct
+
+                def _clr(v):
+                    return "#4ade80" if v >= 0 else "#f87171"
+
+                st.markdown(
+                    "<div style='background:#0f1d2e;border:1px solid #1e3a5f;"
+                    "border-radius:8px;padding:12px 16px;margin:10px 0'>"
+                    "<div style='color:#64748b;font-size:11px;text-transform:uppercase;"
+                    "letter-spacing:.08em;margin-bottom:8px'>Auto-Calculated P&L</div>"
+                    "<table style='width:100%;font-family:monospace;font-size:13px;"
+                    "border-collapse:collapse'>"
+                    f"<tr><td style='color:#94a3b8;padding:3px 0'>① Transformation gain&nbsp;"
+                    f"<span style='color:#64748b;font-size:11px'>"
+                    f"({locked:+.2f}/sh × 100 × {contracts} ct)</span></td>"
+                    f"<td style='text-align:right;color:{_clr(locked_ct)};font-weight:600'>"
+                    f"{fmt_pl(locked_ct)}</td></tr>"
+                    f"<tr><td style='color:#94a3b8;padding:3px 0'>② IC expiry adjustment&nbsp;"
+                    f"<span style='color:#64748b;font-size:11px'>"
+                    f"(SPX {spx_expiry:.0f} → {adj_sh:+.2f}/sh)</span></td>"
+                    f"<td style='text-align:right;color:{_clr(adj_ct)}'>"
+                    f"{fmt_pl(adj_ct)}</td></tr>"
+                    "<tr><td colspan='2'><hr style='border:none;border-top:1px solid #1e3a5f;"
+                    "margin:5px 0'></td></tr>"
+                    f"<tr><td style='color:#e2e8f0;font-weight:600;padding:3px 0'>"
+                    f"Total Realized P&L / contract</td>"
+                    f"<td style='text-align:right;font-weight:700;font-size:15px;"
+                    f"color:{_clr(_auto_pl)}'>{fmt_pl(_auto_pl)}</td></tr>"
+                    "</table></div>",
+                    unsafe_allow_html=True,
+                )
+
+            # ── P&L input — pre-filled but always editable ───────────────
+            final_pl = st.number_input(
+                "Final Realized P&L / contract ($)"
+                + (" — auto-calculated above, override if needed" if _auto_pl is not None else ""),
+                value=float(round(_auto_pl)) if _auto_pl is not None else 0.0,
+                step=1.0,
+            )
+
+            if not is_transformed:
+                st.caption(
+                    "Open trade (no IC data) — enter the total realized P&L manually: "
+                    "net proceeds minus original entry debit, times 100, times contracts."
+                )
+
             if st.form_submit_button("⏰ Confirm Expiry", use_container_width=True):
-                db.update_trade(config.DB_PATH, chosen_id, status="Expired",
-                                result_date=result_date.isoformat(),
-                                spx_at_expiry=spx_expiry if spx_expiry>0 else None,
-                                final_pl=final_pl, expired_inside_wings=exp_inside,
-                                expired_between_shorts=exp_shorts, outcome=outcome)
+                db.update_trade(
+                    config.DB_PATH, chosen_id,
+                    status="Expired",
+                    result_date=result_date.isoformat(),
+                    spx_at_expiry=spx_expiry if spx_expiry > 0 else None,
+                    final_pl=final_pl,
+                    expired_inside_wings=exp_inside,
+                    expired_between_shorts=exp_shorts,
+                    outcome=outcome,
+                )
                 st.session_state["_success_msg"] = f"{chosen_id} marked Expired. Outcome: {outcome}"
                 st.rerun()
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ── EDIT NOTES
