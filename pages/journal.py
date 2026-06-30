@@ -172,6 +172,18 @@ def row_get(row, key, default=None):
         return default
 
 
+def total_fees(t) -> float:
+    """Sum of all commission/fee fields across the trade lifecycle."""
+    entry = float(t["commissions"] or 0.0)
+    tf_comm = 0.0
+    try:
+        if "transform_commissions" in t.keys():
+            tf_comm = float(t["transform_commissions"] or 0.0)
+    except Exception:
+        pass
+    return entry + tf_comm
+
+
 def ic_expiry_pnl_per_share(spx: float, lp: float, sp: float,
                               sc: float, lc: float) -> float:
     """
