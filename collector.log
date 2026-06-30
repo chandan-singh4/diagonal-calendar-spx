@@ -667,3 +667,6 @@ For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/St
 2026-06-30 14:00:23  WARNING   2 SD expected move (±668 pts, IV=16.1%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
 2026-06-30 14:05:18  WARNING   2 SD expected move (±646 pts, IV=15.6%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
 2026-06-30 14:10:19  WARNING   2 SD expected move (±654 pts, IV=15.8%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-30 14:15:18  WARNING   2 SD expected move (±619 pts, IV=14.9%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-30 14:20:19  WARNING   2 SD expected move (±597 pts, IV=14.4%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.
+2026-06-30 14:25:19  WARNING   2 SD expected move (±605 pts, IV=14.6%, DTE=28) exceeds configured strike window (±300 pts). Consider widening STRIKE_FETCH_WIDTH_POINTS in config.py.

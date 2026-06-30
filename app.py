@@ -874,6 +874,7 @@ def _banded_ratio_traces(x, y) -> list:
     return traces
 
 
+@st.cache_data(ttl=55, show_spinner=False)
 def _load_atm_hist(expiry: str, days: int) -> pd.DataFrame:
     rows = db.get_atm_iv_history(config.DB_PATH, expiry, days)
     if not rows:
@@ -889,6 +890,7 @@ def _load_atm_hist(expiry: str, days: int) -> pd.DataFrame:
     return df
 
 
+@st.cache_data(ttl=55, show_spinner=False)
 def _load_atm_hist_fb(expiry: str, days: int) -> pd.DataFrame:
     df = _load_atm_hist(expiry, days)
     if df.empty and days == 1:
@@ -903,6 +905,7 @@ def _load_atm_hist_fb(expiry: str, days: int) -> pd.DataFrame:
 # Helper — per-contract IV history
 # ─────────────────────────────────────────────────────────────────────────────
 
+@st.cache_data(ttl=55, show_spinner=False)
 def _load_contract_hist(expiry: str, strike: float,
                          side: str, days: int) -> pd.DataFrame:
     right_char = "C" if side == "CALL" else "P"
@@ -928,9 +931,11 @@ def _load_contract_hist(expiry: str, strike: float,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+@st.cache_data(show_spinner=False)
 def _compute_transform_scanner(
-    chain_df: pd.DataFrame,
+    _chain_df: pd.DataFrame,
     spx_price: float,
+    snapshot_id: int,
     put_offset: int = 0,
     call_offset: int = 0,
     max_rows: int = 50,
@@ -944,9 +949,17 @@ def _compute_transform_scanner(
         Diagonal Mark   = (back_call + back_put) - (front_call + front_put)
         Transform Mark  = (back_call + back_put) - (front_wing_call + front_wing_put)
         Transform Diff  = Transform Mark - Diagonal Mark
+
+    Cached on (snapshot_id, put_offset, call_offset, max_rows) — the leading
+    underscore on _chain_df tells Streamlit to skip hashing the DataFrame
+    itself (expensive) and rely on snapshot_id as the real cache key, since
+    snapshot_id fully determines chain_df's contents. Result only gets
+    recomputed when a new snapshot actually lands, not on every tab click,
+    widget interaction, or color-picker change.
     """
     import bisect
 
+    chain_df = _chain_df
     if chain_df.empty:
         return pd.DataFrame()
 
@@ -1097,6 +1110,7 @@ _MC_HISTORY_CAP   = 20    # max candidates per tier to run Phase B history on
 def _scan_all_offsets(
     chain_df: pd.DataFrame,
     spx_price: float,
+    snapshot_id: int,
     offsets: list[int] = _SWEEP_OFFSETS,
     max_rows_per_offset: int = 500,
 ) -> pd.DataFrame:
@@ -1114,7 +1128,7 @@ def _scan_all_offsets(
     frames = []
     for o in offsets:
         df = _compute_transform_scanner(
-            chain_df=chain_df, spx_price=spx_price,
+            _chain_df=chain_df, spx_price=spx_price, snapshot_id=snapshot_id,
             put_offset=o, call_offset=o, max_rows=max_rows_per_offset,
         )
         if not df.empty:
@@ -1128,6 +1142,7 @@ def _scan_all_offsets(
     return combined.sort_values("Transform Diff", ascending=False).reset_index(drop=True)
 
 
+@st.cache_data(ttl=60, show_spinner=False)
 def _candidate_signals(front_raw: str, back_raw: str,
                         put_strike: float, call_strike: float,
                         days: int = 1) -> dict | None:
@@ -1203,18 +1218,55 @@ def _candidate_signals(front_raw: str, back_raw: str,
     return dict(duration=duration, eta_minutes=eta_minutes, spark=spark, trend_up=trend_up)
 
 
-def _run_mission_control(chain_df: pd.DataFrame, spx_price: float,
-                          snapshot_id: int) -> dict:
+def _rank_for_panel(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Orchestrates Phase A + Phase B and the cross-refresh "New" diff.
-    Returns a dict consumed by both the persistent Attention Strip and the
-    full Mission Control section on the Scanner tab — computed once per
-    script run regardless of which tab is active, since the strip is global.
+    Tiered ranking for the Mission Control panel — deliberately NOT a single
+    blended score (composite 0-100 scores were already rejected for this
+    project; this stays as a transparent, inspectable multi-key sort):
+
+      Tier 1 — asymmetric strikes (Put Strike != Call Strike) bubble above
+               symmetric/ATM ones. An offset=0 sweep produces put==call,
+               which is a degenerate straddle, not this trader's actual
+               strangle-diagonal structure — those aren't false positives,
+               just real combos that don't represent a tradeable setup here.
+      Tier 2 — Transform Diff (the gap), descending — the core economic
+               value of the opportunity.
+
+    Duration Active and Trend stay visible on every card as supporting
+    context rather than folded into this sort, so the trader can apply
+    their own judgment rather than trust a hidden weighting.
     """
-    all_combos = _scan_all_offsets(chain_df, spx_price)
+    if df.empty:
+        return df
+    d = df.copy()
+    d["_asymmetric"] = d["Put Strike"] != d["Call Strike"]
+    return (
+        d.sort_values(["_asymmetric", "Transform Diff"], ascending=[False, False])
+        .drop(columns="_asymmetric")
+        .reset_index(drop=True)
+    )
+
+
+def _card_key(card: dict) -> str:
+    return f"{card['front_raw']}|{card['back_raw']}|{int(card['put_strike'])}|{int(card['call_strike'])}"
+
+
+@st.cache_data(show_spinner="Scanning transform opportunities…")
+def _compute_mc_core(_chain_df: pd.DataFrame, spx_price: float,
+                      snapshot_id: int) -> dict:
+    """
+    Phase A + Phase B, cached as a unit on snapshot_id. No session_state
+    access here — cached functions skip their body entirely on a cache hit,
+    so any session_state writes would silently stop happening the moment
+    this starts returning cached results. The "New" diff (which needs
+    session_state) is handled by the uncached _run_mission_control wrapper
+    below, outside this cache boundary.
+    """
+    chain_df = _chain_df
+    all_combos = _scan_all_offsets(chain_df, spx_price, snapshot_id)
     if all_combos.empty:
-        return dict(eligible=[], approaching=[], new_keys=set(),
-                     n_eligible=0, n_approaching=0, n_new=0, best=None)
+        return dict(eligible_cards=[], approaching_cards=[], likely_next=[],
+                     n_eligible=0, n_approaching=0)
 
     eligible_df    = all_combos[all_combos["Transform Diff"] >= _TSCAN_THRESHOLD].copy()
     approaching_df = all_combos[
@@ -1222,25 +1274,14 @@ def _run_mission_control(chain_df: pd.DataFrame, spx_price: float,
         & (all_combos["Transform Diff"] < _TSCAN_THRESHOLD)
     ].copy()
 
-    def _key(row) -> str:
-        fr = row["Front Expiry"].split(" ")[0]
-        bk = row["Back Expiry"].split(" ")[0]
-        return f"{fr}|{bk}|{int(row['Put Strike'])}|{int(row['Call Strike'])}"
+    n_eligible    = len(eligible_df)
+    n_approaching = len(approaching_df)
 
-    current_keys = set(eligible_df.apply(_key, axis=1)) if not eligible_df.empty else set()
-
-    # Only advance the "previous" comparison set when a NEW snapshot has
-    # actually landed — otherwise every widget-triggered rerun within the
-    # same snapshot would keep relabeling things as "new."
-    _prev_snap_id = st.session_state.get("mc_prev_snapshot_id")
-    if _prev_snap_id != snapshot_id:
-        _prev_keys = st.session_state.get("mc_prev_eligible_keys", set())
-        new_keys = current_keys - _prev_keys
-        st.session_state["mc_prev_eligible_keys"] = current_keys
-        st.session_state["mc_prev_snapshot_id"]   = snapshot_id
-        st.session_state["mc_new_keys"]           = new_keys
-    else:
-        new_keys = st.session_state.get("mc_new_keys", set())
+    # Rank for the panel BEFORE capping — otherwise asymmetric opportunities
+    # sitting just below the top-by-raw-gap rows would get starved out of
+    # the (necessarily limited, for cost reasons) Phase B history treatment.
+    eligible_df    = _rank_for_panel(eligible_df)
+    approaching_df = _rank_for_panel(approaching_df)
 
     def _build_cards(df: pd.DataFrame, cap: int) -> list[dict]:
         cards = []
@@ -1256,7 +1297,6 @@ def _run_mission_control(chain_df: pd.DataFrame, spx_price: float,
                 put_strike=put_s, call_strike=call_s,
                 gap=float(row["Transform Diff"]),
                 iv_ratio=row.get("IV Ratio"),
-                is_new=(_key(row) in new_keys),
                 duration=sig.get("duration"),
                 eta_minutes=sig.get("eta_minutes"),
                 spark=sig.get("spark", "─"),
@@ -1267,22 +1307,65 @@ def _run_mission_control(chain_df: pd.DataFrame, spx_price: float,
     eligible_cards    = _build_cards(eligible_df, _MC_HISTORY_CAP)
     approaching_cards = _build_cards(approaching_df, _MC_HISTORY_CAP)
 
-    # "Likely Next" is the Approaching subset that actually has a rising
-    # trend with a computable ETA — sorted soonest-first.
+    # "Likely Next" — only candidates with a computable rising-trend ETA.
+    # Same asymmetric-first principle, ETA ascending within each tier.
     likely_next = sorted(
         [c for c in approaching_cards if c["eta_minutes"] is not None],
-        key=lambda c: c["eta_minutes"],
+        key=lambda c: (c["put_strike"] == c["call_strike"], c["eta_minutes"]),
     )
+
+    return dict(
+        eligible_cards=eligible_cards,
+        approaching_cards=approaching_cards,
+        likely_next=likely_next,
+        n_eligible=n_eligible,
+        n_approaching=n_approaching,
+    )
+
+
+def _run_mission_control(chain_df: pd.DataFrame, spx_price: float,
+                          snapshot_id: int) -> dict:
+    """
+    Thin, UNCACHED wrapper around _compute_mc_core. Handles the cross-refresh
+    "New" diff via session_state, which can't live inside a cached function.
+    On a cache hit (the common case — every tab click, every widget
+    interaction within the same snapshot), the expensive Phase A/B work is
+    skipped entirely; only this cheap set-diff over a few dozen cards runs.
+    """
+    core = _compute_mc_core(chain_df, spx_price, snapshot_id)
+    eligible_cards = core["eligible_cards"]
+
+    current_keys = {_card_key(c) for c in eligible_cards}
+
+    # Only advance the "previous" comparison set when a NEW snapshot has
+    # actually landed — otherwise every widget-triggered rerun within the
+    # same snapshot would keep relabeling things as "new."
+    _prev_snap_id = st.session_state.get("mc_prev_snapshot_id")
+    if _prev_snap_id != snapshot_id:
+        _prev_keys = st.session_state.get("mc_prev_eligible_keys", set())
+        new_keys = current_keys - _prev_keys
+        st.session_state["mc_prev_eligible_keys"] = current_keys
+        st.session_state["mc_prev_snapshot_id"]   = snapshot_id
+        st.session_state["mc_new_keys"]           = new_keys
+    else:
+        new_keys = st.session_state.get("mc_new_keys", set())
+
+    for c in eligible_cards:
+        c["is_new"] = _card_key(c) in new_keys
+    for c in core["approaching_cards"]:
+        c["is_new"] = False
+    for c in core["likely_next"]:
+        c["is_new"] = False
 
     best = eligible_cards[0] if eligible_cards else None
 
     return dict(
         eligible=eligible_cards,
-        approaching=approaching_cards,
-        likely_next=likely_next,
+        approaching=core["approaching_cards"],
+        likely_next=core["likely_next"],
         new_keys=new_keys,
-        n_eligible=len(eligible_df),
-        n_approaching=len(approaching_df),
+        n_eligible=core["n_eligible"],
+        n_approaching=core["n_approaching"],
         n_new=len(new_keys),
         best=best,
     )
@@ -2013,10 +2096,16 @@ if st.session_state["active_tab"] == "scanner":
             )
 
         # ── Scanner compute ───────────────────────────────────────────────────────
+        # Cached on (snapshot_id, offsets, max_rows) — st.expander's body still
+        # executes every script run even when visually collapsed, so without
+        # caching this would redo the full scan on every interaction anywhere
+        # in the app. With caching, repeat calls with the same offset/snapshot
+        # are a near-instant cache hit.
         with st.spinner("Scanning combinations…"):
             _ts_df = _compute_transform_scanner(
-                chain_df     = chain_df,
+                _chain_df    = chain_df,
                 spx_price    = spx_price,
+                snapshot_id  = snapshot_id,
                 put_offset   = int(sc_put_offset),
                 call_offset  = int(sc_call_offset),
                 max_rows     = int(sc_max_rows),
