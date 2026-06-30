@@ -240,6 +240,53 @@ def auto_final_pl(t, spx_at_expiry: float) -> float | None:
     return (locked + adj) * 100 * contracts
 
 
+def resolved_pl(t) -> float | None:
+    """
+    Single source of truth for the complete realized P&L of any trade.
+    Always use this instead of reading t["final_pl"] or t["profit_locked_in"]
+    directly — it ensures the full lifecycle (transformation gain + IC expiry
+    assignment) is reflected consistently everywhere: Master Log, stats,
+    Expiration tab metrics, Net P&L, win/loss calculations.
+
+    Status rules:
+      Expired / Transformed  — with IC strikes + SPX at expiry present:
+          formula = (profit_locked_in + ic_expiry_adj) × 100 × contracts
+          This is the authoritative result and supersedes any stored final_pl.
+      Expired / Closed — direct close or incomplete IC data:
+          falls back to t["final_pl"] (manually entered).
+      Transformed (IC still open, not yet expired):
+          profit_locked_in × 100 × contracts  (the locked component only).
+      Open:
+          None  (no realized P&L yet).
+    """
+    status = t["status"]
+
+    if status in ("Expired", "Closed"):
+        locked   = row_get(t, "profit_locked_in")
+        ic_sc    = row_get(t, "ic_short_call")
+        spx_ex   = row_get(t, "spx_at_expiry")
+        # Transformed trade with complete IC data — always derive from formula
+        if locked is not None and ic_sc is not None and spx_ex is not None:
+            try:
+                lp = float(t["ic_long_put"]);  sp = float(t["ic_short_put"])
+                sc = float(t["ic_short_call"]); lc = float(t["ic_long_call"])
+                adj = ic_expiry_pnl_per_share(float(spx_ex), lp, sp, sc, lc)
+                return (float(locked) + adj) * 100 * int(t["contracts"])
+            except (TypeError, ValueError, KeyError):
+                pass
+        # Direct close or incomplete IC data — use stored value
+        raw = t["final_pl"]
+        return float(raw) if raw is not None else None
+
+    if status == "Transformed":
+        locked = row_get(t, "profit_locked_in")
+        if locked is not None:
+            return float(locked) * 100 * int(t["contracts"])
+        return None
+
+    return None  # Open
+
+
     """Sum of all commission/fee fields across the trade lifecycle."""
     entry = float(t["commissions"] or 0.0)
     tf_comm = 0.0
@@ -489,8 +536,8 @@ def compute_stats(rows: list) -> dict:
     if not rows:
         return {}
     # Completed = Expired (IC reached expiry) OR Closed (manually closed, with or without IC)
-    completed = [r for r in rows if r["status"] in ("Expired","Closed") and r["final_pl"] is not None]
-    pls   = [float(r["final_pl"]) for r in completed]
+    completed = [r for r in rows if r["status"] in ("Expired","Closed") and resolved_pl(r) is not None]
+    pls   = [resolved_pl(r) for r in completed]
     wins  = [p for p in pls if p > 0]
     loss  = [p for p in pls if p <= 0]
     transformed = [r for r in rows if r["transform_minutes"] is not None]
@@ -793,27 +840,20 @@ if page_mode == "📊 Overview":
         for t in all_trades:
             _ct      = get_close_type(t)
             _fees    = total_fees(t)
-            _real_pl = None   # Realized P&L per contract
-            _net_pl  = None   # Net P&L = Realized − Fees
-            _max_loss = None  # Max possible / actual loss
+            _real_pl = resolved_pl(t)
+            _net_pl  = (_real_pl - _fees) if _real_pl is not None else None
+            _max_loss = None
 
-            if t["status"] in ("Expired","Closed") and t["final_pl"] is not None:
-                _real_pl = float(t["final_pl"])
-                _net_pl  = _real_pl - _fees
-                # For completed trades max loss is the actual loss (if any)
-                _max_loss = _real_pl if _real_pl < 0 else None
-            elif t["status"] in ("Transformed",) and t["profit_locked_in"] is not None:
-                # IC still open — realized portion is locked, IC still has mark risk
-                _real_pl = t["profit_locked_in"] * 100 * t["contracts"]
-                _net_pl  = _real_pl - _fees
-                # Max loss is worst-case IC outcome
+            if t["status"] in ("Expired", "Closed"):
+                if _real_pl is not None and _real_pl < 0:
+                    _max_loss = _real_pl
+            elif t["status"] == "Transformed":
                 if t["ic_short_call"]:
                     if t["ic_risk_free"]:
-                        _max_loss = None  # can't lose money
+                        _max_loss = None
                     else:
                         _max_loss = -float(t["ic_worst_case"])
             elif t["status"] == "Open":
-                # No transformation yet — max loss is full entry debit
                 _max_loss = -(float(t["total_debit"]) * 100 * t["contracts"])
 
             log_rows.append({
@@ -1071,14 +1111,12 @@ if page_mode == "📊 Overview":
                     else:
                         st.info("Not yet expired / closed.")
                 else:
+                    _rpl = resolved_pl(t)
                     c1,c2,c3,c4 = st.columns(4)
                     c1.metric("Result Date",        t["result_date"])
                     c2.metric("SPX at Expiry",      f"{t['spx_at_expiry']:.2f}" if t["spx_at_expiry"] else "—")
-                    c3.metric("Final Realized P&L", fmt_pl(t["final_pl"]))
+                    c3.metric("Final Realized P&L", fmt_pl(_rpl))
                     c4.metric("Outcome",            t["outcome"] or "—")
-                    # row_get() used here because expired_inside_wings and
-                    # expired_between_shorts were added after initial schema —
-                    # legacy sqlite3.Row objects don't have .get().
                     _eiw = row_get(t, "expired_inside_wings")
                     _ebs = row_get(t, "expired_between_shorts")
                     if _eiw is not None:
@@ -1086,8 +1124,8 @@ if page_mode == "📊 Overview":
                         c1.metric("Inside Wings",   bool_icon(_eiw))
                         c2.metric("Between Shorts", bool_icon(_ebs))
                     _tf = total_fees(t)
-                    if t["final_pl"] is not None and _tf > 0:
-                        st.metric("Net P&L (after fees)", fmt_pl(t["final_pl"] - _tf))
+                    if _rpl is not None and _tf > 0:
+                        st.metric("Net P&L (after fees)", fmt_pl(_rpl - _tf))
 
                     # ── P&L lifecycle breakdown (transformed trades only) ────
                     if t["status"] == "Expired" and row_get(t, "profit_locked_in") is not None and t["spx_at_expiry"]:
