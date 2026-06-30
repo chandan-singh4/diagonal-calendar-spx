@@ -1176,14 +1176,26 @@ def _candidate_signals(front_raw: str, back_raw: str,
 
     # ETA — slope of the last up-to-6 readings, projected to threshold
     eta_minutes = None
-    tail = df.tail(6)
+    tail = df.tail(6).dropna(subset=["gap"])
+    tail = tail.drop_duplicates(subset=["timestamp"])
     if len(tail) >= 3:
-        x_min = (tail["timestamp"] - tail["timestamp"].iloc[0]).dt.total_seconds() / 60.0
+        x_min = ((tail["timestamp"] - tail["timestamp"].iloc[0])
+                 .dt.total_seconds() / 60.0).to_numpy()
         y_gap = tail["gap"].to_numpy()
-        slope, _ = np.polyfit(x_min.to_numpy(), y_gap, 1)
-        current_gap = float(y_gap[-1])
-        if slope > 0.01 and current_gap < _TSCAN_THRESHOLD:
-            eta_minutes = (_TSCAN_THRESHOLD - current_gap) / slope
+        # polyfit needs at least 2 distinct x values and finite data, or
+        # the underlying SVD can fail to converge (degenerate design matrix).
+        if (
+            np.isfinite(x_min).all() and np.isfinite(y_gap).all()
+            and np.ptp(x_min) > 0
+        ):
+            try:
+                slope, _ = np.polyfit(x_min, y_gap, 1)
+            except np.linalg.LinAlgError:
+                slope = None
+            if slope is not None:
+                current_gap = float(y_gap[-1])
+                if slope > 0.01 and current_gap < _TSCAN_THRESHOLD:
+                    eta_minutes = (_TSCAN_THRESHOLD - current_gap) / slope
 
     spark = _sparkline(df["gap"].tail(12).tolist())
     trend_up = bool(df["gap"].tail(3).is_monotonic_increasing) if len(df) >= 3 else False
