@@ -505,6 +505,19 @@ div[class*="st-key-mc_card_"]:hover { border-color: var(--border-hi); }
   background: rgba(240,164,41,.1); border: 1px solid rgba(240,164,41,.25);
   border-radius: 4px; padding: .06rem .34rem; margin-left: .4rem;
 }
+.mc-live-badge {
+  display: inline-block; font-size: .54rem; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .08em; color: var(--green);
+  background: rgba(16,212,163,.1); border: 1px solid rgba(16,212,163,.25);
+  border-radius: 4px; padding: .06rem .34rem; margin-left: .4rem;
+}
+.mc-stale-badge {
+  display: inline-block; font-size: .54rem; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .08em; color: var(--text-2);
+  background: rgba(255,255,255,.04); border: 1px solid var(--border);
+  border-radius: 4px; padding: .06rem .34rem; margin-left: .4rem;
+}
+.mc-metric-v.gap-stale { color: var(--text-2); }
 .mc-combo { font-family: var(--mono); font-size: 1rem; font-weight: 700; color: var(--text); margin-top: .15rem; }
 .mc-expiry { font-size: .68rem; color: var(--text-2); margin-bottom: .35rem; }
 .mc-metrics { display: flex; gap: 1.1rem; margin-bottom: .3rem; }
@@ -797,6 +810,80 @@ def _save_chart_colors(colors: dict[str, str]) -> None:
         _CHART_COLORS_PATH.write_text(json.dumps(colors, indent=2))
     except OSError:
         pass
+
+
+# ─── Eligibility registry — persisted log of non-ATM crossing events ──────────
+# A small JSON file (same exception-to-pure-reader pattern as chart_colors.json)
+# that accumulates which non-ATM combos have crossed Transform Gap >= 5 and
+# when, so "recently eligible" opportunities survive even if no one was
+# watching the dashboard when they crossed. Honest limitation: this only
+# accumulates going forward from when the feature ships — there's no
+# retroactive backfill, since that would require replaying full historical
+# option chains, which is the expensive thing Mission Control caching was
+# built specifically to avoid.
+_ELIGIBLE_HISTORY_PATH            = Path("eligible_history.json")
+_ELIGIBLE_HISTORY_RETENTION_DAYS  = 30
+
+
+def _load_eligible_history() -> dict:
+    if _ELIGIBLE_HISTORY_PATH.exists():
+        try:
+            data = json.loads(_ELIGIBLE_HISTORY_PATH.read_text())
+            return data if isinstance(data, dict) else {}
+        except (json.JSONDecodeError, OSError):
+            return {}
+    return {}
+
+
+def _save_eligible_history(registry: dict) -> None:
+    try:
+        _ELIGIBLE_HISTORY_PATH.write_text(json.dumps(registry, indent=2))
+    except OSError:
+        pass
+
+
+def _update_eligible_history(non_atm_df: pd.DataFrame, snapshot_ts: str) -> dict:
+    """
+    Upsert every non-ATM combo currently >= threshold into the registry.
+    Only ever called from inside the snapshot-cached Mission Control core
+    (see _compute_mc_core), so this fires once per NEW snapshot — not on
+    every tab click or widget interaction.
+    """
+    registry = _load_eligible_history()
+    if not non_atm_df.empty:
+        eligible_now = non_atm_df[non_atm_df["Transform Diff"] >= _TSCAN_THRESHOLD]
+        for _, row in eligible_now.iterrows():
+            front_raw = row["Front Expiry"].split(" ")[0]
+            back_raw  = row["Back Expiry"].split(" ")[0]
+            put_s     = int(row["Put Strike"])
+            call_s    = int(row["Call Strike"])
+            gap       = float(row["Transform Diff"])
+            iv_ratio  = row.get("IV Ratio")
+            key = f"{front_raw}|{back_raw}|{put_s}|{call_s}"
+            prev = registry.get(key, {})
+            registry[key] = dict(
+                front_raw=front_raw, back_raw=back_raw,
+                put_strike=put_s, call_strike=call_s,
+                iv_ratio=(None if pd.isna(iv_ratio) else iv_ratio),
+                first_seen=prev.get("first_seen", snapshot_ts),
+                last_seen=snapshot_ts,
+                last_gap=gap,
+                max_gap=max(prev.get("max_gap", 0.0), gap),
+                hit_count=prev.get("hit_count", 0) + 1,
+            )
+
+    # Prune anything that hasn't been seen in a while so the file stays small.
+    try:
+        cutoff = pd.Timestamp(snapshot_ts) - pd.Timedelta(days=_ELIGIBLE_HISTORY_RETENTION_DAYS)
+        registry = {
+            k: v for k, v in registry.items()
+            if pd.Timestamp(v.get("last_seen", snapshot_ts)) >= cutoff
+        }
+    except (ValueError, TypeError):
+        pass
+
+    _save_eligible_history(registry)
+    return registry
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1253,7 +1340,7 @@ def _card_key(card: dict) -> str:
 
 @st.cache_data(show_spinner="Scanning transform opportunities…")
 def _compute_mc_core(_chain_df: pd.DataFrame, spx_price: float,
-                      snapshot_id: int) -> dict:
+                      snapshot_id: int, snapshot_ts: str) -> dict:
     """
     Phase A + Phase B, cached as a unit on snapshot_id. No session_state
     access here — cached functions skip their body entirely on a cache hit,
@@ -1261,26 +1348,31 @@ def _compute_mc_core(_chain_df: pd.DataFrame, spx_price: float,
     this starts returning cached results. The "New" diff (which needs
     session_state) is handled by the uncached _run_mission_control wrapper
     below, outside this cache boundary.
+
+    Also updates the persisted eligibility registry (eligible_history.json)
+    for every non-ATM combo currently >= threshold — a plain file write is
+    fine inside a cached function (unlike session_state), and since the
+    function body only runs on a cache miss, this naturally fires once per
+    NEW snapshot rather than on every rerun.
     """
     chain_df = _chain_df
     all_combos = _scan_all_offsets(chain_df, spx_price, snapshot_id)
     if all_combos.empty:
-        return dict(eligible_cards=[], approaching_cards=[], likely_next=[],
-                     n_eligible=0, n_approaching=0)
+        return dict(approaching_cards=[], likely_next=[], n_approaching=0,
+                     non_atm_current=pd.DataFrame(), registry={})
 
-    eligible_df    = all_combos[all_combos["Transform Diff"] >= _TSCAN_THRESHOLD].copy()
+    non_atm_current = all_combos[all_combos["Put Strike"] != all_combos["Call Strike"]].copy()
+    registry = _update_eligible_history(non_atm_current, snapshot_ts)
+
     approaching_df = all_combos[
         (all_combos["Transform Diff"] >= _APPROACHING_LOW)
         & (all_combos["Transform Diff"] < _TSCAN_THRESHOLD)
     ].copy()
-
-    n_eligible    = len(eligible_df)
     n_approaching = len(approaching_df)
 
     # Rank for the panel BEFORE capping — otherwise asymmetric opportunities
     # sitting just below the top-by-raw-gap rows would get starved out of
     # the (necessarily limited, for cost reasons) Phase B history treatment.
-    eligible_df    = _rank_for_panel(eligible_df)
     approaching_df = _rank_for_panel(approaching_df)
 
     def _build_cards(df: pd.DataFrame, cap: int) -> list[dict]:
@@ -1304,7 +1396,6 @@ def _compute_mc_core(_chain_df: pd.DataFrame, spx_price: float,
             ))
         return cards
 
-    eligible_cards    = _build_cards(eligible_df, _MC_HISTORY_CAP)
     approaching_cards = _build_cards(approaching_df, _MC_HISTORY_CAP)
 
     # "Likely Next" — only candidates with a computable rising-trend ETA.
@@ -1315,27 +1406,124 @@ def _compute_mc_core(_chain_df: pd.DataFrame, spx_price: float,
     )
 
     return dict(
-        eligible_cards=eligible_cards,
         approaching_cards=approaching_cards,
         likely_next=likely_next,
-        n_eligible=n_eligible,
         n_approaching=n_approaching,
+        non_atm_current=non_atm_current,
+        registry=registry,
     )
 
 
+def _build_non_atm_panel(non_atm_current: pd.DataFrame, registry: dict,
+                          dte_by_expiry: dict, lookback_days: int,
+                          snapshot_ts: str, cap: int = _MC_HISTORY_CAP):
+    """
+    The curated "non-ATM opportunities" panel — built from the persisted
+    registry, NOT a slice of the Scanner. Includes any combo that is
+    currently >= threshold OR appears in the registry within the lookback
+    window (i.e. crossed >= 5 at some point recently, even if it isn't
+    right now).
+
+    Ranking — a transparent, inspectable multi-key sort, not a blended
+    score (same principle as _rank_for_panel above):
+      Tier 1 — currently live (>= 5 right now) outranks historical-only;
+               an opportunity you can act on today beats a past one.
+      Tier 2 — rank_gap descending: current gap for live combos, peak gap
+               (max_gap ever observed) for historical-only ones.
+      Tier 3 — hit_count descending — directly answers "which strikes
+               repeatedly become transformable," not just "which spiked once."
+      Tier 4 — most recent crossing first, as the final tiebreak.
+
+    Returns (capped_cards, total_candidate_count).
+    """
+    try:
+        cutoff = pd.Timestamp(snapshot_ts) - pd.Timedelta(days=lookback_days)
+    except (ValueError, TypeError):
+        cutoff = None
+
+    current_lookup: dict[str, dict] = {}
+    if not non_atm_current.empty:
+        for _, row in non_atm_current.iterrows():
+            front_raw = row["Front Expiry"].split(" ")[0]
+            back_raw  = row["Back Expiry"].split(" ")[0]
+            k = f"{front_raw}|{back_raw}|{int(row['Put Strike'])}|{int(row['Call Strike'])}"
+            current_lookup[k] = dict(
+                gap=float(row["Transform Diff"]), iv_ratio=row.get("IV Ratio"),
+            )
+
+    candidates = []
+    for key, entry in registry.items():
+        try:
+            last_seen_ts = pd.Timestamp(entry["last_seen"])
+        except (ValueError, TypeError, KeyError):
+            continue
+        if cutoff is not None and last_seen_ts < cutoff:
+            continue
+
+        cur = current_lookup.get(key)
+        is_live   = cur is not None and cur["gap"] >= _TSCAN_THRESHOLD
+        rank_gap  = cur["gap"] if is_live else entry["max_gap"]
+        front_raw, back_raw = entry["front_raw"], entry["back_raw"]
+        front_label = _exp_label(front_raw) if front_raw in dte_by_expiry else front_raw
+        back_label  = _exp_label(back_raw)  if back_raw  in dte_by_expiry else back_raw
+
+        try:
+            ago_str = _fmt_duration(pd.Timestamp(snapshot_ts) - last_seen_ts) + " ago"
+        except (ValueError, TypeError):
+            ago_str = "—"
+
+        candidates.append(dict(
+            front_raw=front_raw, back_raw=back_raw,
+            front_label=front_label, back_label=back_label,
+            put_strike=entry["put_strike"], call_strike=entry["call_strike"],
+            iv_ratio=(cur["iv_ratio"] if cur else entry.get("iv_ratio")),
+            is_live=is_live,
+            current_gap=(cur["gap"] if cur else None),
+            max_gap=entry["max_gap"],
+            gap=rank_gap,
+            hit_count=entry["hit_count"],
+            last_seen=last_seen_ts,
+            last_seen_ago=ago_str,
+        ))
+
+    candidates.sort(key=lambda c: (
+        not c["is_live"], -c["gap"], -c["hit_count"], -c["last_seen"].timestamp()
+    ))
+
+    capped = candidates[:cap]
+
+    # Phase B (duration/spark/eta) only for the small final, capped set —
+    # _candidate_signals is independently cached so repeat calls are cheap.
+    for c in capped:
+        sig = _candidate_signals(c["front_raw"], c["back_raw"],
+                                  c["put_strike"], c["call_strike"]) or {}
+        c["duration"]    = sig.get("duration") if c["is_live"] else None
+        c["eta_minutes"] = sig.get("eta_minutes")
+        c["spark"]       = sig.get("spark", "─")
+        c["trend_up"]    = sig.get("trend_up", False)
+
+    return capped, len(candidates)
+
+
 def _run_mission_control(chain_df: pd.DataFrame, spx_price: float,
-                          snapshot_id: int) -> dict:
+                          snapshot_id: int, snapshot_ts: str,
+                          dte_by_expiry: dict, lookback_days: int) -> dict:
     """
     Thin, UNCACHED wrapper around _compute_mc_core. Handles the cross-refresh
-    "New" diff via session_state, which can't live inside a cached function.
+    "New" diff via session_state (which can't live inside a cached function)
+    and builds the curated non-ATM panel from the registry + current state.
     On a cache hit (the common case — every tab click, every widget
     interaction within the same snapshot), the expensive Phase A/B work is
-    skipped entirely; only this cheap set-diff over a few dozen cards runs.
+    skipped entirely; only cheap in-memory filtering/sorting runs here.
     """
-    core = _compute_mc_core(chain_df, spx_price, snapshot_id)
-    eligible_cards = core["eligible_cards"]
+    core = _compute_mc_core(chain_df, spx_price, snapshot_id, snapshot_ts)
 
-    current_keys = {_card_key(c) for c in eligible_cards}
+    non_atm_panel, n_non_atm_total = _build_non_atm_panel(
+        core["non_atm_current"], core["registry"], dte_by_expiry,
+        lookback_days, snapshot_ts,
+    )
+
+    current_keys = {_card_key(c) for c in non_atm_panel if c["is_live"]}
 
     # Only advance the "previous" comparison set when a NEW snapshot has
     # actually landed — otherwise every widget-triggered rerun within the
@@ -1350,22 +1538,28 @@ def _run_mission_control(chain_df: pd.DataFrame, spx_price: float,
     else:
         new_keys = st.session_state.get("mc_new_keys", set())
 
-    for c in eligible_cards:
-        c["is_new"] = _card_key(c) in new_keys
+    for c in non_atm_panel:
+        c["is_new"] = c["is_live"] and (_card_key(c) in new_keys)
     for c in core["approaching_cards"]:
         c["is_new"] = False
     for c in core["likely_next"]:
         c["is_new"] = False
 
-    best = eligible_cards[0] if eligible_cards else None
+    n_live_non_atm = (
+        int((core["non_atm_current"]["Transform Diff"] >= _TSCAN_THRESHOLD).sum())
+        if not core["non_atm_current"].empty else 0
+    )
+    best = next((c for c in non_atm_panel if c["is_live"]),
+                non_atm_panel[0] if non_atm_panel else None)
 
     return dict(
-        eligible=eligible_cards,
+        non_atm=non_atm_panel,
+        n_non_atm_total=n_non_atm_total,
+        n_eligible=n_live_non_atm,
         approaching=core["approaching_cards"],
         likely_next=core["likely_next"],
-        new_keys=new_keys,
-        n_eligible=core["n_eligible"],
         n_approaching=core["n_approaching"],
+        new_keys=new_keys,
         n_new=len(new_keys),
         best=best,
     )
@@ -1567,7 +1761,14 @@ if (
 # is active, since the persistent Attention Strip in the header needs it too.
 # ─────────────────────────────────────────────────────────────────────────────
 
-MC = _run_mission_control(chain_df, spx_price, snapshot_id)
+_MC_LOOKBACK_DAYS_MAP = {"Today": 1, "5D": 5, "10D": 10, "20D": 20}
+if "mc_lookback_select" not in st.session_state:
+    st.session_state["mc_lookback_select"] = "Today"
+_mc_lookback_days = _MC_LOOKBACK_DAYS_MAP[st.session_state["mc_lookback_select"]]
+
+MC = _run_mission_control(
+    chain_df, spx_price, snapshot_id, snap_ts_str, dte_by_expiry, _mc_lookback_days,
+)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # HEADER — Premium top bar
@@ -1658,6 +1859,10 @@ components.html(
 
 if MC["best"] is not None:
     _b = MC["best"]
+    if _b["is_live"]:
+        _best_status = f'Active {_fmt_duration(_b["duration"])}'
+    else:
+        _best_status = f'Peak · seen {_b["last_seen_ago"]}'
     _attn_html = (
         '<div class="attn-strip">'
         '<div class="attn-counts">'
@@ -1675,7 +1880,7 @@ if MC["best"] is not None:
         '<div class="attn-best">'
         f'🔥 Best: <b>{int(_b["put_strike"])}P / {int(_b["call_strike"])}C</b>'
         f'&nbsp;·&nbsp;Gap <span class="gap-v">+{_b["gap"]:.2f}</span>'
-        f'&nbsp;·&nbsp;Active {_fmt_duration(_b["duration"])}'
+        f'&nbsp;·&nbsp;{_best_status}'
         '</div>'
         '</div>'
     )
@@ -1691,7 +1896,7 @@ else:
         '<span class="attn-count-l">Approaching</span></span>'
         '</div>'
         '<div class="attn-divider"></div>'
-        '<span class="attn-empty">No transform opportunities right now — '
+        '<span class="attn-empty">No non-ATM transform opportunities right now — '
         'scanning every refresh.</span>'
         '</div>'
     )
@@ -1902,7 +2107,8 @@ _iv_pct = (
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _render_mc_section(cards: list[dict], section: str, title: str, icon: str,
-                        show_duration: bool = True) -> None:
+                        show_duration: bool = True,
+                        show_live_badge: bool = False) -> None:
     if not cards:
         return
     st.markdown(
@@ -1921,14 +2127,34 @@ def _render_mc_section(cards: list[dict], section: str, title: str, icon: str,
             with col:
                 with st.container(key=f"mc_card_{section}_{gidx}"):
                     _new_badge = '<span class="mc-new-badge">NEW</span>' if card["is_new"] else ""
+                    _is_live = card.get("is_live", True)
+                    if show_live_badge:
+                        _live_badge = (
+                            '<span class="mc-live-badge">LIVE</span>' if _is_live
+                            else '<span class="mc-stale-badge">PAST</span>'
+                        )
+                    else:
+                        _live_badge = ""
+                    _gap_label = "Gap" if _is_live else "Peak Gap"
+                    _gap_class = "gap" if _is_live else "gap gap-stale"
                     _metrics = (
-                        f'<div><span class="mc-metric-l">Gap</span>'
-                        f'<span class="mc-metric-v gap">+{card["gap"]:.2f}</span></div>'
+                        f'<div><span class="mc-metric-l">{_gap_label}</span>'
+                        f'<span class="mc-metric-v {_gap_class}">+{card["gap"]:.2f}</span></div>'
                     )
-                    if show_duration:
+                    if show_duration and _is_live:
                         _metrics += (
                             f'<div><span class="mc-metric-l">Active</span>'
                             f'<span class="mc-metric-v">{_fmt_duration(card["duration"])}</span></div>'
+                        )
+                    elif show_live_badge and not _is_live:
+                        _metrics += (
+                            f'<div><span class="mc-metric-l">Last Seen</span>'
+                            f'<span class="mc-metric-v">{card.get("last_seen_ago", "—")}</span></div>'
+                        )
+                    if show_live_badge and card.get("hit_count") is not None:
+                        _metrics += (
+                            f'<div><span class="mc-metric-l">Seen</span>'
+                            f'<span class="mc-metric-v">{card["hit_count"]}×</span></div>'
                         )
                     if card["iv_ratio"] is not None:
                         _metrics += (
@@ -1941,7 +2167,7 @@ def _render_mc_section(cards: list[dict], section: str, title: str, icon: str,
                         if card.get("eta_minutes") is not None else ""
                     )
                     st.markdown(
-                        f'<div class="mc-rank">#{gidx + 1}{_new_badge}</div>'
+                        f'<div class="mc-rank">#{gidx + 1}{_live_badge}{_new_badge}</div>'
                         f'<div class="mc-combo">{int(card["put_strike"])}P / {int(card["call_strike"])}C</div>'
                         f'<div class="mc-expiry">{card["front_label"]} → {card["back_label"]}</div>'
                         f'<div class="mc-metrics">{_metrics}</div>'
@@ -2025,28 +2251,51 @@ with st.container(key="topnav"):
 if st.session_state["active_tab"] == "scanner":
 
     # ── Mission Control ─────────────────────────────────────────────────────
-    st.markdown(
-        '<div class="sh" style="margin-top:.2rem">'
-        '<span class="sh-ico">🔥</span>'
-        '<span class="sh-ttl">Transform Opportunities</span>'
-        f'<span class="sh-bdg g">{MC["n_eligible"]} Eligible</span>'
-        '</div>',
-        unsafe_allow_html=True,
-    )
+    _mc_hdr_col, _mc_radio_col = st.columns([4, 1.4])
+    with _mc_hdr_col:
+        st.markdown(
+            '<div class="sh" style="margin-top:.2rem">'
+            '<span class="sh-ico">🔥</span>'
+            '<span class="sh-ttl">Transform Opportunities</span>'
+            f'<span class="sh-bdg g">{MC["n_eligible"]} Live</span>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+    with _mc_radio_col:
+        st.radio(
+            "Lookback",
+            ["Today", "5D", "10D", "20D"],
+            horizontal=True,
+            key="mc_lookback_select",
+            label_visibility="collapsed",
+        )
 
-    if MC["n_eligible"] == 0 and MC["n_approaching"] == 0:
+    if not MC["non_atm"] and MC["n_approaching"] == 0:
         st.caption(
-            "No transform opportunities right now across the swept strike set "
-            f"({', '.join(f'ATM±{o}' if o else 'ATM' for o in _SWEEP_OFFSETS)}). "
+            "No non-ATM transform opportunities right now, and none in the "
+            f"{st.session_state['mc_lookback_select']} lookback window. "
             "Scanning continues every refresh."
         )
     else:
-        _render_mc_section(
-            MC["eligible"][:6], "elig",
-            "Eligible Now — sorted by Gap, descending", "🟢",
-        )
-        if MC["n_eligible"] > 6:
-            st.caption(f"Showing top 6 of {MC['n_eligible']} eligible. Full set in the table below.")
+        if MC["non_atm"]:
+            _lb_label = st.session_state["mc_lookback_select"]
+            _render_mc_section(
+                MC["non_atm"][:6], "natm",
+                f"Non-ATM Opportunities — live or active within {_lb_label}", "🟢",
+                show_live_badge=True,
+            )
+            if MC["n_non_atm_total"] > 6:
+                st.caption(
+                    f"Showing top 6 of {MC['n_non_atm_total']} non-ATM opportunities "
+                    f"in the {_lb_label} window."
+                )
+        else:
+            st.caption(
+                f"No non-ATM combinations crossed the threshold in the "
+                f"{st.session_state['mc_lookback_select']} lookback window. "
+                "Try a longer window, or check back as the registry accumulates "
+                "more history going forward."
+            )
 
         _render_mc_section(
             MC["likely_next"][:3], "likely",
