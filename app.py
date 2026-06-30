@@ -1649,10 +1649,23 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Mission Control drill-down (a card's "View Chart" click) pre-sets these
-# session_state keys before this widget block runs. If the stashed value
-# isn't valid for the freshly-loaded chain, drop it so the normal default
-# logic below takes over instead of raising a "not in options" error.
+# Mission Control drill-down (a card's "View Chart" click) stages values
+# under pending_ keys, since it can't write to a *_select key after that
+# widget has already rendered earlier in the same script run. Promote them
+# here — before any of the widgets below are instantiated — so the rerun
+# this triggers picks them up cleanly.
+if "pending_front_expiry" in st.session_state:
+    st.session_state["front_expiry_select"] = st.session_state.pop("pending_front_expiry")
+if "pending_back_expiry" in st.session_state:
+    st.session_state["back_expiry_select"] = st.session_state.pop("pending_back_expiry")
+if "pending_put_strike" in st.session_state:
+    st.session_state["put_strike_select"] = st.session_state.pop("pending_put_strike")
+if "pending_call_strike" in st.session_state:
+    st.session_state["call_strike_select"] = st.session_state.pop("pending_call_strike")
+
+# If the stashed value isn't valid for the freshly-loaded chain, drop it so
+# the normal default logic below takes over instead of raising a
+# "not in options" error.
 if "front_expiry_select" in st.session_state and st.session_state["front_expiry_select"] not in available_expiries:
     del st.session_state["front_expiry_select"]
 if "back_expiry_select" in st.session_state and st.session_state["back_expiry_select"] not in available_expiries:
@@ -1857,10 +1870,16 @@ def _render_mc_section(cards: list[dict], section: str, title: str, icon: str,
                     with bcol1:
                         if st.button("View Chart", key=f"viewchart_{section}_{gidx}",
                                      use_container_width=True):
-                            st.session_state["front_expiry_select"] = card["front_raw"]
-                            st.session_state["back_expiry_select"]  = card["back_raw"]
-                            st.session_state["put_strike_select"]   = card["put_strike"]
-                            st.session_state["call_strike_select"]  = card["call_strike"]
+                            # Can't write directly to *_select keys here — those
+                            # widgets already rendered earlier in this script run
+                            # (Controls Bar comes before Scanner). Stage under
+                            # pending_ keys instead; they get promoted to the real
+                            # widget keys at the top of the NEXT run, before the
+                            # Controls Bar widgets are instantiated.
+                            st.session_state["pending_front_expiry"] = card["front_raw"]
+                            st.session_state["pending_back_expiry"]  = card["back_raw"]
+                            st.session_state["pending_put_strike"]   = card["put_strike"]
+                            st.session_state["pending_call_strike"]  = card["call_strike"]
                             st.session_state["active_tab"] = "edge"
                             st.rerun()
                     with bcol2:
