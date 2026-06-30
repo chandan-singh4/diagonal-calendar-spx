@@ -668,6 +668,44 @@ _RATIO_BANDS = [
     (float("-inf"), 0.70, "#d98841", "Deep contango <0.70 (likely 0DTE/EOD)"),
 ]
 
+# ─── Chart Appearance — user-customizable line colors ─────────────────────────
+# Persisted to a small JSON file (same pattern as pinned_pairs.json — this is
+# a user-preference file, not market data, so writing it from app.py does not
+# violate the collector/dashboard read-only split).
+#
+# To add color customization for a future line series: add one entry to
+# DEFAULT_CHART_COLORS with a (label, hex) tuple. The sidebar picker and the
+# reset button both iterate this dict automatically — no other code changes
+# needed beyond using CHART_COLORS["your_key"] in the relevant trace.
+_CHART_COLORS_PATH = Path("chart_colors.json")
+
+DEFAULT_CHART_COLORS: dict[str, tuple[str, str]] = {
+    "diagonal_mark":  ("Diagonal Mark",        "#5b9cff"),
+    "transform_mark": ("Transform Order Mark", "#f0a429"),
+    "front_iv":       ("Front IV %",           "#10d4a3"),
+    "back_iv":        ("Back IV %",            "#5b9cff"),
+}
+
+
+def _load_chart_colors() -> dict[str, str]:
+    """Load saved colors, filling in any missing/new keys with defaults."""
+    defaults = {k: v[1] for k, v in DEFAULT_CHART_COLORS.items()}
+    if _CHART_COLORS_PATH.exists():
+        try:
+            saved = json.loads(_CHART_COLORS_PATH.read_text())
+            if isinstance(saved, dict):
+                defaults.update({k: v for k, v in saved.items() if k in defaults})
+        except (json.JSONDecodeError, OSError):
+            pass
+    return defaults
+
+
+def _save_chart_colors(colors: dict[str, str]) -> None:
+    try:
+        _CHART_COLORS_PATH.write_text(json.dumps(colors, indent=2))
+    except OSError:
+        pass
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper — unicode sparkline
@@ -966,6 +1004,31 @@ sc_max_rows = st.sidebar.number_input(
     key="sc_max_rows",
     help="Cap the number of rows returned (sorted by Transform Diff descending).",
 )
+
+st.sidebar.divider()
+st.sidebar.markdown("**🎨 Chart Appearance**")
+
+CHART_COLORS = _load_chart_colors()
+
+with st.sidebar.expander("Line colors", expanded=False):
+    _colors_changed = False
+    for _key, (_label, _default) in DEFAULT_CHART_COLORS.items():
+        _picked = st.color_picker(
+            _label, value=CHART_COLORS.get(_key, _default), key=f"color_{_key}",
+        )
+        if _picked != CHART_COLORS.get(_key):
+            CHART_COLORS[_key] = _picked
+            _colors_changed = True
+    if _colors_changed:
+        _save_chart_colors(CHART_COLORS)
+
+    if st.button("↺ Reset to Default Colors", key="reset_colors_btn",
+                 use_container_width=True):
+        CHART_COLORS = {k: v[1] for k, v in DEFAULT_CHART_COLORS.items()}
+        _save_chart_colors(CHART_COLORS)
+        for _key in DEFAULT_CHART_COLORS:
+            st.session_state.pop(f"color_{_key}", None)
+        st.rerun()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Database init + latest complete snapshot
@@ -1678,17 +1741,12 @@ with tab_edge:
     m3.metric("Back ATM IV",        f"{ts_now.back_iv:.2f}%")
     m4.metric("IV Index (avg)",     f"{iv_index:.2f}%")
 
-    _info_col, _radio_col = st.columns([3, 1])
-    with _info_col:
-        st.info(iv_engine.interpret_curve(ts_now))
-    with _radio_col:
-        period_label = st.radio(
-            "Chart Range",
-            ["Today", "5D", "10D", "20D"],
-            horizontal=False,
-            label_visibility="collapsed",
-            key="period_radio",
-        )
+    period_label = st.radio(
+        "Chart Range",
+        ["Today", "5D", "10D", "20D"],
+        horizontal=True,
+        key="period_radio",
+    )
 
     period_days = {"Today": 1, "5D": 5, "10D": 10, "20D": 20}[period_label]
     _fhp = _load_atm_hist_fb(front_expiry, period_days)
@@ -1702,46 +1760,110 @@ with tab_edge:
         )
         atm_merged["iv_ratio"] = atm_merged["front_iv"] / atm_merged["back_iv"]
 
+    _gap_xaxis = (
+        dict(range=[f"{session_date} 09:30", f"{session_date} 16:15"],
+             rangebreaks=_SESSION_RANGEBREAKS, gridcolor="#0c1928")
+        if period_label == "Today"
+        else dict(rangebreaks=_SESSION_RANGEBREAKS, gridcolor="#0c1928")
+    )
+
+    # ── Chart 1 (primary): Diagonal Mark vs Transform Order Mark ─────────────
+    st.markdown(
+        '<div class="sh" style="margin-top:.4rem">'
+        '<span class="sh-ico">🟢</span>'
+        '<span class="sh-ttl">Diagonal vs. Transform Order Mark</span>'
+        '<span class="sh-bdg g">Shaded = Transform Gap ≥ 5</span>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    if not strikes_set:
+        st.caption("Set call and put strikes in Controls above to see the Transform Gap chart.")
+    else:
+        _gap_rows = db.get_transform_mark_history(
+            config.DB_PATH, front_expiry, back_expiry,
+            call_strike, put_strike, days=period_days,
+        )
+        _gap_df = pd.DataFrame([dict(r) for r in _gap_rows]) if _gap_rows else pd.DataFrame()
+
+        if not _gap_df.empty:
+            _gap_df["timestamp"] = (
+                pd.to_datetime(_gap_df["snapshot_timestamp"], format="ISO8601", utc=True)
+                .dt.tz_convert(config.DISPLAY_TIMEZONE)
+            )
+            if period_label == "Today":
+                _last_date = _gap_df["timestamp"].dt.date.max()
+                _gap_df = _gap_df[_gap_df["timestamp"].dt.date == _last_date]
+
+        if not _gap_df.empty:
+            _gap_df["diagonal_mark"] = (
+                _gap_df["back_call_mark"] + _gap_df["back_put_mark"]
+                - _gap_df["front_call_mark"] - _gap_df["front_put_mark"]
+            )
+            _gap_df["transform_mark"] = (
+                _gap_df["back_call_mark"] + _gap_df["back_put_mark"]
+                - _gap_df["front_wing_call_mark"] - _gap_df["front_wing_put_mark"]
+            )
+            _gap_df["transform_gap"] = _gap_df["transform_mark"] - _gap_df["diagonal_mark"]
+
+            fig_gap = go.Figure()
+
+            # Shade every contiguous region where Transform Gap >= 5
+            _flag = (_gap_df["transform_gap"] >= 5.0).reset_index(drop=True)
+            _ts_list = _gap_df["timestamp"].reset_index(drop=True).tolist()
+            _region_start = None
+            for i in range(len(_flag)):
+                if _flag.iloc[i] and _region_start is None:
+                    _region_start = _ts_list[i]
+                if _region_start is not None and (not _flag.iloc[i] or i == len(_flag) - 1):
+                    fig_gap.add_vrect(
+                        x0=_region_start, x1=_ts_list[i],
+                        fillcolor="rgba(16,212,163,0.14)",
+                        line_width=0, layer="below",
+                    )
+                    _region_start = None
+
+            fig_gap.add_trace(go.Scatter(
+                x=_gap_df["timestamp"], y=_gap_df["diagonal_mark"],
+                name="Diagonal Mark",
+                line=dict(color=CHART_COLORS["diagonal_mark"], width=1.8),
+                hovertemplate="Diagonal Mark: $%{y:.2f}<extra></extra>",
+            ))
+            fig_gap.add_trace(go.Scatter(
+                x=_gap_df["timestamp"], y=_gap_df["transform_mark"],
+                name="Transform Order Mark",
+                line=dict(color=CHART_COLORS["transform_mark"], width=1.8),
+                hovertemplate="Transform Order Mark: $%{y:.2f}<extra></extra>",
+            ))
+            fig_gap.update_layout(
+                height=320,
+                margin=dict(l=20, r=20, t=10, b=20),
+                paper_bgcolor="#060b12",
+                plot_bgcolor="#060b12",
+                font=dict(family="Inter", color="#6d8fa8", size=11),
+                hovermode="x unified",
+                hoverlabel=dict(bgcolor="#111c2e", bordercolor="#1a2d45",
+                                font=dict(color="#dde6f1", size=12)),
+                xaxis=_gap_xaxis,
+                yaxis=dict(title="Mark ($)", gridcolor="#0c1928"),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0,
+                            bgcolor="rgba(0,0,0,0)"),
+            )
+            st.plotly_chart(fig_gap, use_container_width=True)
+            st.caption(
+                "Green shading marks every window where Transform Gap "
+                "(Transform Order Mark − Diagonal Mark) was ≥ 5 — the position "
+                "was eligible for transformation during that span."
+            )
+        else:
+            st.caption(
+                f"No transform-mark history yet for Put {put_strike:.0f} / "
+                f"Call {call_strike:.0f} in the selected range."
+            )
 
     if not atm_merged.empty:
-        _xaxis_today = (
-            dict(range=[f"{session_date} 09:30", f"{session_date} 16:15"],
-                 rangebreaks=_SESSION_RANGEBREAKS, gridcolor="#0c1928")
-            if period_label == "Today"
-            else dict(rangebreaks=_SESSION_RANGEBREAKS, gridcolor="#0c1928")
-        )
 
-        # Primary dual-axis chart
-        fig_atm = go.Figure()
-        fig_atm.add_trace(go.Scatter(
-            x=atm_merged["timestamp"], y=atm_merged["front_iv"],
-            name="Front ATM IV", line=dict(color="#10d4a3", width=1.8), yaxis="y1"))
-        fig_atm.add_trace(go.Scatter(
-            x=atm_merged["timestamp"], y=atm_merged["back_iv"],
-            name="Back ATM IV",  line=dict(color="#5b9cff", width=1.8), yaxis="y1"))
-        fig_atm.add_trace(go.Scatter(
-            x=atm_merged["timestamp"], y=atm_merged["iv_ratio"],
-            name="IV Ratio (F/B)", line=dict(color="#f05252", width=1.8), yaxis="y2"))
-        fig_atm.update_layout(
-        paper_bgcolor="#060b12",
-        plot_bgcolor="#060b12",
-        font=dict(family="Inter", color="#6d8fa8", size=11),
-        hovermode="x unified",
-        hoverlabel=dict(bgcolor="#111c2e", bordercolor="#1a2d45",
-                        font=dict(color="#dde6f1", size=12)),
-            height=300,
-            margin=dict(l=20, r=20, t=10, b=20),
-            xaxis=_xaxis_today,
-            yaxis=dict(title="IV %", side="left",  gridcolor="#0c1928"),
-            yaxis2=dict(title="Ratio", side="right", overlaying="y", showgrid=False),
-        )
-        st.plotly_chart(fig_atm, use_container_width=True)
-
-        samp_warn = iv_engine.sample_size_warning(atm_merged["iv_ratio"])
-        if samp_warn:
-            st.warning(samp_warn)
-
-        # Stacked chart
+        # ── Chart 2: Front vs Back ATM IV — same axis · IV Ratio by regime ────
         st.markdown("**Front vs Back ATM IV — same axis · IV Ratio by regime**")
         fig_stack = make_subplots(
             rows=2, cols=1, shared_xaxes=True,
@@ -1753,10 +1875,10 @@ with tab_edge:
         )
         fig_stack.add_trace(go.Scatter(
             x=atm_merged["timestamp"], y=atm_merged["front_iv"],
-            name="Front ATM IV", line=dict(color="#10d4a3", width=1.8)), row=1, col=1)
+            name="Front ATM IV", line=dict(color=CHART_COLORS["front_iv"], width=1.8)), row=1, col=1)
         fig_stack.add_trace(go.Scatter(
             x=atm_merged["timestamp"], y=atm_merged["back_iv"],
-            name="Back ATM IV",  line=dict(color="#5b9cff", width=1.8)), row=1, col=1)
+            name="Back ATM IV",  line=dict(color=CHART_COLORS["back_iv"], width=1.8)), row=1, col=1)
         for tr in _banded_ratio_traces(atm_merged["timestamp"], atm_merged["iv_ratio"]):
             fig_stack.add_trace(tr, row=2, col=1)
         for thr, dash in [(1.00, "solid"), (0.70, "dot"), (1.30, "dot")]:
@@ -1792,7 +1914,37 @@ with tab_edge:
             "Green (≥1) = backwardation (front rich). Amber (<0.70) = usually 0DTE decay artifact."
         )
 
-        # Intraday scatter
+        # ── Chart 3: Primary dual-axis chart (moved from top) ─────────────────
+        fig_atm = go.Figure()
+        fig_atm.add_trace(go.Scatter(
+            x=atm_merged["timestamp"], y=atm_merged["front_iv"],
+            name="Front ATM IV", line=dict(color=CHART_COLORS["front_iv"], width=1.8), yaxis="y1"))
+        fig_atm.add_trace(go.Scatter(
+            x=atm_merged["timestamp"], y=atm_merged["back_iv"],
+            name="Back ATM IV",  line=dict(color=CHART_COLORS["back_iv"], width=1.8), yaxis="y1"))
+        fig_atm.add_trace(go.Scatter(
+            x=atm_merged["timestamp"], y=atm_merged["iv_ratio"],
+            name="IV Ratio (F/B)", line=dict(color="#f05252", width=1.8), yaxis="y2"))
+        fig_atm.update_layout(
+            height=300,
+            margin=dict(l=20, r=20, t=10, b=20),
+            paper_bgcolor="#060b12",
+            plot_bgcolor="#060b12",
+            font=dict(family="Inter", color="#6d8fa8", size=11),
+            hovermode="x unified",
+            hoverlabel=dict(bgcolor="#111c2e", bordercolor="#1a2d45",
+                            font=dict(color="#dde6f1", size=12)),
+            xaxis=_gap_xaxis,
+            yaxis=dict(title="IV %", side="left",  gridcolor="#0c1928"),
+            yaxis2=dict(title="Ratio", side="right", overlaying="y", showgrid=False),
+        )
+        st.plotly_chart(fig_atm, use_container_width=True)
+
+        samp_warn = iv_engine.sample_size_warning(atm_merged["iv_ratio"])
+        if samp_warn:
+            st.warning(samp_warn)
+
+        # ── Chart 4: Front vs Back IV scatter — intraday trajectory ───────────
         st.markdown("**Front vs Back IV scatter — intraday trajectory**")
         _sc = atm_merged.copy()
         _sc["hod"] = _sc["timestamp"].dt.hour + _sc["timestamp"].dt.minute / 60.0
@@ -1811,14 +1963,14 @@ with tab_edge:
             customdata=_sc["iv_ratio"],
             hovertemplate="Back %{x:.2f}%<br>Front %{y:.2f}%<br>R=%{customdata:.4f}<extra></extra>"))
         fig_intra.update_layout(
-        paper_bgcolor="#060b12",
-        plot_bgcolor="#060b12",
-        font=dict(family="Inter", color="#6d8fa8", size=11),
-        hovermode="x unified",
-        hoverlabel=dict(bgcolor="#111c2e", bordercolor="#1a2d45",
-                        font=dict(color="#dde6f1", size=12)),
             height=420,
             margin=dict(l=20, r=20, t=10, b=20),
+            paper_bgcolor="#060b12",
+            plot_bgcolor="#060b12",
+            font=dict(family="Inter", color="#6d8fa8", size=11),
+            hovermode="x unified",
+            hoverlabel=dict(bgcolor="#111c2e", bordercolor="#1a2d45",
+                            font=dict(color="#dde6f1", size=12)),
             xaxis=dict(title="Back ATM IV %", gridcolor="#0c1928"),
             yaxis=dict(title="Front ATM IV %", gridcolor="#0c1928"),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0,
@@ -1848,15 +2000,12 @@ with tab_strike:
         unsafe_allow_html=True,
     )
 
-    _sd_info_col, _sd_radio_col = st.columns([4, 1])
-    with _sd_radio_col:
-        sd_period_label = st.radio(
-            "Period",
-            ["Today", "5D", "10D", "20D"],
-            horizontal=False,
-            label_visibility="collapsed",
-            key="sd_period_radio",
-        )
+    sd_period_label = st.radio(
+        "Period",
+        ["Today", "5D", "10D", "20D"],
+        horizontal=True,
+        key="sd_period_radio",
+    )
     sd_period_days = {"Today": 1, "5D": 5, "10D": 10, "20D": 20}[sd_period_label]
 
     sd_left, sd_right = st.columns([1, 3])
@@ -1950,11 +2099,11 @@ with tab_strike:
                     fig_str.add_trace(go.Scatter(
                         x=cm["timestamp"], y=cm["f_call"],
                         name=f"Front {call_strike:.0f}C",
-                        line=dict(color="#10d4a3", width=1.5), yaxis="y1"))
+                        line=dict(color=CHART_COLORS["front_iv"], width=1.5), yaxis="y1"))
                     fig_str.add_trace(go.Scatter(
                         x=cm["timestamp"], y=cm["b_call"],
                         name=f"Back  {call_strike:.0f}C",
-                        line=dict(color="#5b9cff", width=1.5), yaxis="y1"))
+                        line=dict(color=CHART_COLORS["back_iv"], width=1.5), yaxis="y1"))
                     fig_str.add_trace(go.Scatter(
                         x=cm["timestamp"], y=cm["call_ratio"],
                         name="Call Ratio (F/B)",
@@ -1969,11 +2118,11 @@ with tab_strike:
                     fig_str.add_trace(go.Scatter(
                         x=pm["timestamp"], y=pm["f_put"],
                         name=f"Front {put_strike:.0f}P",
-                        line=dict(color="#10d4a3", width=1.5, dash="dot"), yaxis="y1"))
+                        line=dict(color=CHART_COLORS["front_iv"], width=1.5, dash="dot"), yaxis="y1"))
                     fig_str.add_trace(go.Scatter(
                         x=pm["timestamp"], y=pm["b_put"],
                         name=f"Back  {put_strike:.0f}P",
-                        line=dict(color="#5b9cff", width=1.5, dash="dot"), yaxis="y1"))
+                        line=dict(color=CHART_COLORS["back_iv"], width=1.5, dash="dot"), yaxis="y1"))
                     fig_str.add_trace(go.Scatter(
                         x=pm["timestamp"], y=pm["put_ratio"],
                         name="Put Ratio (F/B)",

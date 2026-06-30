@@ -773,6 +773,89 @@ def get_diagonal_history(
         ).fetchall()
 
 
+def get_transform_mark_history(
+    db_path:      str,
+    front_expiry: str,
+    back_expiry:  str,
+    call_strike:  float,
+    put_strike:   float,
+    days:         int = 90,
+) -> list:
+    """
+    Historical mark prices for both the Diagonal Mark and the Transform Order
+    Mark at a given strike/expiry pair, one row per COMPLETE snapshot.
+
+    Extends get_diagonal_history() with the two additional front-expiry wing
+    legs (call_strike + 5, put_strike - 5) needed to compute the Transform
+    Order Mark: (back_call + back_put) - (front_wing_call + front_wing_put).
+
+    Rows where ANY of the six required legs is missing a computable mark
+    price (COALESCE(mark, (bid+ask)/2.0)) are excluded.
+
+    Columns returned:
+        snapshot_timestamp, spx,
+        front_call_mark, back_call_mark, front_put_mark, back_put_mark,
+        front_wing_call_mark, front_wing_put_mark.
+
+    Caller computes:
+        diagonal_mark  = (back_call_mark + back_put_mark)
+                        - (front_call_mark + front_put_mark)
+        transform_mark = (back_call_mark + back_put_mark)
+                        - (front_wing_call_mark + front_wing_put_mark)
+    """
+    with managed_conn(db_path) as conn:
+        return conn.execute(
+            """
+            SELECT
+                s.snapshot_timestamp,
+                s.underlying_price                            AS spx,
+                COALESCE(ofc.mark, (ofc.bid + ofc.ask) / 2.0) AS front_call_mark,
+                COALESCE(obc.mark, (obc.bid + obc.ask) / 2.0) AS back_call_mark,
+                COALESCE(ofp.mark, (ofp.bid + ofp.ask) / 2.0) AS front_put_mark,
+                COALESCE(obp.mark, (obp.bid + obp.ask) / 2.0) AS back_put_mark,
+                COALESCE(owc.mark, (owc.bid + owc.ask) / 2.0) AS front_wing_call_mark,
+                COALESCE(owp.mark, (owp.bid + owp.ask) / 2.0) AS front_wing_put_mark
+            FROM snapshots s
+            LEFT JOIN option_rows ofc
+                ON ofc.snapshot_id = s.snapshot_id
+               AND ofc.expiry_date = ? AND ofc.strike = ? AND ofc.right = 'C'
+            LEFT JOIN option_rows obc
+                ON obc.snapshot_id = s.snapshot_id
+               AND obc.expiry_date = ? AND obc.strike = ? AND obc.right = 'C'
+            LEFT JOIN option_rows ofp
+                ON ofp.snapshot_id = s.snapshot_id
+               AND ofp.expiry_date = ? AND ofp.strike = ? AND ofp.right = 'P'
+            LEFT JOIN option_rows obp
+                ON obp.snapshot_id = s.snapshot_id
+               AND obp.expiry_date = ? AND obp.strike = ? AND obp.right = 'P'
+            LEFT JOIN option_rows owc
+                ON owc.snapshot_id = s.snapshot_id
+               AND owc.expiry_date = ? AND owc.strike = ? AND owc.right = 'C'
+            LEFT JOIN option_rows owp
+                ON owp.snapshot_id = s.snapshot_id
+               AND owp.expiry_date = ? AND owp.strike = ? AND owp.right = 'P'
+            WHERE s.status = 'COMPLETE'
+              AND s.snapshot_timestamp >= datetime('now', ?, 'utc')
+              AND COALESCE(ofc.mark, (ofc.bid + ofc.ask) / 2.0) IS NOT NULL
+              AND COALESCE(obc.mark, (obc.bid + obc.ask) / 2.0) IS NOT NULL
+              AND COALESCE(ofp.mark, (ofp.bid + ofp.ask) / 2.0) IS NOT NULL
+              AND COALESCE(obp.mark, (obp.bid + obp.ask) / 2.0) IS NOT NULL
+              AND COALESCE(owc.mark, (owc.bid + owc.ask) / 2.0) IS NOT NULL
+              AND COALESCE(owp.mark, (owp.bid + owp.ask) / 2.0) IS NOT NULL
+            ORDER BY s.snapshot_timestamp
+            """,
+            (
+                front_expiry, float(call_strike),
+                back_expiry,  float(call_strike),
+                front_expiry, float(put_strike),
+                back_expiry,  float(put_strike),
+                front_expiry, float(call_strike) + 5,
+                front_expiry, float(put_strike)  - 5,
+                f"-{days} days",
+            ),
+        ).fetchall()
+
+
 def get_gaps(db_path: str, start: str, end: str,
               exclude_reasons: list[str] | None = None) -> list:
     """Collection gaps within a date range."""
