@@ -1105,6 +1105,7 @@ if page_mode == "📊 Overview":
                             adj_sh = None
                         if adj_sh is not None:
                             adj_ct = adj_sh * 100 * contracts
+                            computed_total = locked_ct + adj_ct
                             st.markdown(
                                 "<div style='background:#1a2035;border:1px solid #2a3f56;"
                                 "border-radius:8px;padding:12px 16px;margin-top:8px'>"
@@ -1125,8 +1126,8 @@ if page_mode == "📊 Overview":
                                 "margin:6px 0'></td></tr>"
                                 f"<tr><td style='color:#e2e8f0;font-weight:600;padding:3px 0'>Total Realized P&L</td>"
                                 f"<td style='text-align:right;font-weight:600;"
-                                f"color:{'#4ade80' if (t['final_pl'] or 0) >= 0 else '#f87171'}'>"
-                                f"{fmt_pl(t['final_pl'])}</td></tr>"
+                                f"color:{'#4ade80' if computed_total >= 0 else '#f87171'}'>"
+                                f"{fmt_pl(computed_total)}</td></tr>"
                                 "</table></div>",
                                 unsafe_allow_html=True,
                             )
@@ -1633,27 +1634,31 @@ elif page_mode == "⏰ Mark Expired":
                     unsafe_allow_html=True,
                 )
 
-            # ── P&L input — pre-filled but always editable ───────────────
-            final_pl = st.number_input(
-                "Final Realized P&L / contract ($)"
-                + (" — auto-calculated above, override if needed" if _auto_pl is not None else ""),
-                value=float(round(_auto_pl)) if _auto_pl is not None else 0.0,
-                step=1.0,
-            )
-
+            # For transformed trades, P&L is fully determined by the formula —
+            # no manual input. For Open trades (no IC data), keep manual entry.
             if not is_transformed:
+                final_pl = st.number_input(
+                    "Final Realized P&L / contract ($)",
+                    value=0.0,
+                    step=1.0,
+                )
                 st.caption(
-                    "Open trade (no IC data) — enter the total realized P&L manually: "
+                    "Open trade (no IC data) — enter total realized P&L manually: "
                     "net proceeds minus original entry debit, times 100, times contracts."
                 )
+            else:
+                final_pl = _auto_pl  # None if SPX not entered yet
 
             if st.form_submit_button("⏰ Confirm Expiry", use_container_width=True):
+                if is_transformed and final_pl is None:
+                    st.error("Enter SPX at Expiry to auto-calculate P&L before confirming.")
+                    st.stop()
                 db.update_trade(
                     config.DB_PATH, chosen_id,
                     status="Expired",
                     result_date=result_date.isoformat(),
                     spx_at_expiry=spx_expiry if spx_expiry > 0 else None,
-                    final_pl=final_pl,
+                    final_pl=round(final_pl) if final_pl is not None else None,
                     expired_inside_wings=exp_inside,
                     expired_between_shorts=exp_shorts,
                     outcome=outcome,
