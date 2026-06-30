@@ -421,6 +421,98 @@ iframe { border: none !important; }
   line-height: 1;
 }
 .hdr-status { display: flex; align-items: center; gap: .4rem; }
+
+/* ── Attention Strip — persistent, visible on every tab ──────────────────── */
+.attn-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  background: linear-gradient(90deg, rgba(16,212,163,.05), rgba(16,212,163,.01));
+  border: 1px solid rgba(16,212,163,.16);
+  border-radius: var(--r);
+  padding: .55rem 1rem;
+  margin-bottom: .7rem;
+  font-family: var(--sans);
+  animation: fadeUp .3s var(--ease) both;
+}
+.attn-counts { display: flex; align-items: center; gap: 1.1rem; flex-shrink: 0; }
+.attn-count-item { display: flex; align-items: baseline; gap: .32rem; }
+.attn-count-n {
+  font-family: var(--mono); font-weight: 700; font-size: 1rem; color: var(--text);
+}
+.attn-count-n.green { color: var(--green); }
+.attn-count-n.amber { color: var(--amber); }
+.attn-count-n.blue  { color: var(--blue); }
+.attn-count-l {
+  font-size: .62rem; text-transform: uppercase; letter-spacing: .08em; color: var(--text-3);
+}
+.attn-divider { width: 1px; height: 18px; background: var(--border); flex-shrink: 0; }
+.attn-best {
+  display: flex; align-items: center; gap: .5rem; font-size: .76rem;
+  color: var(--text-2); overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+}
+.attn-best b { color: var(--text); font-family: var(--mono); }
+.attn-best .gap-v { color: var(--green); font-family: var(--mono); font-weight: 600; }
+.attn-empty { font-size: .76rem; color: var(--text-3); }
+
+/* ── Custom top nav (replaces st.tabs for programmatic switching) ────────── */
+div[class*="st-key-topnav"] {
+  border-bottom: 1px solid var(--border);
+  margin-bottom: .8rem;
+}
+div[class*="st-key-topnav"] .stButton > button {
+  background: transparent !important;
+  border: none !important;
+  border-bottom: 2px solid transparent !important;
+  border-radius: 0 !important;
+  color: var(--text-2) !important;
+  font-size: .79rem !important;
+  font-weight: 500 !important;
+  padding: .6rem .2rem .55rem !important;
+  box-shadow: none !important;
+  transform: none !important;
+  width: 100% !important;
+}
+div[class*="st-key-topnav"] .stButton > button:hover {
+  color: var(--text) !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  transform: none !important;
+}
+div[class*="st-key-topnav"] .stButton > button[kind="primary"] {
+  color: var(--blue) !important;
+  font-weight: 600 !important;
+  border-bottom: 2px solid var(--blue) !important;
+  background: transparent !important;
+}
+
+/* ── Mission Control opportunity cards ───────────────────────────────────── */
+div[class*="st-key-mc_card_"] {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  padding: .8rem .95rem .7rem;
+  margin-bottom: .6rem;
+  box-shadow: var(--shadow);
+  transition: border-color .2s var(--ease);
+}
+div[class*="st-key-mc_card_"]:hover { border-color: var(--border-hi); }
+.mc-rank { font-size: .62rem; font-weight: 700; color: var(--text-3); letter-spacing: .08em; }
+.mc-new-badge {
+  display: inline-block; font-size: .54rem; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .08em; color: var(--amber);
+  background: rgba(240,164,41,.1); border: 1px solid rgba(240,164,41,.25);
+  border-radius: 4px; padding: .06rem .34rem; margin-left: .4rem;
+}
+.mc-combo { font-family: var(--mono); font-size: 1rem; font-weight: 700; color: var(--text); margin-top: .15rem; }
+.mc-expiry { font-size: .68rem; color: var(--text-2); margin-bottom: .35rem; }
+.mc-metrics { display: flex; gap: 1.1rem; margin-bottom: .3rem; }
+.mc-metric-l { font-size: .56rem; text-transform: uppercase; letter-spacing: .08em; color: var(--text-3); display: block; }
+.mc-metric-v { font-family: var(--mono); font-size: .92rem; font-weight: 600; color: var(--text); }
+.mc-metric-v.gap { color: var(--green); }
+.mc-spark { font-family: var(--mono); font-size: .85rem; color: var(--green); letter-spacing: -.05em; }
+.mc-eta { font-size: .68rem; color: var(--amber); margin-top: .2rem; }
 .st-dot {
   width: 7px; height: 7px;
   border-radius: 50%;
@@ -724,6 +816,28 @@ def _sparkline(values: list[float], width: int = 10) -> str:
     )
 
 
+def _fmt_duration(td) -> str:
+    """Format a pandas/python timedelta as '2h 12m' / '47m' / '8m'."""
+    if td is None or pd.isna(td):
+        return "—"
+    total_min = int(td.total_seconds() // 60)
+    if total_min < 1:
+        return "<1m"
+    h, m = divmod(total_min, 60)
+    return f"{h}h {m}m" if h else f"{m}m"
+
+
+def _fmt_eta(minutes: float | None) -> str:
+    if minutes is None:
+        return "—"
+    if minutes < 1:
+        return "<1 min"
+    if minutes < 60:
+        return f"~{int(round(minutes))} min"
+    h = minutes / 60.0
+    return f"~{h:.1f} hr"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper — ATM IV history
 # ─────────────────────────────────────────────────────────────────────────────
@@ -958,6 +1072,210 @@ def _compute_transform_scanner(
     )
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# MISSION CONTROL — cross-sectional opportunity discovery
+#
+# Two-phase design, kept cheap on purpose:
+#   Phase A (every refresh, every offset, all expiry pairs) — pure in-memory
+#     pandas against the chain already loaded. Classifies every combo as
+#     Eligible (gap >= 5), Approaching (gap in [_APPROACHING_LOW, 5)), or
+#     neither. This is the only part that touches "thousands of rows."
+#   Phase B (every refresh, but ONLY for the small Eligible+Approaching set —
+#     typically tens of rows, capped at _MC_HISTORY_CAP) — pulls per-combo
+#     history via db.get_transform_mark_history() to compute how long a gap
+#     has been active and whether it's trending toward the threshold.
+# Running Phase B against all combos would be the wrong trade — this keeps
+# cost proportional to "things that matter," not "things that exist."
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_TSCAN_THRESHOLD  = 5.0
+_APPROACHING_LOW  = 4.0   # gap in [4, 5) counts as "Approaching" (within 1 pt)
+_SWEEP_OFFSETS    = [0, 25, 50, 75, 100]   # symmetric put/call offsets to sweep
+_MC_HISTORY_CAP   = 20    # max candidates per tier to run Phase B history on
+
+
+def _scan_all_offsets(
+    chain_df: pd.DataFrame,
+    spx_price: float,
+    offsets: list[int] = _SWEEP_OFFSETS,
+    max_rows_per_offset: int = 500,
+) -> pd.DataFrame:
+    """
+    Phase A — sweep a small set of symmetric put/call offsets across every
+    valid expiry pair so opportunities aren't missed just because they sit
+    outside whatever single offset is selected in the Scanner filter panel.
+
+    Returns the union of all combos found, deduped on
+    (Front Expiry, Back Expiry, Put Strike, Call Strike), sorted by
+    Transform Diff descending. Front/Back Expiry columns retain the
+    "YYYY-MM-DD (Nd)" format from _compute_transform_scanner — callers that
+    need the raw date use .split(" ")[0].
+    """
+    frames = []
+    for o in offsets:
+        df = _compute_transform_scanner(
+            chain_df=chain_df, spx_price=spx_price,
+            put_offset=o, call_offset=o, max_rows=max_rows_per_offset,
+        )
+        if not df.empty:
+            frames.append(df)
+    if not frames:
+        return pd.DataFrame()
+    combined = pd.concat(frames, ignore_index=True)
+    combined = combined.drop_duplicates(
+        subset=["Front Expiry", "Back Expiry", "Put Strike", "Call Strike"]
+    )
+    return combined.sort_values("Transform Diff", ascending=False).reset_index(drop=True)
+
+
+def _candidate_signals(front_raw: str, back_raw: str,
+                        put_strike: float, call_strike: float,
+                        days: int = 1) -> dict | None:
+    """
+    Phase B — for ONE candidate combo, compute:
+      duration   — how long the gap has stayed continuously >= 5, ending now
+                   (None if not currently eligible)
+      eta_minutes — linear projection of minutes until gap crosses 5,
+                   based on the slope of the last few snapshots
+                   (None if flat/declining — no point showing a bogus ETA)
+      spark      — unicode sparkline of the recent gap trajectory
+      trend_up   — whether the last 3 readings are monotonically increasing
+    Returns None if there isn't enough history to say anything useful.
+    """
+    rows = db.get_transform_mark_history(
+        config.DB_PATH, front_raw, back_raw, call_strike, put_strike, days=days
+    )
+    if not rows:
+        return None
+    df = pd.DataFrame([dict(r) for r in rows])
+    df["timestamp"] = (
+        pd.to_datetime(df["snapshot_timestamp"], format="ISO8601", utc=True)
+        .dt.tz_convert(config.DISPLAY_TIMEZONE)
+    )
+    df["diagonal_mark"] = (
+        df["back_call_mark"] + df["back_put_mark"]
+        - df["front_call_mark"] - df["front_put_mark"]
+    )
+    df["transform_mark"] = (
+        df["back_call_mark"] + df["back_put_mark"]
+        - df["front_wing_call_mark"] - df["front_wing_put_mark"]
+    )
+    df["gap"] = df["transform_mark"] - df["diagonal_mark"]
+    df = df.sort_values("timestamp").reset_index(drop=True)
+    if df.empty:
+        return None
+
+    # Duration active — trailing contiguous streak where gap >= 5, ending now
+    flag = (df["gap"] >= _TSCAN_THRESHOLD).tolist()
+    duration = None
+    if flag and flag[-1]:
+        i = len(flag) - 1
+        while i > 0 and flag[i - 1]:
+            i -= 1
+        duration = df["timestamp"].iloc[-1] - df["timestamp"].iloc[i]
+
+    # ETA — slope of the last up-to-6 readings, projected to threshold
+    eta_minutes = None
+    tail = df.tail(6)
+    if len(tail) >= 3:
+        x_min = (tail["timestamp"] - tail["timestamp"].iloc[0]).dt.total_seconds() / 60.0
+        y_gap = tail["gap"].to_numpy()
+        slope, _ = np.polyfit(x_min.to_numpy(), y_gap, 1)
+        current_gap = float(y_gap[-1])
+        if slope > 0.01 and current_gap < _TSCAN_THRESHOLD:
+            eta_minutes = (_TSCAN_THRESHOLD - current_gap) / slope
+
+    spark = _sparkline(df["gap"].tail(12).tolist())
+    trend_up = bool(df["gap"].tail(3).is_monotonic_increasing) if len(df) >= 3 else False
+
+    return dict(duration=duration, eta_minutes=eta_minutes, spark=spark, trend_up=trend_up)
+
+
+def _run_mission_control(chain_df: pd.DataFrame, spx_price: float,
+                          snapshot_id: int) -> dict:
+    """
+    Orchestrates Phase A + Phase B and the cross-refresh "New" diff.
+    Returns a dict consumed by both the persistent Attention Strip and the
+    full Mission Control section on the Scanner tab — computed once per
+    script run regardless of which tab is active, since the strip is global.
+    """
+    all_combos = _scan_all_offsets(chain_df, spx_price)
+    if all_combos.empty:
+        return dict(eligible=[], approaching=[], new_keys=set(),
+                     n_eligible=0, n_approaching=0, n_new=0, best=None)
+
+    eligible_df    = all_combos[all_combos["Transform Diff"] >= _TSCAN_THRESHOLD].copy()
+    approaching_df = all_combos[
+        (all_combos["Transform Diff"] >= _APPROACHING_LOW)
+        & (all_combos["Transform Diff"] < _TSCAN_THRESHOLD)
+    ].copy()
+
+    def _key(row) -> str:
+        fr = row["Front Expiry"].split(" ")[0]
+        bk = row["Back Expiry"].split(" ")[0]
+        return f"{fr}|{bk}|{int(row['Put Strike'])}|{int(row['Call Strike'])}"
+
+    current_keys = set(eligible_df.apply(_key, axis=1)) if not eligible_df.empty else set()
+
+    # Only advance the "previous" comparison set when a NEW snapshot has
+    # actually landed — otherwise every widget-triggered rerun within the
+    # same snapshot would keep relabeling things as "new."
+    _prev_snap_id = st.session_state.get("mc_prev_snapshot_id")
+    if _prev_snap_id != snapshot_id:
+        _prev_keys = st.session_state.get("mc_prev_eligible_keys", set())
+        new_keys = current_keys - _prev_keys
+        st.session_state["mc_prev_eligible_keys"] = current_keys
+        st.session_state["mc_prev_snapshot_id"]   = snapshot_id
+        st.session_state["mc_new_keys"]           = new_keys
+    else:
+        new_keys = st.session_state.get("mc_new_keys", set())
+
+    def _build_cards(df: pd.DataFrame, cap: int) -> list[dict]:
+        cards = []
+        for _, row in df.head(cap).iterrows():
+            front_raw = row["Front Expiry"].split(" ")[0]
+            back_raw  = row["Back Expiry"].split(" ")[0]
+            put_s     = float(row["Put Strike"])
+            call_s    = float(row["Call Strike"])
+            sig = _candidate_signals(front_raw, back_raw, put_s, call_s) or {}
+            cards.append(dict(
+                front_raw=front_raw, back_raw=back_raw,
+                front_label=row["Front Expiry"], back_label=row["Back Expiry"],
+                put_strike=put_s, call_strike=call_s,
+                gap=float(row["Transform Diff"]),
+                iv_ratio=row.get("IV Ratio"),
+                is_new=(_key(row) in new_keys),
+                duration=sig.get("duration"),
+                eta_minutes=sig.get("eta_minutes"),
+                spark=sig.get("spark", "─"),
+                trend_up=sig.get("trend_up", False),
+            ))
+        return cards
+
+    eligible_cards    = _build_cards(eligible_df, _MC_HISTORY_CAP)
+    approaching_cards = _build_cards(approaching_df, _MC_HISTORY_CAP)
+
+    # "Likely Next" is the Approaching subset that actually has a rising
+    # trend with a computable ETA — sorted soonest-first.
+    likely_next = sorted(
+        [c for c in approaching_cards if c["eta_minutes"] is not None],
+        key=lambda c: c["eta_minutes"],
+    )
+
+    best = eligible_cards[0] if eligible_cards else None
+
+    return dict(
+        eligible=eligible_cards,
+        approaching=approaching_cards,
+        likely_next=likely_next,
+        new_keys=new_keys,
+        n_eligible=len(eligible_df),
+        n_approaching=len(approaching_df),
+        n_new=len(new_keys),
+        best=best,
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Sidebar
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1149,6 +1467,13 @@ if (
             dom        = "Call" if max_val > 0 else "Put"
             gex_label  = f"{max_strike:,.0f} ({dom})"
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Mission Control — runs once per script execution, regardless of which tab
+# is active, since the persistent Attention Strip in the header needs it too.
+# ─────────────────────────────────────────────────────────────────────────────
+
+MC = _run_mission_control(chain_df, spx_price, snapshot_id)
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # HEADER — Premium top bar
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1232,6 +1557,51 @@ components.html(
     height=22,
 )
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Attention Strip — persistent, renders regardless of which tab is active
+# ─────────────────────────────────────────────────────────────────────────────
+
+if MC["best"] is not None:
+    _b = MC["best"]
+    _attn_html = (
+        '<div class="attn-strip">'
+        '<div class="attn-counts">'
+        '<span class="attn-count-item">'
+        f'<span class="attn-count-n green">{MC["n_eligible"]}</span>'
+        '<span class="attn-count-l">Eligible</span></span>'
+        '<span class="attn-count-item">'
+        f'<span class="attn-count-n amber">{MC["n_approaching"]}</span>'
+        '<span class="attn-count-l">Approaching</span></span>'
+        '<span class="attn-count-item">'
+        f'<span class="attn-count-n blue">{MC["n_new"]}</span>'
+        '<span class="attn-count-l">New</span></span>'
+        '</div>'
+        '<div class="attn-divider"></div>'
+        '<div class="attn-best">'
+        f'🔥 Best: <b>{int(_b["put_strike"])}P / {int(_b["call_strike"])}C</b>'
+        f'&nbsp;·&nbsp;Gap <span class="gap-v">+{_b["gap"]:.2f}</span>'
+        f'&nbsp;·&nbsp;Active {_fmt_duration(_b["duration"])}'
+        '</div>'
+        '</div>'
+    )
+else:
+    _attn_html = (
+        '<div class="attn-strip">'
+        '<div class="attn-counts">'
+        '<span class="attn-count-item">'
+        f'<span class="attn-count-n">{MC["n_eligible"]}</span>'
+        '<span class="attn-count-l">Eligible</span></span>'
+        '<span class="attn-count-item">'
+        f'<span class="attn-count-n">{MC["n_approaching"]}</span>'
+        '<span class="attn-count-l">Approaching</span></span>'
+        '</div>'
+        '<div class="attn-divider"></div>'
+        '<span class="attn-empty">No transform opportunities right now — '
+        'scanning every refresh.</span>'
+        '</div>'
+    )
+st.markdown(_attn_html, unsafe_allow_html=True)
+
 # ── Token expiry warning banner ───────────────────────────────────────────────
 _token_age = schwab_client.get_token_age_days()
 if _token_age is not None and _token_age >= 6:
@@ -1267,18 +1637,31 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# Mission Control drill-down (a card's "View Chart" click) pre-sets these
+# session_state keys before this widget block runs. If the stashed value
+# isn't valid for the freshly-loaded chain, drop it so the normal default
+# logic below takes over instead of raising a "not in options" error.
+if "front_expiry_select" in st.session_state and st.session_state["front_expiry_select"] not in available_expiries:
+    del st.session_state["front_expiry_select"]
+if "back_expiry_select" in st.session_state and st.session_state["back_expiry_select"] not in available_expiries:
+    del st.session_state["back_expiry_select"]
+
 c1, c2, c3, c4 = st.columns(4)
 
 with c1:
+    _fe_kwargs = {} if "front_expiry_select" in st.session_state else {"index": 0}
     front_expiry = st.selectbox(
-        "Front Expiry", available_expiries, index=0,
-        format_func=_exp_label, key="front_expiry_select",
+        "Front Expiry", available_expiries,
+        format_func=_exp_label, key="front_expiry_select", **_fe_kwargs,
     )
 with c2:
+    _be_kwargs = (
+        {} if "back_expiry_select" in st.session_state
+        else {"index": min(1, len(available_expiries) - 1)}
+    )
     back_expiry = st.selectbox(
         "Back Expiry", available_expiries,
-        index=min(1, len(available_expiries) - 1),
-        format_func=_exp_label, key="back_expiry_select",
+        format_func=_exp_label, key="back_expiry_select", **_be_kwargs,
     )
 
 _put_strikes = sorted(set(
@@ -1292,6 +1675,11 @@ _call_strikes = sorted(set(
     chain_df[(chain_df["expiry"] == back_expiry)  & (chain_df["side"] == "CALL")]["strike"].unique()
 ))
 
+if "put_strike_select" in st.session_state and st.session_state["put_strike_select"] not in _put_strikes:
+    del st.session_state["put_strike_select"]
+if "call_strike_select" in st.session_state and st.session_state["call_strike_select"] not in _call_strikes:
+    del st.session_state["call_strike_select"]
+
 
 def _nearest_idx(strikes: list, target: float) -> int:
     if not strikes:
@@ -1301,14 +1689,17 @@ def _nearest_idx(strikes: list, target: float) -> int:
 
 with c3:
     if _put_strikes:
-        _put_default_idx = _nearest_idx(_put_strikes, spx_price - 100)
+        _ps_kwargs = (
+            {} if "put_strike_select" in st.session_state
+            else {"index": _nearest_idx(_put_strikes, spx_price - 100)}
+        )
         put_strike = st.selectbox(
             "Put Strike",
             options=_put_strikes,
-            index=_put_default_idx,
             format_func=lambda s: f"{int(s):,}",
             key="put_strike_select",
             help="Only strikes present in both front and back expiry are shown.",
+            **_ps_kwargs,
         )
     else:
         st.warning("No PUT strikes available for this expiry pair.")
@@ -1316,14 +1707,17 @@ with c3:
 
 with c4:
     if _call_strikes:
-        _call_default_idx = _nearest_idx(_call_strikes, spx_price)
+        _cs_kwargs = (
+            {} if "call_strike_select" in st.session_state
+            else {"index": _nearest_idx(_call_strikes, spx_price)}
+        )
         call_strike = st.selectbox(
             "Call Strike",
             options=_call_strikes,
-            index=_call_default_idx,
             format_func=lambda s: f"{int(s):,}",
             key="call_strike_select",
             help="Only strikes present in both front and back expiry are shown.",
+            **_cs_kwargs,
         )
     else:
         st.warning("No CALL strikes available for this expiry pair.")
@@ -1395,181 +1789,319 @@ _iv_pct = (
     if not atm_merged_90d.empty else None
 )
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Mission Control card renderer — used by the Scanner section below
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _render_mc_section(cards: list[dict], section: str, title: str, icon: str,
+                        show_duration: bool = True) -> None:
+    if not cards:
+        return
+    st.markdown(
+        f'<div class="sh" style="margin-top:.3rem">'
+        f'<span class="sh-ico">{icon}</span>'
+        f'<span class="sh-ttl">{title}</span>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+    n_cols = 3
+    for row_start in range(0, len(cards), n_cols):
+        row_cards = cards[row_start:row_start + n_cols]
+        cols = st.columns(n_cols)
+        for c_idx, (card, col) in enumerate(zip(row_cards, cols)):
+            gidx = row_start + c_idx
+            with col:
+                with st.container(key=f"mc_card_{section}_{gidx}"):
+                    _new_badge = '<span class="mc-new-badge">NEW</span>' if card["is_new"] else ""
+                    _metrics = (
+                        f'<div><span class="mc-metric-l">Gap</span>'
+                        f'<span class="mc-metric-v gap">+{card["gap"]:.2f}</span></div>'
+                    )
+                    if show_duration:
+                        _metrics += (
+                            f'<div><span class="mc-metric-l">Active</span>'
+                            f'<span class="mc-metric-v">{_fmt_duration(card["duration"])}</span></div>'
+                        )
+                    if card["iv_ratio"] is not None:
+                        _metrics += (
+                            f'<div><span class="mc-metric-l">IV Ratio</span>'
+                            f'<span class="mc-metric-v">{card["iv_ratio"]:.4f}</span></div>'
+                        )
+                    _trend_arrow = " ↑" if card["trend_up"] else ""
+                    _eta_html = (
+                        f'<div class="mc-eta">ETA {_fmt_eta(card["eta_minutes"])}</div>'
+                        if card.get("eta_minutes") is not None else ""
+                    )
+                    st.markdown(
+                        f'<div class="mc-rank">#{gidx + 1}{_new_badge}</div>'
+                        f'<div class="mc-combo">{int(card["put_strike"])}P / {int(card["call_strike"])}C</div>'
+                        f'<div class="mc-expiry">{card["front_label"]} → {card["back_label"]}</div>'
+                        f'<div class="mc-metrics">{_metrics}</div>'
+                        f'<div class="mc-spark">{card["spark"]}{_trend_arrow}</div>'
+                        f'{_eta_html}',
+                        unsafe_allow_html=True,
+                    )
+                    bcol1, bcol2 = st.columns(2)
+                    with bcol1:
+                        if st.button("View Chart", key=f"viewchart_{section}_{gidx}",
+                                     use_container_width=True):
+                            st.session_state["front_expiry_select"] = card["front_raw"]
+                            st.session_state["back_expiry_select"]  = card["back_raw"]
+                            st.session_state["put_strike_select"]   = card["put_strike"]
+                            st.session_state["call_strike_select"]  = card["call_strike"]
+                            st.session_state["active_tab"] = "edge"
+                            st.rerun()
+                    with bcol2:
+                        if st.button("📓 Journal", key=f"journal_{section}_{gidx}",
+                                     use_container_width=True):
+                            # Deep-link contract for pages/journal.py — that page
+                            # should read st.session_state.get("journal_prefill")
+                            # on load and pre-populate a new IC-transform entry.
+                            st.session_state["journal_prefill"] = dict(
+                                type="transform",
+                                front_expiry=card["front_raw"], back_expiry=card["back_raw"],
+                                put_strike=card["put_strike"], call_strike=card["call_strike"],
+                                transform_gap=card["gap"], iv_ratio=card["iv_ratio"],
+                                spx_price=spx_price, timestamp=snap_ts_str,
+                            )
+                            try:
+                                st.switch_page("pages/journal.py")
+                            except Exception:
+                                st.info(
+                                    "Trade details staged — open Journal from the "
+                                    "sidebar to continue."
+                                )
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
-# TAB NAVIGATION
+# TAB NAVIGATION — custom nav bar (not st.tabs) so Mission Control cards can
+# jump straight to a pre-scoped tab programmatically. st.tabs() has no API
+# for switching the active tab from code; this swaps in a session_state-driven
+# button row instead, styled via CSS to look identical to the original tabs.
 # ═══════════════════════════════════════════════════════════════════════════════
 
-_TSCAN_THRESHOLD = 5.0
+_TABS = [
+    ("scanner",  "🔭  Scanner"),
+    ("entry",    "📊  Entry Analysis"),
+    ("edge",     "📈  Calendar Edge"),
+    ("strike",   "🎯  Strike Detail"),
+    ("hist",     "📉  Historical Stats"),
+    ("research", "🔬  Research"),
+]
 
-tab_scanner, tab_entry, tab_edge, tab_strike, tab_hist, tab_research = st.tabs([
-    "🔭  Scanner",
-    "📊  Entry Analysis",
-    "📈  Calendar Edge",
-    "🎯  Strike Detail",
-    "📉  Historical Stats",
-    "🔬  Research",
-])
+if "active_tab" not in st.session_state:
+    st.session_state["active_tab"] = "scanner"
+
+with st.container(key="topnav"):
+    _nav_cols = st.columns(len(_TABS))
+    for (_tkey, _tlabel), _tcol in zip(_TABS, _nav_cols):
+        with _tcol:
+            _is_active = st.session_state["active_tab"] == _tkey
+            if st.button(
+                _tlabel, key=f"nav_{_tkey}", use_container_width=True,
+                type="primary" if _is_active else "secondary",
+            ):
+                st.session_state["active_tab"] = _tkey
+                st.rerun()
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TAB 1 — TRANSFORMATION OPPORTUNITY SCANNER
+# SCANNER — Mission Control + full opportunity table
 # ═══════════════════════════════════════════════════════════════════════════════
 
-with tab_scanner:
+if st.session_state["active_tab"] == "scanner":
 
-    # ── Filter panel ─────────────────────────────────────────────────────────
-    _offset_options = [0] + list(range(5, 205, 5))
+    # ── Mission Control ─────────────────────────────────────────────────────
+    st.markdown(
+        '<div class="sh" style="margin-top:.2rem">'
+        '<span class="sh-ico">🔥</span>'
+        '<span class="sh-ttl">Transform Opportunities</span>'
+        f'<span class="sh-bdg g">{MC["n_eligible"]} Eligible</span>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
 
-    st.markdown('<div class="filter-panel"><div class="fp-title">Strike Selection</div></div>',
-                unsafe_allow_html=True)
-
-    _sc_c1, _sc_c2, _sc_c3 = st.columns([1, 1, 2])
-    with _sc_c1:
-        sc_put_offset = st.selectbox(
-            "Put Offset from ATM",
-            options=_offset_options,
-            format_func=lambda v: "ATM" if v == 0 else f"ATM − {v}",
-            index=0,
-            key="sc_put_offset",
-        )
-    with _sc_c2:
-        sc_call_offset = st.selectbox(
-            "Call Offset from ATM",
-            options=_offset_options,
-            format_func=lambda v: "ATM" if v == 0 else f"ATM + {v}",
-            index=0,
-            key="sc_call_offset",
-        )
-    with _sc_c3:
-        sc_gap_pts = sc_put_offset + sc_call_offset
-        _sym = "symmetric" if sc_put_offset == sc_call_offset else "asymmetric"
-        st.markdown(
-            f"<p style='margin:.6rem 0 0;font-size:.78rem;color:#6d8fa8;'>"
-            f"Strike gap: <span style='color:#dde6f1;font-family:var(--mono);font-weight:600;'>"
-            f"{sc_gap_pts} pts</span> &nbsp;·&nbsp; {_sym}</p>",
-            unsafe_allow_html=True,
-        )
-
-    # ── Scanner compute ───────────────────────────────────────────────────────
-    with st.spinner("Scanning combinations…"):
-        _ts_df = _compute_transform_scanner(
-            chain_df     = chain_df,
-            spx_price    = spx_price,
-            put_offset   = int(sc_put_offset),
-            call_offset  = int(sc_call_offset),
-            max_rows     = int(sc_max_rows),
-        )
-
-    # ── KPI cards ─────────────────────────────────────────────────────────────
-    if not _ts_df.empty:
-        _ready_count  = int((_ts_df["Transform Diff"] >= _TSCAN_THRESHOLD).sum())
-        _best_diff    = float(_ts_df["Transform Diff"].max())
-        _best_row     = _ts_df.iloc[0]
-        _best_label   = f"Put {int(_best_row['Put Strike'])} / Call {int(_best_row['Call Strike'])}"
-        _avg_iv_ratio = (
-            _ts_df["IV Ratio"].dropna().mean()
-            if "IV Ratio" in _ts_df.columns else None
-        )
-
-        # Diff distribution for badge
-        _diff_vals      = _ts_df["Transform Diff"]
-        _gt5_count      = int((_diff_vals >= 5).sum())
-        _best_diff_str  = f"{_best_diff:+.2f}"
-        _avg_ratio_str  = f"{_avg_iv_ratio:.4f}" if _avg_iv_ratio else "—"
-
-        # KPI 1 highlight check
-        _kpi1_hl = " kpi-hl" if _best_diff >= _TSCAN_THRESHOLD else ""
-        _kpi2_hl = " kpi-hl" if _ready_count > 0 else ""
-
-        kpi_html = f"""
-<div class="kpi-grid" style="grid-template-columns:repeat(4,1fr)">
-  <div class="kpi-card{_kpi2_hl}">
-    <span class="kpi-icon">📡</span>
-    <span class="kpi-v c-blue">{len(_ts_df):,}</span>
-    <span class="kpi-l">Diagonals Scanned</span>
-  </div>
-  <div class="kpi-card{_kpi2_hl}">
-    <span class="kpi-icon">🎯</span>
-    <span class="kpi-v{'  c-green' if _ready_count > 0 else ''}">{_ready_count}</span>
-    <span class="kpi-l">Diff &gt; {_TSCAN_THRESHOLD:.0f}</span>
-  </div>
-  <div class="kpi-card{_kpi1_hl}">
-    <span class="kpi-icon">✦</span>
-    <span class="kpi-v">{_best_diff_str}</span>
-    <span class="kpi-l">Best Difference</span>
-    <span class="kpi-sub">{_best_label}</span>
-  </div>
-  <div class="kpi-card">
-    <span class="kpi-icon">⚡</span>
-    <span class="kpi-v c-amber">{_avg_ratio_str}</span>
-    <span class="kpi-l">Avg IV Ratio</span>
-  </div>
-</div>"""
-
-    # ── Ready badge ───────────────────────────────────────────────────────────
-    if not _ts_df.empty and _ready_count > 0:
-        st.markdown(
-            f'<div class="ready-badge"><span class="rdot"></span>'
-            f'{_ready_count} combination{"s" if _ready_count > 1 else ""} ready to transform'
-            f'&nbsp;·&nbsp;Transform Diff ≥ {_TSCAN_THRESHOLD:.0f}</div>',
-            unsafe_allow_html=True,
-        )
-
-    # ── Main content: table + side panel ─────────────────────────────────────
-    if _ts_df.empty:
+    if MC["n_eligible"] == 0 and MC["n_approaching"] == 0:
         st.caption(
-            "No valid combinations found — the current chain has no strike/expiry pairs "
-            "with marks available for all four diagonal legs plus the two wing strikes. "
-            "The collector may not have run yet, or try adjusting the Strike Window "
-            "or Liquidity threshold in the sidebar."
+            "No transform opportunities right now across the swept strike set "
+            f"({', '.join(f'ATM±{o}' if o else 'ATM' for o in _SWEEP_OFFSETS)}). "
+            "Scanning continues every refresh."
         )
     else:
-        st.markdown(
-            '<div class="sh">'
-            '<span class="sh-ico">📋</span>'
-            '<span class="sh-ttl">Transformation Opportunities</span>'
-            '<span class="sh-bdg">Sorted by Diff ↓</span>'
-            '</div>',
-            unsafe_allow_html=True,
+        _render_mc_section(
+            MC["eligible"][:6], "elig",
+            "Eligible Now — sorted by Gap, descending", "🟢",
+        )
+        if MC["n_eligible"] > 6:
+            st.caption(f"Showing top 6 of {MC['n_eligible']} eligible. Full set in the table below.")
+
+        _render_mc_section(
+            MC["likely_next"][:3], "likely",
+            "Likely Next — gap rising, sorted by soonest ETA", "⏱",
+            show_duration=False,
         )
 
-        def _ts_row_style(row):
-            if row["Transform Diff"] >= _TSCAN_THRESHOLD:
-                return ["background-color: #0a1d14; color: #10d4a3"] * len(row)
-            elif row["Transform Diff"] < 0:
-                return ["color: #f05252"] * len(row)
-            return [""] * len(row)
+    st.markdown(
+        "<div style='margin:.9rem 0 .8rem;border-top:1px solid var(--border)'></div>",
+        unsafe_allow_html=True,
+    )
 
-        _ts_display = _ts_df.style.apply(_ts_row_style, axis=1).format({
-            "Diagonal Mark":  "{:.2f}",
-            "Transform Mark": "{:.2f}",
-            "Transform Diff": "{:+.2f}",
-            "IV Ratio":       lambda v: f"{v:.4f}" if v is not None else "—",
-        })
+    with st.expander("🔍 Full Scanner — custom offset & complete table", expanded=False):
 
-        st.dataframe(
-            _ts_display,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Put Strike":     st.column_config.NumberColumn("Put Strike",     format="%d"),
-                "Call Strike":    st.column_config.NumberColumn("Call Strike",    format="%d"),
-                "Diagonal Mark":  st.column_config.NumberColumn("Diag Mark",      format="%.2f"),
-                "Transform Mark": st.column_config.NumberColumn("Transform Mark", format="%.2f"),
-                "Transform Diff": st.column_config.NumberColumn("Transform Diff", format="%+.2f"),
-                "IV Ratio":       st.column_config.NumberColumn("IV Ratio",       format="%.4f"),
-            },
-        )
-        st.caption(
-            f"{len(_ts_df)} combinations  ·  "
-            "Green = ready to transform (≥ 5)  ·  "
-            "Click any header to re-sort"
-        )
+        # ── Filter panel ─────────────────────────────────────────────────────────
+        _offset_options = [0] + list(range(5, 205, 5))
+
+        st.markdown('<div class="filter-panel"><div class="fp-title">Strike Selection</div></div>',
+                    unsafe_allow_html=True)
+
+        _sc_c1, _sc_c2, _sc_c3 = st.columns([1, 1, 2])
+        with _sc_c1:
+
+            sc_put_offset = st.selectbox(
+                "Put Offset from ATM",
+                options=_offset_options,
+                format_func=lambda v: "ATM" if v == 0 else f"ATM − {v}",
+                index=0,
+                key="sc_put_offset",
+            )
+        with _sc_c2:
+            sc_call_offset = st.selectbox(
+                "Call Offset from ATM",
+                options=_offset_options,
+                format_func=lambda v: "ATM" if v == 0 else f"ATM + {v}",
+                index=0,
+                key="sc_call_offset",
+            )
+        with _sc_c3:
+            sc_gap_pts = sc_put_offset + sc_call_offset
+            _sym = "symmetric" if sc_put_offset == sc_call_offset else "asymmetric"
+            st.markdown(
+                f"<p style='margin:.6rem 0 0;font-size:.78rem;color:#6d8fa8;'>"
+                f"Strike gap: <span style='color:#dde6f1;font-family:var(--mono);font-weight:600;'>"
+                f"{sc_gap_pts} pts</span> &nbsp;·&nbsp; {_sym}</p>",
+                unsafe_allow_html=True,
+            )
+
+        # ── Scanner compute ───────────────────────────────────────────────────────
+        with st.spinner("Scanning combinations…"):
+            _ts_df = _compute_transform_scanner(
+                chain_df     = chain_df,
+                spx_price    = spx_price,
+                put_offset   = int(sc_put_offset),
+                call_offset  = int(sc_call_offset),
+                max_rows     = int(sc_max_rows),
+            )
+
+        # ── KPI cards ─────────────────────────────────────────────────────────────
+        if not _ts_df.empty:
+            _ready_count  = int((_ts_df["Transform Diff"] >= _TSCAN_THRESHOLD).sum())
+            _best_diff    = float(_ts_df["Transform Diff"].max())
+            _best_row     = _ts_df.iloc[0]
+            _best_label   = f"Put {int(_best_row['Put Strike'])} / Call {int(_best_row['Call Strike'])}"
+            _avg_iv_ratio = (
+                _ts_df["IV Ratio"].dropna().mean()
+                if "IV Ratio" in _ts_df.columns else None
+            )
+
+            # Diff distribution for badge
+            _diff_vals      = _ts_df["Transform Diff"]
+            _gt5_count      = int((_diff_vals >= 5).sum())
+            _best_diff_str  = f"{_best_diff:+.2f}"
+            _avg_ratio_str  = f"{_avg_iv_ratio:.4f}" if _avg_iv_ratio else "—"
+
+            # KPI 1 highlight check
+            _kpi1_hl = " kpi-hl" if _best_diff >= _TSCAN_THRESHOLD else ""
+            _kpi2_hl = " kpi-hl" if _ready_count > 0 else ""
+
+            kpi_html = f"""
+    <div class="kpi-grid" style="grid-template-columns:repeat(4,1fr)">
+      <div class="kpi-card{_kpi2_hl}">
+        <span class="kpi-icon">📡</span>
+        <span class="kpi-v c-blue">{len(_ts_df):,}</span>
+        <span class="kpi-l">Diagonals Scanned</span>
+      </div>
+      <div class="kpi-card{_kpi2_hl}">
+        <span class="kpi-icon">🎯</span>
+        <span class="kpi-v{'  c-green' if _ready_count > 0 else ''}">{_ready_count}</span>
+        <span class="kpi-l">Diff &gt; {_TSCAN_THRESHOLD:.0f}</span>
+      </div>
+      <div class="kpi-card{_kpi1_hl}">
+        <span class="kpi-icon">✦</span>
+        <span class="kpi-v">{_best_diff_str}</span>
+        <span class="kpi-l">Best Difference</span>
+        <span class="kpi-sub">{_best_label}</span>
+      </div>
+      <div class="kpi-card">
+        <span class="kpi-icon">⚡</span>
+        <span class="kpi-v c-amber">{_avg_ratio_str}</span>
+        <span class="kpi-l">Avg IV Ratio</span>
+      </div>
+    </div>"""
+
+        # ── Ready badge ───────────────────────────────────────────────────────────
+        if not _ts_df.empty and _ready_count > 0:
+            st.markdown(
+                f'<div class="ready-badge"><span class="rdot"></span>'
+                f'{_ready_count} combination{"s" if _ready_count > 1 else ""} ready to transform'
+                f'&nbsp;·&nbsp;Transform Diff ≥ {_TSCAN_THRESHOLD:.0f}</div>',
+                unsafe_allow_html=True,
+            )
+
+        # ── Main content: table + side panel ─────────────────────────────────────
+        if _ts_df.empty:
+            st.caption(
+                "No valid combinations found — the current chain has no strike/expiry pairs "
+                "with marks available for all four diagonal legs plus the two wing strikes. "
+                "The collector may not have run yet, or try adjusting the Strike Window "
+                "or Liquidity threshold in the sidebar."
+            )
+        else:
+            st.markdown(
+                '<div class="sh">'
+                '<span class="sh-ico">📋</span>'
+                '<span class="sh-ttl">Transformation Opportunities</span>'
+                '<span class="sh-bdg">Sorted by Diff ↓</span>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+
+            def _ts_row_style(row):
+                if row["Transform Diff"] >= _TSCAN_THRESHOLD:
+                    return ["background-color: #0a1d14; color: #10d4a3"] * len(row)
+                elif row["Transform Diff"] < 0:
+                    return ["color: #f05252"] * len(row)
+                return [""] * len(row)
+
+            _ts_display = _ts_df.style.apply(_ts_row_style, axis=1).format({
+                "Diagonal Mark":  "{:.2f}",
+                "Transform Mark": "{:.2f}",
+                "Transform Diff": "{:+.2f}",
+                "IV Ratio":       lambda v: f"{v:.4f}" if v is not None else "—",
+            })
+
+            st.dataframe(
+                _ts_display,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Put Strike":     st.column_config.NumberColumn("Put Strike",     format="%d"),
+                    "Call Strike":    st.column_config.NumberColumn("Call Strike",    format="%d"),
+                    "Diagonal Mark":  st.column_config.NumberColumn("Diag Mark",      format="%.2f"),
+                    "Transform Mark": st.column_config.NumberColumn("Transform Mark", format="%.2f"),
+                    "Transform Diff": st.column_config.NumberColumn("Transform Diff", format="%+.2f"),
+                    "IV Ratio":       st.column_config.NumberColumn("IV Ratio",       format="%.4f"),
+                },
+            )
+            st.caption(
+                f"{len(_ts_df)} combinations  ·  "
+                "Green = ready to transform (≥ 5)  ·  "
+                "Click any header to re-sort"
+            )
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAB 2 — ENTRY ANALYSIS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-with tab_entry:
+if st.session_state["active_tab"] == "entry":
 
     st.markdown(
         '<div class="sh"><span class="sh-ico">📊</span>'
@@ -1723,7 +2255,7 @@ with tab_entry:
 # TAB 3 — CALENDAR EDGE
 # ═══════════════════════════════════════════════════════════════════════════════
 
-with tab_edge:
+if st.session_state["active_tab"] == "edge":
 
     st.markdown(
         '<div class="sh"><span class="sh-ico">📈</span>'
@@ -1992,7 +2524,7 @@ with tab_edge:
 # Own period selector independent of Calendar Edge.
 # ═══════════════════════════════════════════════════════════════════════════════
 
-with tab_strike:
+if st.session_state["active_tab"] == "strike":
 
     st.markdown(
         '<div class="sh"><span class="sh-ico">🎯</span>'
@@ -2161,7 +2693,7 @@ with tab_strike:
 # TAB 4 — HISTORICAL STATISTICS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-with tab_hist:
+if st.session_state["active_tab"] == "hist":
 
     st.markdown(
         f'<div class="sh"><span class="sh-ico">📉</span>'
@@ -2213,7 +2745,7 @@ with tab_hist:
 # TAB 5 — RESEARCH
 # ═══════════════════════════════════════════════════════════════════════════════
 
-with tab_research:
+if st.session_state["active_tab"] == "research":
 
     st.markdown(
         '<div class="sh"><span class="sh-ico">🔬</span>'
