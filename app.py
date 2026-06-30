@@ -901,9 +901,18 @@ def _backfill_eligible_history(front_raw: str, back_raw: str,
     """
     if gap_df.empty or "gap" not in gap_df.columns:
         return
-    crossings = gap_df[gap_df["gap"] >= _TSCAN_THRESHOLD]
+    crossings = gap_df[gap_df["gap"] >= _TSCAN_THRESHOLD].copy()
     if crossings.empty:
         return
+
+    # gap_df's timestamps come from Calendar Edge already converted to
+    # config.DISPLAY_TIMEZONE (tz-aware), but the registry stores naive UTC
+    # strings everywhere else (snapshot_ts from the live scan path). Normalize
+    # to naive UTC here so the two paths stay comparable and don't raise
+    # "Cannot compare tz-naive and tz-aware timestamps."
+    _ts = crossings["timestamp"]
+    if getattr(_ts.dt, "tz", None) is not None:
+        crossings["timestamp"] = _ts.dt.tz_convert("UTC").dt.tz_localize(None)
 
     registry = _load_eligible_history()
     key = f"{front_raw}|{back_raw}|{int(put_strike)}|{int(call_strike)}"
