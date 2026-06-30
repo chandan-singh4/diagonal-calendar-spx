@@ -35,6 +35,8 @@ Log every change here. Format:
 GitHub repo: https://github.com/chandan-singh4/diagonal-calendar-spx
 Primary branch: main
 
+Newest entries begins from here - 
+
 ## 2026-06-30 — v4.0: Premium Redesign, Mission Control, Trade Journal P&L Fixes
 
 **Status:** Complete — all changes verified this session.
@@ -215,26 +217,35 @@ All HYPOTHESIS metrics remain unvalidated. No outcomes have accumulated sufficie
 
 ---
 
-### Commit command
-
-```bash
-git add app.py db.py pages/journal.py DEV_JOURNAL.md DOCUMENTATION.md
-git commit -m "v4.0: premium redesign, Mission Control, non-ATM registry, tab nav, Journal P&L lifecycle fix"
-git push
-```
-
 Also add to `.gitignore` if not already there:
 ```
 eligible_history.json
 ```
 
----
+## 2026-06-29 — v3.5 Transform Gap chart + chart color customization
+**Changed:**
+- Calendar Edge: removed redundant explanatory info box (badge already shows regime)
+- Period selectors (Calendar Edge, Strike Detail) now horizontal segmented controls
+- New primary chart: Diagonal Mark vs Transform Order Mark with green-shaded
+  Transform Gap ≥ 5 regions — added db.get_transform_mark_history() to pull
+  wing-strike legs historically
+- Reordered Calendar Edge charts: Transform Gap → Front/Back IV stacked →
+  dual-axis IV+Ratio → scatter
+- Added Chart Appearance sidebar section: color_picker per line series
+  (Diagonal Mark, Transform Order Mark, Front IV%, Back IV%), persisted to
+  chart_colors.json, with Reset to Default button
+**Why:** User wants the transform-eligibility window visible at a glance
+against IV context, less redundant text, and control over chart aesthetics.
+**Impact:** New read-only DB query; no schema or write-path changes.
+chart_colors.json is a new local preference file (git-ignore recommended).
 
-Primary branch: main
-Local path: wherever your spx-diagonal-dashboard folder lives (parent folder contains .venv)
-
-
-Newest entries begins from here - 
+## 2026-06-29 — v3.4 design fixups
+**Changed:** Removed Last Updated + Auto Refresh KPI cards (duplicate of header info);
+removed scanner side panel entirely (Market Snapshot, IV Ratio Snapshot donut,
+Diff Distribution bar — all new additions not in original dashboard).
+**Why:** User feedback — side panel widgets were not part of original feature set;
+header already shows refresh/timestamp info.
+**Impact:** Scanner tab is cleaner; table is full-width; KPI row trimmed to 4 cards.
 
 ## 2026-06-29 — Dashboard v3.3: Transformation Scanner, UX polish, layout cleanup
 
