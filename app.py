@@ -886,6 +886,51 @@ def _update_eligible_history(non_atm_df: pd.DataFrame, snapshot_ts: str) -> dict
     return registry
 
 
+def _backfill_eligible_history(front_raw: str, back_raw: str,
+                                put_strike: float, call_strike: float,
+                                gap_df: pd.DataFrame) -> None:
+    """
+    Opportunistic registry backfill — called from Calendar Edge whenever a
+    user manually selects a strike/expiry pair and pulls its mark history.
+    The Mission Control sweep only checks a fixed symmetric grid of offsets
+    (see _SWEEP_OFFSETS), so a genuinely asymmetric or off-grid combo can
+    show a real >= 5 crossing in its history without ever entering the
+    registry through the automated scan. This catches it the moment someone
+    actually looks — zero extra DB calls, since gap_df is already fetched
+    for the Diagonal vs. Transform Order Mark chart.
+    """
+    if gap_df.empty or "gap" not in gap_df.columns:
+        return
+    crossings = gap_df[gap_df["gap"] >= _TSCAN_THRESHOLD]
+    if crossings.empty:
+        return
+
+    registry = _load_eligible_history()
+    key = f"{front_raw}|{back_raw}|{int(put_strike)}|{int(call_strike)}"
+    prev = registry.get(key, {})
+
+    first_seen_ts = crossings["timestamp"].min()
+    last_seen_ts  = crossings["timestamp"].max()
+    if prev.get("first_seen"):
+        first_seen_ts = min(first_seen_ts, pd.Timestamp(prev["first_seen"]))
+    if prev.get("last_seen"):
+        last_seen_ts = max(last_seen_ts, pd.Timestamp(prev["last_seen"]))
+
+    registry[key] = dict(
+        front_raw=front_raw, back_raw=back_raw,
+        put_strike=int(put_strike), call_strike=int(call_strike),
+        iv_ratio=prev.get("iv_ratio"),
+        first_seen=str(first_seen_ts),
+        last_seen=str(last_seen_ts),
+        last_gap=float(crossings["gap"].iloc[-1]),
+        max_gap=max(prev.get("max_gap", 0.0), float(crossings["gap"].max())),
+        # Don't double-count if the automated sweep already had this combo —
+        # approximate by taking whichever count is larger rather than summing.
+        hit_count=max(prev.get("hit_count", 0), len(crossings)),
+    )
+    _save_eligible_history(registry)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper — unicode sparkline
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1190,7 +1235,14 @@ def _compute_transform_scanner(
 
 _TSCAN_THRESHOLD  = 5.0
 _APPROACHING_LOW  = 4.0   # gap in [4, 5) counts as "Approaching" (within 1 pt)
-_SWEEP_OFFSETS    = [0, 25, 50, 75, 100]   # symmetric put/call offsets to sweep
+_SWEEP_OFFSETS    = list(range(0, 105, 5))   # symmetric put/call offsets, every 5 pts to 100
+# Note: each offset is its own cache entry (keyed on snapshot_id + offset),
+# so widening this list only adds cost the FIRST time each offset is hit for
+# a given snapshot — it doesn't reintroduce per-interaction lag. Still bounded
+# to symmetric (put_offset == call_offset) sweeps; a genuinely asymmetric
+# combo (e.g. put -20 / call +45) can still fall outside this grid. The
+# Calendar Edge backfill below catches those the moment you investigate one
+# manually.
 _MC_HISTORY_CAP   = 20    # max candidates per tier to run Phase B history on
 
 
@@ -1416,7 +1468,8 @@ def _compute_mc_core(_chain_df: pd.DataFrame, spx_price: float,
 
 def _build_non_atm_panel(non_atm_current: pd.DataFrame, registry: dict,
                           dte_by_expiry: dict, lookback_days: int,
-                          snapshot_ts: str, cap: int = _MC_HISTORY_CAP):
+                          snapshot_ts: str, cap: int = _MC_HISTORY_CAP,
+                          min_display: int = 6):
     """
     The curated "non-ATM opportunities" panel — built from the persisted
     registry, NOT a slice of the Scanner. Includes any combo that is
@@ -1434,7 +1487,15 @@ def _build_non_atm_panel(non_atm_current: pd.DataFrame, registry: dict,
                repeatedly become transformable," not just "which spiked once."
       Tier 4 — most recent crossing first, as the final tiebreak.
 
-    Returns (capped_cards, total_candidate_count).
+    Never-empty guarantee: if fewer than min_display combos fall within the
+    selected lookback window, the remaining slots are filled with the most
+    recent registry entries regardless of window — flagged via
+    outside_lookback=True so the UI can make that explicit rather than
+    silently showing stale data as if it were in-range. Only true cold start
+    (an empty registry — nothing has ever crossed threshold, automated or
+    backfilled) can still produce an empty panel.
+
+    Returns (capped_cards, in_window_total, fallback_used_count).
     """
     try:
         cutoff = pd.Timestamp(snapshot_ts) - pd.Timedelta(days=lookback_days)
@@ -1451,28 +1512,19 @@ def _build_non_atm_panel(non_atm_current: pd.DataFrame, registry: dict,
                 gap=float(row["Transform Diff"]), iv_ratio=row.get("IV Ratio"),
             )
 
-    candidates = []
-    for key, entry in registry.items():
-        try:
-            last_seen_ts = pd.Timestamp(entry["last_seen"])
-        except (ValueError, TypeError, KeyError):
-            continue
-        if cutoff is not None and last_seen_ts < cutoff:
-            continue
-
+    def _card_from_entry(key: str, entry: dict, last_seen_ts: pd.Timestamp,
+                          outside_lookback: bool) -> dict:
         cur = current_lookup.get(key)
-        is_live   = cur is not None and cur["gap"] >= _TSCAN_THRESHOLD
-        rank_gap  = cur["gap"] if is_live else entry["max_gap"]
+        is_live  = cur is not None and cur["gap"] >= _TSCAN_THRESHOLD
+        rank_gap = cur["gap"] if is_live else entry["max_gap"]
         front_raw, back_raw = entry["front_raw"], entry["back_raw"]
         front_label = _exp_label(front_raw) if front_raw in dte_by_expiry else front_raw
         back_label  = _exp_label(back_raw)  if back_raw  in dte_by_expiry else back_raw
-
         try:
             ago_str = _fmt_duration(pd.Timestamp(snapshot_ts) - last_seen_ts) + " ago"
         except (ValueError, TypeError):
             ago_str = "—"
-
-        candidates.append(dict(
+        return dict(
             front_raw=front_raw, back_raw=back_raw,
             front_label=front_label, back_label=back_label,
             put_strike=entry["put_strike"], call_strike=entry["call_strike"],
@@ -1484,11 +1536,44 @@ def _build_non_atm_panel(non_atm_current: pd.DataFrame, registry: dict,
             hit_count=entry["hit_count"],
             last_seen=last_seen_ts,
             last_seen_ago=ago_str,
-        ))
+            outside_lookback=outside_lookback,
+        )
+
+    candidates, used_keys = [], set()
+    for key, entry in registry.items():
+        try:
+            last_seen_ts = pd.Timestamp(entry["last_seen"])
+        except (ValueError, TypeError, KeyError):
+            continue
+        if cutoff is not None and last_seen_ts < cutoff:
+            continue
+        candidates.append(_card_from_entry(key, entry, last_seen_ts, outside_lookback=False))
+        used_keys.add(key)
 
     candidates.sort(key=lambda c: (
         not c["is_live"], -c["gap"], -c["hit_count"], -c["last_seen"].timestamp()
     ))
+    in_window_total = len(candidates)
+
+    # Never-empty fallback: pull in the most recent entries from OUTSIDE the
+    # selected window, clearly flagged, rather than show nothing.
+    fallback_used = 0
+    if len(candidates) < min_display:
+        fallback_raw = []
+        for key, entry in registry.items():
+            if key in used_keys:
+                continue
+            try:
+                last_seen_ts = pd.Timestamp(entry["last_seen"])
+            except (ValueError, TypeError, KeyError):
+                continue
+            fallback_raw.append((key, entry, last_seen_ts))
+        fallback_raw.sort(key=lambda t: t[2].timestamp(), reverse=True)
+
+        needed = max(cap - len(candidates), min_display - len(candidates))
+        for key, entry, last_seen_ts in fallback_raw[:needed]:
+            candidates.append(_card_from_entry(key, entry, last_seen_ts, outside_lookback=True))
+            fallback_used += 1
 
     capped = candidates[:cap]
 
@@ -1502,7 +1587,7 @@ def _build_non_atm_panel(non_atm_current: pd.DataFrame, registry: dict,
         c["spark"]       = sig.get("spark", "─")
         c["trend_up"]    = sig.get("trend_up", False)
 
-    return capped, len(candidates)
+    return capped, in_window_total, fallback_used
 
 
 def _run_mission_control(chain_df: pd.DataFrame, spx_price: float,
@@ -1518,7 +1603,7 @@ def _run_mission_control(chain_df: pd.DataFrame, spx_price: float,
     """
     core = _compute_mc_core(chain_df, spx_price, snapshot_id, snapshot_ts)
 
-    non_atm_panel, n_non_atm_total = _build_non_atm_panel(
+    non_atm_panel, n_non_atm_in_window, n_fallback_used = _build_non_atm_panel(
         core["non_atm_current"], core["registry"], dte_by_expiry,
         lookback_days, snapshot_ts,
     )
@@ -1554,7 +1639,8 @@ def _run_mission_control(chain_df: pd.DataFrame, spx_price: float,
 
     return dict(
         non_atm=non_atm_panel,
-        n_non_atm_total=n_non_atm_total,
+        n_non_atm_total=n_non_atm_in_window,
+        n_fallback_used=n_fallback_used,
         n_eligible=n_live_non_atm,
         approaching=core["approaching_cards"],
         likely_next=core["likely_next"],
@@ -2129,10 +2215,12 @@ def _render_mc_section(cards: list[dict], section: str, title: str, icon: str,
                     _new_badge = '<span class="mc-new-badge">NEW</span>' if card["is_new"] else ""
                     _is_live = card.get("is_live", True)
                     if show_live_badge:
-                        _live_badge = (
-                            '<span class="mc-live-badge">LIVE</span>' if _is_live
-                            else '<span class="mc-stale-badge">PAST</span>'
-                        )
+                        if _is_live:
+                            _live_badge = '<span class="mc-live-badge">LIVE</span>'
+                        elif card.get("outside_lookback"):
+                            _live_badge = '<span class="mc-stale-badge">OUTSIDE WINDOW</span>'
+                        else:
+                            _live_badge = '<span class="mc-stale-badge">PAST</span>'
                     else:
                         _live_badge = ""
                     _gap_label = "Gap" if _is_live else "Peak Gap"
@@ -2148,7 +2236,7 @@ def _render_mc_section(cards: list[dict], section: str, title: str, icon: str,
                         )
                     elif show_live_badge and not _is_live:
                         _metrics += (
-                            f'<div><span class="mc-metric-l">Last Seen</span>'
+                            f'<div><span class="mc-metric-l">Last Crossed</span>'
                             f'<span class="mc-metric-v">{card.get("last_seen_ago", "—")}</span></div>'
                         )
                     if show_live_badge and card.get("hit_count") is not None:
@@ -2272,8 +2360,8 @@ if st.session_state["active_tab"] == "scanner":
 
     if not MC["non_atm"] and MC["n_approaching"] == 0:
         st.caption(
-            "No non-ATM transform opportunities right now, and none in the "
-            f"{st.session_state['mc_lookback_select']} lookback window. "
+            "No non-ATM transform opportunities have ever crossed the threshold yet — "
+            "this fills in automatically as the registry accumulates history. "
             "Scanning continues every refresh."
         )
     else:
@@ -2284,18 +2372,18 @@ if st.session_state["active_tab"] == "scanner":
                 f"Non-ATM Opportunities — live or active within {_lb_label}", "🟢",
                 show_live_badge=True,
             )
+            _caption_bits = []
             if MC["n_non_atm_total"] > 6:
-                st.caption(
-                    f"Showing top 6 of {MC['n_non_atm_total']} non-ATM opportunities "
-                    f"in the {_lb_label} window."
+                _caption_bits.append(
+                    f"Showing top 6 of {MC['n_non_atm_total']} in the {_lb_label} window."
                 )
-        else:
-            st.caption(
-                f"No non-ATM combinations crossed the threshold in the "
-                f"{st.session_state['mc_lookback_select']} lookback window. "
-                "Try a longer window, or check back as the registry accumulates "
-                "more history going forward."
-            )
+            if MC["n_fallback_used"] > 0:
+                _caption_bits.append(
+                    f"{MC['n_fallback_used']} shown above fell outside the {_lb_label} "
+                    "window — included so this panel is never empty, marked PAST."
+                )
+            if _caption_bits:
+                st.caption(" ".join(_caption_bits))
 
         _render_mc_section(
             MC["likely_next"][:3], "likely",
@@ -2447,10 +2535,13 @@ if st.session_state["active_tab"] == "scanner":
                 "IV Ratio":       lambda v: f"{v:.4f}" if v is not None else "—",
             })
 
-            st.dataframe(
+            _ts_event = st.dataframe(
                 _ts_display,
                 use_container_width=True,
                 hide_index=True,
+                on_select="rerun",
+                selection_mode="single-row",
+                key="scanner_full_table",
                 column_config={
                     "Put Strike":     st.column_config.NumberColumn("Put Strike",     format="%d"),
                     "Call Strike":    st.column_config.NumberColumn("Call Strike",    format="%d"),
@@ -2463,8 +2554,43 @@ if st.session_state["active_tab"] == "scanner":
             st.caption(
                 f"{len(_ts_df)} combinations  ·  "
                 "Green = ready to transform (≥ 5)  ·  "
-                "Click any header to re-sort"
+                "Click any header to re-sort  ·  "
+                "Click a row, then View Chart, to jump straight to Calendar Edge"
             )
+
+            # Click-to-drill from the full table — select a row, confirm with
+            # the button, jump to a pre-scoped Calendar Edge chart. Same
+            # pending_ staging pattern as the Mission Control cards, since
+            # this also renders after the Controls Bar in script order.
+            _selected_rows = []
+            try:
+                _selected_rows = _ts_event.selection.rows
+            except AttributeError:
+                _selected_rows = []
+
+            if _selected_rows:
+                _sel_row = _ts_df.iloc[_selected_rows[0]]
+                _sel_front_raw = str(_sel_row["Front Expiry"]).split(" ")[0]
+                _sel_back_raw  = str(_sel_row["Back Expiry"]).split(" ")[0]
+                _sc1, _sc2 = st.columns([3, 1])
+                with _sc1:
+                    st.markdown(
+                        f"<p style='margin:.4rem 0 0;font-size:.82rem;color:#6d8fa8;'>"
+                        f"Selected: <span style='color:#dde6f1;font-family:var(--mono);font-weight:600;'>"
+                        f"{int(_sel_row['Put Strike'])}P / {int(_sel_row['Call Strike'])}C</span>"
+                        f"&nbsp;·&nbsp;{_sel_row['Front Expiry']} → {_sel_row['Back Expiry']}"
+                        f"&nbsp;·&nbsp;Diff <span style='color:#10d4a3;font-family:var(--mono);'>"
+                        f"{_sel_row['Transform Diff']:+.2f}</span></p>",
+                        unsafe_allow_html=True,
+                    )
+                with _sc2:
+                    if st.button("→ View Chart", key="scanner_view_selected", use_container_width=True):
+                        st.session_state["pending_front_expiry"] = _sel_front_raw
+                        st.session_state["pending_back_expiry"]  = _sel_back_raw
+                        st.session_state["pending_put_strike"]   = float(_sel_row["Put Strike"])
+                        st.session_state["pending_call_strike"]  = float(_sel_row["Call Strike"])
+                        st.session_state["active_tab"] = "edge"
+                        st.rerun()
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAB 2 — ENTRY ANALYSIS
@@ -2706,6 +2832,15 @@ if st.session_state["active_tab"] == "edge":
                 - _gap_df["front_wing_call_mark"] - _gap_df["front_wing_put_mark"]
             )
             _gap_df["transform_gap"] = _gap_df["transform_mark"] - _gap_df["diagonal_mark"]
+
+            # Opportunistic registry backfill — see _backfill_eligible_history
+            # docstring. Only meaningful for non-ATM combos, matching the
+            # registry's scope everywhere else.
+            if put_strike != call_strike:
+                _backfill_eligible_history(
+                    front_expiry, back_expiry, put_strike, call_strike,
+                    _gap_df.rename(columns={"transform_gap": "gap"})[["timestamp", "gap"]],
+                )
 
             fig_gap = go.Figure()
 
