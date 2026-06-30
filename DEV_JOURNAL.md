@@ -34,6 +34,203 @@ Log every change here. Format:
 
 GitHub repo: https://github.com/chandan-singh4/diagonal-calendar-spx
 Primary branch: main
+
+## 2026-06-30 — v4.0: Premium Redesign, Mission Control, Trade Journal P&L Fixes
+
+**Status:** Complete — all changes verified this session.
+**Files changed:** `app.py`, `db.py`, `pages/journal.py`
+
+---
+
+### Summary of all changes this session
+
+#### 1. Design System v3.4 — Premium Trading Terminal aesthetic (`app.py`)
+
+Complete CSS redesign. Principles: size IS hierarchy, space IS hierarchy, color signals state only.
+
+- **Color palette:** `--bg: #060b12` (dark navy), `--bg-card: #0c1421`, `--bg-raised: #111c2e`. Green changed from `#2ecc71` → `#10d4a3` (teal-green, more refined). Blue `#5b9cff`, Amber `#f0a429`.
+- **Typography:** Inter (UI) + JetBrains Mono (all numbers). KPI values at `1.65–1.85rem`.
+- **Animations:** `fadeUp` on cards/tables (350ms), `pulseGreen` ring-glow on best-diff KPI card, `dotPulse` on live status indicator.
+- **Tab underline:** correct `div[data-baseweb="tab-highlight"]` selector for active tab indicator.
+- **Hover states:** `translateY(-2px)` + box-shadow glow on metric cards and KPI cards.
+- **Scrollbar:** 4px dark custom scrollbar.
+
+#### 2. Tab-based navigation replaces vertical scrolling (`app.py`)
+
+Replaced all section scrolling with `st.tabs()` → then migrated to a **custom session-state-driven nav bar** (required for programmatic tab switching from Mission Control cards). Six tabs:
+
+`🔭 Scanner | 📊 Entry Analysis | 📈 Calendar Edge | 🎯 Strike Detail | 📉 Historical Stats | 🔬 Research`
+
+- Tab switching uses `st.session_state["active_tab"]` + `st.rerun()`.
+- Active tab button styled with `border-bottom: 2px solid var(--blue)` via CSS targeting `st.container(key="topnav")`.
+- Strike Detail was extracted from Calendar Edge into its own dedicated tab with its own independent `Today/5D/10D/20D` period selector (`key="sd_period_radio"`).
+
+#### 3. Persistent Controls Bar above all tabs (`app.py`)
+
+Front Expiry / Back Expiry / Put Strike / Call Strike moved to a persistent bar visible on every tab. Session-state guards added: drill-down values are staged under `pending_*` keys and promoted to `*_select` keys before the widgets render (avoids "cannot modify widget after instantiation" error).
+
+#### 4. Scanner: KPI cards + filter panel (`app.py`)
+
+Scanner tab redesigned:
+- **KPI card row** (4 cards, custom HTML): Diagonals Scanned, Diff > 5, Best Difference (with `pulseGreen` animation when ≥ threshold), Avg IV Ratio.
+- **Filter panel:** scanner-specific put/call offset controls in a styled card.
+- **Full scanner table** collapsed inside `st.expander("🔍 Full Scanner")` — row selection with `on_select="rerun"` + "→ View Chart" button to drill directly into Calendar Edge.
+- Removed: Last Updated and Auto Refresh KPI cards (duplicated header info); scanner side panel (Market Snapshot, IV Ratio Snapshot donut, Diff Distribution bar — none were in the original dashboard).
+
+#### 5. Calendar Edge changes (`app.py`)
+
+- Removed the explanatory `st.info()` block — the badge next to the title already communicates the regime.
+- Period selectors (Calendar Edge + Strike Detail) changed to `horizontal=True`.
+- **Chart reorder:**
+  1. Diagonal vs. Transform Order Mark (new — see §6)
+  2. Front vs Back ATM IV stacked chart
+  3. Dual-axis IV + Ratio chart (moved from top)
+  4. Front vs Back IV scatter
+
+#### 6. New chart: Diagonal vs. Transform Order Mark (`app.py`, `db.py`)
+
+New primary visualization on Calendar Edge tab. Plots both marks over time; shades every contiguous window where `Transform Gap ≥ 5` in translucent green using `add_vrect`. Answers "how long did the transformation window stay open?"
+
+- **New DB function:** `get_transform_mark_history(db_path, front_expiry, back_expiry, call_strike, put_strike, days)` — extends `get_diagonal_history` with two additional wing legs (front call+5, front put-5). Six LEFT JOINs; rows missing any of the six marks are excluded. Returns one row per COMPLETE snapshot.
+- Shading logic: iterate sorted snapshots, track contiguous regions where `gap ≥ 5`, emit one `add_vrect` per region. Transition into/out of green is visually immediate (per-snapshot granularity).
+
+#### 7. Chart Appearance — configurable line colors (`app.py`)
+
+New `🎨 Chart Appearance` sidebar section:
+- `st.color_picker` for each series: Diagonal Mark, Transform Order Mark, Front IV %, Back IV %.
+- Colors persisted to `chart_colors.json` (excluded from git via `.gitignore`).
+- "↺ Reset to Default Colors" button.
+- Colors applied consistently across Calendar Edge and Strike Detail charts via `CHART_COLORS` dict loaded at startup.
+- **Extension pattern:** add one entry to `DEFAULT_CHART_COLORS` — sidebar and reset button pick it up automatically; no other code change needed.
+
+#### 8. Mission Control — opportunity discovery cockpit (`app.py`)
+
+Complete redesign of the Scanner from "browse a table" to "be told where to look."
+
+**Persistent Attention Strip** (renders on every tab above the controls):
+- Always shows: `🔥 N Eligible · N Approaching · N New | Best: 7235P/7525C Gap +7.8 Active 2h12m`.
+- Data computed unconditionally before tab routing so the strip is always fresh.
+
+**Mission Control section on Scanner tab:**
+- **Non-ATM Opportunities panel** (curated, registry-backed) — top of Scanner tab.
+- **Likely Next panel** — approaching combos with rising ETA.
+- Lookback radio `Today/5D/10D/20D` above the panel header.
+
+**Two-phase scan:**
+- **Phase A** (every refresh, pure in-memory): sweeps `_SWEEP_OFFSETS = list(range(0, 105, 5))` — every 5-point symmetric offset, 21 values — against all expiry pairs using the chain already in memory. Cached on `snapshot_id`.
+- **Phase B** (only for small Eligible+Approaching set, capped at 20/tier): pulls mark history via `get_transform_mark_history` to compute Duration Active (contiguous streak ≥5), velocity/ETA (linear extrapolation), and sparkline. Cached with `ttl=60`.
+
+**Caching architecture:**
+- `_compute_transform_scanner`: `@st.cache_data` keyed on `(snapshot_id, offset)` — cache param uses `_chain_df` (leading underscore = skip DataFrame hashing, trust snapshot_id).
+- `_compute_mc_core`: `@st.cache_data` — Phase A+B, no session_state.
+- `_run_mission_control`: uncached thin wrapper — handles "New" cross-refresh diff via session_state.
+- `_candidate_signals`: `@st.cache_data(ttl=60)`.
+- `_load_atm_hist`, `_load_atm_hist_fb`, `_load_contract_hist`: `@st.cache_data(ttl=55)`.
+- Net effect: every tab click, widget change, and color pick after the first is a cache hit — only new snapshots trigger recomputation.
+
+**Non-ATM Eligibility Registry** (`eligible_history.json`):
+- Persisted to disk alongside `chart_colors.json`.
+- Written inside `_compute_mc_core` (once per new snapshot, not per rerun — cached function body skips on hit).
+- Schema per key: `front_raw, back_raw, put_strike, call_strike, iv_ratio, first_seen, last_seen, last_gap, max_gap, hit_count`.
+- Pruned to `_ELIGIBLE_HISTORY_RETENTION_DAYS = 30` on each write.
+- **Opportunistic backfill** (`_backfill_eligible_history`): hooked into Calendar Edge's gap chart — whenever a user manually investigates any combo, its full historical crossing data is registered regardless of whether the offset sweep ever found it. Fixes the root cause of "off-grid combos missed by symmetric sweep." tz normalization applied (Calendar Edge timestamps are tz-aware; registry stores naive UTC strings).
+
+**Non-ATM panel ranking** (transparent multi-key sort, no composite score):
+- Tier 1: currently live (≥5 right now) beats historical-only.
+- Tier 2: raw Gap (live) or peak max_gap (historical) descending.
+- Tier 3: hit_count descending — answers "which strikes repeatedly become transformable."
+- Tier 4: most recent crossing, as tiebreak.
+
+**Never-empty guarantee:** `_build_non_atm_panel` backfills display slots with registry entries outside the selected lookback window when fewer than `min_display=6` are in-window. Marked with "OUTSIDE WINDOW" badge rather than "PAST" — the user always sees recent history, never a blank panel. Only true cold-start (empty registry) produces an empty panel.
+
+**Card design:**
+- Each card: strike combo, expiry pair, Gap / Active or Last Crossed / Hit count / IV Ratio / sparkline + trend arrow / ETA.
+- Badges: `LIVE` (green), `PAST` (grey), `OUTSIDE WINDOW` (grey italic), `NEW` (amber).
+- "View Chart" button: stages combo into `pending_*` session-state keys + sets `active_tab = "edge"` + `st.rerun()` → Calendar Edge opens pre-scoped to that exact combo.
+- "📓 Journal" button: stages `journal_prefill` dict into session_state + `st.switch_page("pages/journal.py")`.
+
+**ETA / SVD fix:** `np.polyfit` guarded against degenerate input (duplicate timestamps, NaN gaps, zero x-range). `try/except LinAlgError` as final fallback. Combos without sufficient history get no ETA and are excluded from Likely Next rather than crashing.
+
+#### 9. Journal — P&L lifecycle fix (`pages/journal.py`)
+
+**Root problem:** For transformed trades (diagonal → IC), `final_pl` in the DB only reflected the IC expiration outcome — it omitted the transformation gain locked in at transformation time. This made a winning trade appear as a loss when SPX expired outside the IC range.
+
+**`resolved_pl(t)` — single source of truth:**
+Added to `pages/journal.py`. For any trade, computes the correct total P&L:
+- **Expired/Closed + Transformed IC + SPX at expiry present:** formula = `(profit_locked_in + ic_expiry_adj) × 100 × contracts`. Supersedes any stored `final_pl` value.
+- **Expired/Closed + no IC data (direct close):** falls back to stored `final_pl`.
+- **Transformed (IC still open):** `profit_locked_in × 100 × contracts` (locked component only).
+- **Open:** None.
+
+`resolved_pl(t)` is now the ONLY entry point for P&L in the journal. Replaces all direct reads of `t["final_pl"]` and `t["profit_locked_in"]` in display paths: Master Log table, `compute_stats` (win rate, averages, profit factor, expectancy, totals), Expiration tab metric cards, Net P&L after fees.
+
+**`ic_expiry_pnl_per_share(spx, lp, sp, sc, lc)`:**
+Piecewise IC assignment cost at expiration. Returns 0 or negative.
+- `spx ≤ lp`: `−(sp − lp)` (max put-wing loss, capped by long put)
+- `lp < spx < sp`: `−(sp − spx)` (partial put assignment)
+- `sp ≤ spx ≤ sc`: `0` (shorts expire worthless — max IC profit)
+- `sc < spx < lc`: `−(spx − sc)` (partial call assignment)
+- `spx ≥ lc`: `−(lc − sc)` (max call-wing loss, capped by long call)
+
+**Mark Expired — fully automated for transformed trades:**
+- Manual `final_pl` input removed for `status == "Transformed"` trades with IC data.
+- Formula value computed and displayed as a two-line breakdown (Transformation gain + IC expiry adjustment = Total) before the confirm button.
+- `final_pl` written to DB = `round(locked_ct + adj_ct)`.
+- Guard: if SPX not entered (= 0) for a transformed trade, blocks submit with error rather than saving null.
+- For Open trades (no IC data), manual entry retained with explanatory caption.
+
+**P&L Lifecycle Breakdown panel (Expiration tab in Overview):**
+Shown for any expired trade with IC data + SPX at expiry. Renders a table with:
+1. Transformation gain (line 1)
+2. IC expiry adjustment with context `(SPX 7501 vs shorts 7320–7380)` (line 2)
+3. Total Realized P&L (sum, not `t["final_pl"]`)
+
+**Bug fix — `sqlite3.Row.get()` crash:**
+`sqlite3.Row` does not have a `.get()` method. Added `row_get(row, key, default=None)` helper (mirrors `get_close_type` pattern). Replaced all `t.get("expired_inside_wings")` and `t.get("expired_between_shorts")` calls.
+
+**`total_fees(t)` accidentally dropped** in one edit — restored immediately.
+
+---
+
+### Constants / thresholds introduced in v4.0
+
+| Constant | Value | Where defined | Notes |
+|---|---|---|---|
+| `_TSCAN_THRESHOLD` | 5.0 | `app.py` | Transform Gap eligibility threshold |
+| `_APPROACHING_LOW` | 4.0 | `app.py` | "Within 1 pt" — shows in Likely Next |
+| `_SWEEP_OFFSETS` | `range(0,105,5)` | `app.py` | 21 symmetric offsets, every 5 pts |
+| `_MC_HISTORY_CAP` | 20 | `app.py` | Max Phase B history queries per tier |
+| `_ELIGIBLE_HISTORY_RETENTION_DAYS` | 30 | `app.py` | Registry prune window |
+
+### New files introduced in v4.0
+
+| File | Type | Notes |
+|---|---|---|
+| `eligible_history.json` | local preference | Non-ATM crossing registry. Add to `.gitignore`. |
+| `chart_colors.json` | local preference | Already git-ignored. |
+
+### Hypothesis status (unchanged from v3.x — no new validations this session)
+
+All HYPOTHESIS metrics remain unvalidated. No outcomes have accumulated sufficient n to draw conclusions.
+
+---
+
+### Commit command
+
+```bash
+git add app.py db.py pages/journal.py DEV_JOURNAL.md DOCUMENTATION.md
+git commit -m "v4.0: premium redesign, Mission Control, non-ATM registry, tab nav, Journal P&L lifecycle fix"
+git push
+```
+
+Also add to `.gitignore` if not already there:
+```
+eligible_history.json
+```
+
+---
+
+Primary branch: main
 Local path: wherever your spx-diagonal-dashboard folder lives (parent folder contains .venv)
 
 
