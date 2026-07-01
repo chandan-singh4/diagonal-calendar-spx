@@ -492,12 +492,20 @@ div[class*="st-key-mc_card_"] {
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--r);
-  padding: .8rem .95rem .7rem;
+  padding: .8rem .95rem .85rem;
   margin-bottom: .6rem;
   box-shadow: var(--shadow);
   transition: border-color .2s var(--ease);
+  display: flex;
+  flex-direction: column;
 }
 div[class*="st-key-mc_card_"]:hover { border-color: var(--border-hi); }
+.mc-actions-spacer { margin-top: .55rem; }
+div[class*="st-key-mc_card_"] .stButton > button {
+  padding: .32rem .7rem !important;
+  font-size: .74rem !important;
+  white-space: nowrap !important;
+}
 .mc-rank { font-size: .62rem; font-weight: 700; color: var(--text-3); letter-spacing: .08em; }
 .mc-new-badge {
   display: inline-block; font-size: .54rem; font-weight: 700;
@@ -1780,7 +1788,12 @@ dte_by_expiry = chain_df.groupby("expiry")["dte"].first().astype(int).to_dict()
 
 def _exp_label(expiry: str) -> str:
     d = dte_by_expiry.get(expiry)
-    return f"{expiry}  ({d}D)" if d is not None else expiry
+    try:
+        dt = pd.Timestamp(expiry)
+        pretty = dt.strftime("%A, %b ") + str(dt.day) + dt.strftime(", %Y")
+    except (ValueError, TypeError):
+        pretty = expiry
+    return f"{pretty}  ({d} DTE)" if d is not None else pretty
 
 
 if len(available_expiries) < 2:
@@ -2272,6 +2285,7 @@ def _render_mc_section(cards: list[dict], section: str, title: str, icon: str,
                         f'{_eta_html}',
                         unsafe_allow_html=True,
                     )
+                    st.markdown('<div class="mc-actions-spacer"></div>', unsafe_allow_html=True)
                     bcol1, bcol2 = st.columns(2)
                     with bcol1:
                         if st.button("View Chart", key=f"viewchart_{section}_{gidx}",
@@ -2348,24 +2362,19 @@ with st.container(key="topnav"):
 if st.session_state["active_tab"] == "scanner":
 
     # ── Mission Control ─────────────────────────────────────────────────────
-    _mc_hdr_col, _mc_radio_col = st.columns([4, 1.4])
-    with _mc_hdr_col:
-        st.markdown(
-            '<div class="sh" style="margin-top:.2rem">'
-            '<span class="sh-ico">🔥</span>'
-            '<span class="sh-ttl">Transform Opportunities</span>'
-            f'<span class="sh-bdg g">{MC["n_eligible"]} Live</span>'
-            '</div>',
-            unsafe_allow_html=True,
-        )
-    with _mc_radio_col:
-        st.radio(
-            "Lookback",
-            ["Today", "5D", "10D", "20D"],
-            horizontal=True,
-            key="mc_lookback_select",
-            label_visibility="collapsed",
-        )
+    st.markdown(
+        '<div class="sh" style="margin-top:.2rem">'
+        '<span class="sh-ico">🔥</span>'
+        '<span class="sh-ttl">Transform Opportunities</span>'
+        f'<span class="sh-bdg g">{MC["n_eligible"]} Live</span>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+    # Time-range control moved to the Calendar Edge tab (it drives the charts
+    # there). The Mission Control lookback window used for these cards is
+    # fixed to "Today" now that the picker has been removed from this tab.
+    if "mc_lookback_select" not in st.session_state:
+        st.session_state["mc_lookback_select"] = "Today"
 
     if not MC["non_atm"] and MC["n_approaching"] == 0:
         st.caption(
@@ -2405,7 +2414,12 @@ if st.session_state["active_tab"] == "scanner":
         unsafe_allow_html=True,
     )
 
-    with st.expander("🔍 Full Scanner — custom offset & complete table", expanded=False):
+    st.markdown(
+        '<div class="sh"><span class="sh-ico">🔍</span>'
+        '<span class="sh-ttl">Full Scanner — custom offset &amp; complete table</span></div>',
+        unsafe_allow_html=True,
+    )
+    with st.container():
 
         # ── Filter panel ─────────────────────────────────────────────────────────
         _offset_options = [0] + list(range(5, 205, 5))
@@ -2803,6 +2817,24 @@ if st.session_state["active_tab"] == "edge":
         else dict(rangebreaks=_SESSION_RANGEBREAKS, gridcolor="#0c1928")
     )
 
+    # Shared left/right margins so 9:30 AM lands at the identical pixel
+    # position on every synced chart below, regardless of each chart's own
+    # y-axis label width or legend layout.
+    _SYNC_MARGIN_L, _SYNC_MARGIN_R = 58, 20
+
+    def _add_market_open_lines(fig, ts_series: pd.Series, **vline_kwargs) -> None:
+        """Subtle vertical dotted line at 9:30 AM for each trading day present
+        in ts_series. Skipped entirely for the Today view, where a single
+        9:30 marker at the left edge of the chart adds no information."""
+        if period_label == "Today" or ts_series is None or ts_series.empty:
+            return
+        for _day in sorted(pd.to_datetime(ts_series).dt.date.unique()):
+            _open_ts = pd.Timestamp(f"{_day} 09:30").tz_localize(config.DISPLAY_TIMEZONE)
+            fig.add_vline(
+                x=_open_ts, line_width=1, line_dash="dot",
+                line_color="#3a5170", opacity=0.6, **vline_kwargs,
+            )
+
     # ── Chart 1 (primary): Diagonal Mark vs Transform Order Mark ─────────────
     st.markdown(
         '<div class="sh" style="margin-top:.4rem">'
@@ -2880,9 +2912,11 @@ if st.session_state["active_tab"] == "edge":
                 line=dict(color=CHART_COLORS["transform_mark"], width=1.8),
                 hovertemplate="Transform Order Mark: $%{y:.2f}<extra></extra>",
             ))
+            _add_market_open_lines(fig_gap, _gap_df["timestamp"])
+
             fig_gap.update_layout(
                 height=320,
-                margin=dict(l=20, r=20, t=10, b=20),
+                margin=dict(l=_SYNC_MARGIN_L, r=_SYNC_MARGIN_R, t=10, b=20),
                 paper_bgcolor="#060b12",
                 plot_bgcolor="#060b12",
                 font=dict(family="Inter", color="#6d8fa8", size=11),
@@ -2890,7 +2924,7 @@ if st.session_state["active_tab"] == "edge":
                 hoverlabel=dict(bgcolor="#111c2e", bordercolor="#1a2d45",
                                 font=dict(color="#dde6f1", size=12)),
                 xaxis=_gap_xaxis,
-                yaxis=dict(title="Mark ($)", gridcolor="#0c1928"),
+                yaxis=dict(title="Mark ($)", gridcolor="#0c1928", automargin=False),
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0,
                             bgcolor="rgba(0,0,0,0)"),
             )
@@ -2909,7 +2943,13 @@ if st.session_state["active_tab"] == "edge":
     if not atm_merged.empty:
 
         # ── Chart 2: Front vs Back ATM IV — same axis · IV Ratio by regime ────
-        st.markdown("**Front vs Back ATM IV — same axis · IV Ratio by regime**")
+        st.markdown(
+            '<div class="sh" style="margin-top:.4rem">'
+            '<span class="sh-ico">📐</span>'
+            '<span class="sh-ttl">Front vs. Back ATM IV — same axis · IV Ratio by regime</span>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
         fig_stack = make_subplots(
             rows=2, cols=1, shared_xaxes=True,
             row_heights=[0.62, 0.38], vertical_spacing=0.06,
@@ -2937,11 +2977,12 @@ if st.session_state["active_tab"] == "edge":
             )
         else:
             fig_stack.update_xaxes(rangebreaks=_SESSION_RANGEBREAKS, gridcolor="#0c1928")
-        fig_stack.update_yaxes(title_text="IV %",    row=1, col=1, gridcolor="#0c1928")
-        fig_stack.update_yaxes(title_text="Ratio",   row=2, col=1, gridcolor="#0c1928")
+        fig_stack.update_yaxes(title_text="IV %",    row=1, col=1, gridcolor="#0c1928", automargin=False)
+        fig_stack.update_yaxes(title_text="Ratio",   row=2, col=1, gridcolor="#0c1928", automargin=False)
+        _add_market_open_lines(fig_stack, atm_merged["timestamp"], row="all", col="all")
         fig_stack.update_layout(
             height=520,
-            margin=dict(l=20, r=20, t=40, b=20),
+            margin=dict(l=_SYNC_MARGIN_L, r=_SYNC_MARGIN_R, t=40, b=20),
             paper_bgcolor="#060b12",
             plot_bgcolor="#060b12",
             font=dict(family="Inter", color="#6d8fa8", size=11),
