@@ -2929,10 +2929,29 @@ if st.session_state["active_tab"] == "edge":
                             bgcolor="rgba(0,0,0,0)"),
             )
             st.plotly_chart(fig_gap, use_container_width=True)
+
+            _latest = _gap_df.iloc[-1]
+            _mark_diff = float(_latest["diagonal_mark"]) - float(_latest["transform_mark"])
+            _diff_color = "#10d4a3" if _mark_diff <= 0 else "#f05252"
+            st.markdown(
+                f"""<div style="background:var(--bg-card);border:1px solid var(--border);
+                border-radius:var(--r);padding:.55rem .9rem;margin:.5rem 0 .7rem;
+                font-family:var(--mono);font-size:.82rem;display:flex;gap:1.6rem;
+                align-items:center;flex-wrap:wrap;">
+                  <span style="color:#8fa8c2;">Diagonal Mark
+                    <span style="color:#dde6f1;font-weight:600;margin-left:.4rem;">{_latest['diagonal_mark']:.2f}</span></span>
+                  <span style="color:#8fa8c2;">Transform Order Mark
+                    <span style="color:#dde6f1;font-weight:600;margin-left:.4rem;">{_latest['transform_mark']:.2f}</span></span>
+                  <span style="color:#8fa8c2;">Difference
+                    <span style="color:{_diff_color};font-weight:700;margin-left:.4rem;">{_mark_diff:+.2f}</span></span>
+                </div>""",
+                unsafe_allow_html=True,
+            )
             st.caption(
                 "Green shading marks every window where Transform Gap "
                 "(Transform Order Mark − Diagonal Mark) was ≥ 5 — the position "
-                "was eligible for transformation during that span."
+                "was eligible for transformation during that span. "
+                "Difference above = Diagonal Mark − Transform Order Mark, at the most recent snapshot."
             )
         else:
             st.caption(
@@ -3001,6 +3020,13 @@ if st.session_state["active_tab"] == "edge":
         )
 
         # ── Chart 3: Primary dual-axis chart (moved from top) ─────────────────
+        st.markdown(
+            '<div class="sh" style="margin-top:.4rem">'
+            '<span class="sh-ico">📈</span>'
+            '<span class="sh-ttl">Front ATM IV vs. Back ATM IV — with IV Ratio</span>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
         fig_atm = go.Figure()
         fig_atm.add_trace(go.Scatter(
             x=atm_merged["timestamp"], y=atm_merged["front_iv"],
@@ -3011,9 +3037,10 @@ if st.session_state["active_tab"] == "edge":
         fig_atm.add_trace(go.Scatter(
             x=atm_merged["timestamp"], y=atm_merged["iv_ratio"],
             name="IV Ratio (F/B)", line=dict(color="#f05252", width=1.8), yaxis="y2"))
+        _add_market_open_lines(fig_atm, atm_merged["timestamp"])
         fig_atm.update_layout(
-            height=300,
-            margin=dict(l=20, r=20, t=10, b=20),
+            height=340,
+            margin=dict(l=_SYNC_MARGIN_L, r=_SYNC_MARGIN_R, t=10, b=70),
             paper_bgcolor="#060b12",
             plot_bgcolor="#060b12",
             font=dict(family="Inter", color="#6d8fa8", size=11),
@@ -3021,8 +3048,10 @@ if st.session_state["active_tab"] == "edge":
             hoverlabel=dict(bgcolor="#111c2e", bordercolor="#1a2d45",
                             font=dict(color="#dde6f1", size=12)),
             xaxis=_gap_xaxis,
-            yaxis=dict(title="IV %", side="left",  gridcolor="#0c1928"),
-            yaxis2=dict(title="Ratio", side="right", overlaying="y", showgrid=False),
+            yaxis=dict(title="IV %", side="left",  gridcolor="#0c1928", automargin=False),
+            yaxis2=dict(title="Ratio", side="right", overlaying="y", showgrid=False, automargin=False),
+            legend=dict(orientation="h", yanchor="top", y=-0.22, xanchor="center", x=0.5,
+                        font=dict(size=10), bgcolor="rgba(0,0,0,0)"),
         )
         st.plotly_chart(fig_atm, use_container_width=True)
 
