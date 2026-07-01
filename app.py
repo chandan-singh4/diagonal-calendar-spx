@@ -1783,6 +1783,41 @@ else:
 st_autorefresh(interval=poll_interval * 1000, key="autorefresh")
 
 st.sidebar.divider()
+_all_locks = _load_entry_locks()
+st.sidebar.markdown(f"**🔒 Active Entry Locks** ({len(_all_locks)})")
+if not _all_locks:
+    st.sidebar.caption("No entries locked yet. Lock one from the Diagonal vs. Transform Order Mark chart on Calendar Edge.")
+else:
+    for _lk_key, _lk in sorted(_all_locks.items(), key=lambda kv: kv[1]["locked_at"], reverse=True):
+        _lk_dt = pd.Timestamp(_lk["locked_at"])
+        st.sidebar.markdown(
+            f'<div style="font-family:var(--mono);font-size:.75rem;color:#dde6f1;">'
+            f'Put {_lk["put_strike"]:.0f} / Call {_lk["call_strike"]:.0f}'
+            f'<br><span style="color:#6d8fa8;">{_lk["front_expiry"]} → {_lk["back_expiry"]}</span>'
+            f'<br>Entry ${_lk["entry_diagonal_mark"]:.2f} · {_lk_dt.strftime("%m/%d %I:%M %p")}'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        _jcol, _ccol = st.sidebar.columns(2)
+        with _jcol:
+            # Same pending_*/active_tab staging pattern as Mission Control's
+            # "View Chart" button — these get promoted to the real widget
+            # keys further down, right before the Controls Bar widgets that
+            # own them are instantiated.
+            if st.button("Jump", key=f"jump_{_lk_key}", use_container_width=True):
+                st.session_state["pending_front_expiry"] = _lk["front_expiry"]
+                st.session_state["pending_back_expiry"]  = _lk["back_expiry"]
+                st.session_state["pending_put_strike"]   = _lk["put_strike"]
+                st.session_state["pending_call_strike"]  = _lk["call_strike"]
+                st.session_state["active_tab"] = "edge"
+                st.rerun()
+        with _ccol:
+            if st.button("Clear", key=f"clear_sb_{_lk_key}", use_container_width=True):
+                _clear_entry_lock(_lk["front_expiry"], _lk["back_expiry"], _lk["put_strike"], _lk["call_strike"])
+                st.rerun()
+        st.sidebar.markdown('<div style="margin-bottom:.5rem;"></div>', unsafe_allow_html=True)
+
+st.sidebar.divider()
 st.sidebar.markdown("**🔭 Transform Scanner**")
 
 sc_max_rows = st.sidebar.number_input(
