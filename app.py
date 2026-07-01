@@ -2791,12 +2791,7 @@ if st.session_state["active_tab"] == "edge":
     m3.metric("Back ATM IV",        f"{ts_now.back_iv:.2f}%")
     m4.metric("IV Index (avg)",     f"{iv_index:.2f}%")
 
-    period_label = st.radio(
-        "Chart Range",
-        ["Today", "5D", "10D", "20D"],
-        horizontal=True,
-        key="period_radio",
-    )
+    period_label = st.session_state.get("period_radio", "Today")
 
     period_days = {"Today": 1, "5D": 5, "10D": 10, "20D": 20}[period_label]
     _fhp = _load_atm_hist_fb(front_expiry, period_days)
@@ -2836,14 +2831,26 @@ if st.session_state["active_tab"] == "edge":
             )
 
     # ── Chart 1 (primary): Diagonal Mark vs Transform Order Mark ─────────────
-    st.markdown(
-        '<div class="sh" style="margin-top:.4rem">'
-        '<span class="sh-ico">🟢</span>'
-        '<span class="sh-ttl">Diagonal vs. Transform Order Mark</span>'
-        '<span class="sh-bdg g">Shaded = Transform Gap ≥ 5</span>'
-        '</div>',
-        unsafe_allow_html=True,
-    )
+    _c1_ttl_col, _c1_radio_col = st.columns([3, 1.6])
+    with _c1_ttl_col:
+        st.markdown(
+            '<div class="sh" style="margin-top:.4rem">'
+            '<span class="sh-ico">🟢</span>'
+            '<span class="sh-ttl">Diagonal vs. Transform Order Mark</span>'
+            '<span class="sh-bdg g">Shaded = Transform Gap ≥ 5</span>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+    with _c1_radio_col:
+        st.markdown('<div style="text-align:right">', unsafe_allow_html=True)
+        period_label = st.radio(
+            "Chart Range",
+            ["Today", "5D", "10D", "20D"],
+            horizontal=True,
+            key="period_radio",
+            label_visibility="collapsed",
+        )
+        st.markdown('</div>', unsafe_allow_html=True)
 
     if not strikes_set:
         st.caption("Set call and put strikes in Controls above to see the Transform Gap chart.")
@@ -2912,6 +2919,18 @@ if st.session_state["active_tab"] == "edge":
                 line=dict(color=CHART_COLORS["transform_mark"], width=1.8),
                 hovertemplate="Transform Order Mark: $%{y:.2f}<extra></extra>",
             ))
+            # Invisible trace whose sole purpose is to add "Difference" as a
+            # third line in the unified hover tooltip, without drawing
+            # anything on the chart itself. Shown as an absolute value per
+            # request — this is |Transform Order Mark − Diagonal Mark|.
+            fig_gap.add_trace(go.Scatter(
+                x=_gap_df["timestamp"],
+                y=(_gap_df["transform_mark"] - _gap_df["diagonal_mark"]).abs(),
+                name="Difference",
+                line=dict(width=0, color="rgba(0,0,0,0)"),
+                showlegend=False,
+                hovertemplate="Difference: $%{y:.2f}<extra></extra>",
+            ))
             _add_market_open_lines(fig_gap, _gap_df["timestamp"])
 
             fig_gap.update_layout(
@@ -2930,28 +2949,11 @@ if st.session_state["active_tab"] == "edge":
             )
             st.plotly_chart(fig_gap, use_container_width=True)
 
-            _latest = _gap_df.iloc[-1]
-            _mark_diff = float(_latest["diagonal_mark"]) - float(_latest["transform_mark"])
-            _diff_color = "#10d4a3" if _mark_diff <= 0 else "#f05252"
-            st.markdown(
-                f"""<div style="background:var(--bg-card);border:1px solid var(--border);
-                border-radius:var(--r);padding:.55rem .9rem;margin:.5rem 0 .7rem;
-                font-family:var(--mono);font-size:.82rem;display:flex;gap:1.6rem;
-                align-items:center;flex-wrap:wrap;">
-                  <span style="color:#8fa8c2;">Diagonal Mark
-                    <span style="color:#dde6f1;font-weight:600;margin-left:.4rem;">{_latest['diagonal_mark']:.2f}</span></span>
-                  <span style="color:#8fa8c2;">Transform Order Mark
-                    <span style="color:#dde6f1;font-weight:600;margin-left:.4rem;">{_latest['transform_mark']:.2f}</span></span>
-                  <span style="color:#8fa8c2;">Difference
-                    <span style="color:{_diff_color};font-weight:700;margin-left:.4rem;">{_mark_diff:+.2f}</span></span>
-                </div>""",
-                unsafe_allow_html=True,
-            )
             st.caption(
                 "Green shading marks every window where Transform Gap "
                 "(Transform Order Mark − Diagonal Mark) was ≥ 5 — the position "
                 "was eligible for transformation during that span. "
-                "Difference above = Diagonal Mark − Transform Order Mark, at the most recent snapshot."
+                "Hover the chart for Diagonal Mark, Transform Order Mark, and their Difference at any point in time."
             )
         else:
             st.caption(
@@ -3060,7 +3062,13 @@ if st.session_state["active_tab"] == "edge":
             st.warning(samp_warn)
 
         # ── Chart 4: Front vs Back IV scatter — intraday trajectory ───────────
-        st.markdown("**Front vs Back IV scatter — intraday trajectory**")
+        st.markdown(
+            '<div class="sh" style="margin-top:.4rem">'
+            '<span class="sh-ico">🌀</span>'
+            '<span class="sh-ttl">Front vs. Back IV Scatter — intraday trajectory</span>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
         _sc = atm_merged.copy()
         _sc["hod"] = _sc["timestamp"].dt.hour + _sc["timestamp"].dt.minute / 60.0
         _lo = float(min(_sc["back_iv"].min(), _sc["front_iv"].min()))
@@ -3126,7 +3134,7 @@ if st.session_state["active_tab"] == "strike":
     sd_left, sd_right = st.columns([1, 3])
 
     with sd_left:
-        st.markdown("**Expiry Detail**")
+        st.markdown('<div class="sh"><span class="sh-ttl">Expiry Detail</span></div>', unsafe_allow_html=True)
         for exp_label_s, exp_date, dte_val in [
             ("Front", front_expiry, front_dte),
             ("Back",  back_expiry,  back_dte),
@@ -3158,7 +3166,7 @@ if st.session_state["active_tab"] == "strike":
                 )
 
         st.markdown("<hr style='margin:8px 0;opacity:0.1;'>", unsafe_allow_html=True)
-        st.markdown("**Strike Detail**")
+        st.markdown('<div class="sh"><span class="sh-ttl">Strike Detail</span></div>', unsafe_allow_html=True)
 
         if strikes_set:
             fc_call = iv_engine.strike_contract(chain_df, front_expiry, call_strike, "CALL")
@@ -3190,7 +3198,7 @@ if st.session_state["active_tab"] == "strike":
             st.caption("Set call and put strikes in Controls above.")
 
     with sd_right:
-        st.markdown("**Selected-Strike IV**")
+        st.markdown('<div class="sh"><span class="sh-ttl">Selected-Strike IV</span></div>', unsafe_allow_html=True)
         st.caption("Front vs back IV at your trade strikes — ratio on right axis.")
 
         if strikes_set:
