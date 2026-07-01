@@ -33,6 +33,7 @@ IV SCALE NOTE
 
 import json
 import logging
+import uuid
 from datetime import date, datetime, timezone, time as dt_time
 from pathlib import Path
 
@@ -818,6 +819,81 @@ def _save_chart_colors(colors: dict[str, str]) -> None:
         _CHART_COLORS_PATH.write_text(json.dumps(colors, indent=2))
     except OSError:
         pass
+
+
+# ─── Entry Locks — post-entry position monitoring ─────────────────────────────
+# Same exception-to-pure-reader pattern as chart_colors.json / eligible_history.json.
+#
+# Purpose: once a diagonal is actually filled, the "current diagonal mark" on
+# Chart 1 stops being useful — the trader no longer cares where a *new*
+# diagonal would price today, only how the *fixed* entry compares to the
+# live Transform Order Mark. Locking a diagonal_mark value at entry time lets
+# Chart 1 switch from "hypothetical entry" mode to "position management" mode
+# for that specific strike/expiry combo.
+#
+# Forward-compat note (do not build yet — Journal is explicitly out of scope
+# for this round of changes): each lock has a stable `lock_id` and a
+# `journal_trade_id` field that stays null under "Monitor Only". When Journal
+# integration is scoped, a "Monitor + Log Trade" path can create the Journal
+# row and write its id back into this same lock record — the lock stays the
+# single source of truth for entry price/time either way, rather than the
+# Journal and this file drifting into two independent copies of the same fact.
+_ENTRY_LOCKS_PATH = Path("entry_locks.json")
+
+
+def _entry_lock_key(front_expiry: str, back_expiry: str, put_strike: float, call_strike: float) -> str:
+    return f"{front_expiry}|{back_expiry}|{put_strike:.0f}|{call_strike:.0f}"
+
+
+def _load_entry_locks() -> dict:
+    if _ENTRY_LOCKS_PATH.exists():
+        try:
+            data = json.loads(_ENTRY_LOCKS_PATH.read_text())
+            return data if isinstance(data, dict) else {}
+        except (json.JSONDecodeError, OSError):
+            return {}
+    return {}
+
+
+def _save_entry_locks(locks: dict) -> None:
+    try:
+        _ENTRY_LOCKS_PATH.write_text(json.dumps(locks, indent=2))
+    except OSError:
+        pass
+
+
+def _create_entry_lock(front_expiry: str, back_expiry: str, put_strike: float,
+                        call_strike: float, diagonal_mark: float, mode: str) -> dict:
+    """mode is 'monitor_only' or 'monitor_and_log' (the latter is scaffolded
+    only — no Journal row is created yet, see module note above)."""
+    locks = _load_entry_locks()
+    key = _entry_lock_key(front_expiry, back_expiry, put_strike, call_strike)
+    record = {
+        "lock_id": str(uuid.uuid4()),
+        "front_expiry": front_expiry,
+        "back_expiry": back_expiry,
+        "put_strike": put_strike,
+        "call_strike": call_strike,
+        "entry_diagonal_mark": diagonal_mark,
+        "locked_at": pd.Timestamp.now(tz=config.DISPLAY_TIMEZONE).isoformat(),
+        "mode": mode,
+        "journal_trade_id": None,
+    }
+    locks[key] = record
+    _save_entry_locks(locks)
+    return record
+
+
+def _clear_entry_lock(front_expiry: str, back_expiry: str, put_strike: float, call_strike: float) -> None:
+    locks = _load_entry_locks()
+    key = _entry_lock_key(front_expiry, back_expiry, put_strike, call_strike)
+    if key in locks:
+        del locks[key]
+        _save_entry_locks(locks)
+
+
+def _get_entry_lock(front_expiry: str, back_expiry: str, put_strike: float, call_strike: float) -> dict | None:
+    return _load_entry_locks().get(_entry_lock_key(front_expiry, back_expiry, put_strike, call_strike))
 
 
 # ─── Eligibility registry — persisted log of non-ATM crossing events ──────────
@@ -2890,6 +2966,83 @@ if st.session_state["active_tab"] == "edge":
                     _gap_df.rename(columns={"transform_gap": "gap"})[["timestamp", "gap"]],
                 )
 
+            # ── Entry Lock — position management mode ────────────────────────
+            # Once a diagonal is actually filled, the trader stops caring where
+            # a *new* hypothetical diagonal prices today and instead wants to
+            # track their *fixed* entry against the live Transform Order Mark.
+            # Locking freezes diagonal_mark at the moment of the click; the
+            # chart and the metrics below switch from "discovery" framing to
+            # "position management" framing for this exact strike/expiry combo.
+            _lock = _get_entry_lock(front_expiry, back_expiry, put_strike, call_strike)
+            _lock_toggle_key = f"_show_lock_panel_{_entry_lock_key(front_expiry, back_expiry, put_strike, call_strike)}"
+
+            _lk_l, _lk_r = st.columns([3, 2])
+            with _lk_l:
+                if _lock is None:
+                    if st.button("🔒 Lock Entry Here", key="lock_entry_btn",
+                                 help="Freeze the current Diagonal Mark as your entry price "
+                                      "and switch this chart to position-management mode."):
+                        st.session_state[_lock_toggle_key] = True
+                else:
+                    _locked_dt = pd.Timestamp(_lock["locked_at"])
+                    st.markdown(
+                        f'<div class="ready-badge" style="margin-bottom:0;">'
+                        f'<span class="rdot"></span>Entry locked: '
+                        f'${_lock["entry_diagonal_mark"]:.2f} @ {_locked_dt.strftime("%m/%d %I:%M %p")}'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+            with _lk_r:
+                if _lock is not None:
+                    _mom_col, _clear_col = st.columns([2, 1])
+                    with _mom_col:
+                        _momentum_window_min = st.selectbox(
+                            "Momentum window", [15, 30, 60, 120],
+                            index=1, key="momentum_window_min",
+                            format_func=lambda m: f"Momentum: last {m} min",
+                            label_visibility="collapsed",
+                        )
+                    with _clear_col:
+                        if st.button("Clear", key="clear_entry_lock_btn",
+                                     help="Remove this entry lock and return to discovery mode."):
+                            _clear_entry_lock(front_expiry, back_expiry, put_strike, call_strike)
+                            st.rerun()
+
+            if _lock is None and st.session_state.get(_lock_toggle_key):
+                with st.container(border=True):
+                    _current_diag = float(_gap_df.iloc[-1]["diagonal_mark"])
+                    st.markdown(
+                        f"**Lock entry at current Diagonal Mark: ${_current_diag:.2f}**  \n"
+                        f"Put {put_strike:.0f} / Call {call_strike:.0f} · "
+                        f"{front_expiry} → {back_expiry}"
+                    )
+                    _lock_mode_choice = st.radio(
+                        "How should this lock behave?",
+                        ["Monitor Only", "Monitor + Log Trade"],
+                        key="lock_mode_choice",
+                        label_visibility="collapsed",
+                        horizontal=True,
+                    )
+                    if _lock_mode_choice == "Monitor + Log Trade":
+                        st.caption(
+                            "Journal integration isn't wired up yet (Journal changes are scoped for later). "
+                            "This will lock as Monitor Only for now; your choice is saved so the eventual "
+                            "Journal entry can be created from this same lock record instead of a second one."
+                        )
+                    _cf1, _cf2 = st.columns(2)
+                    with _cf1:
+                        if st.button("Confirm Lock", key="confirm_lock_btn", type="primary",
+                                     use_container_width=True):
+                            _mode = "monitor_and_log" if _lock_mode_choice == "Monitor + Log Trade" else "monitor_only"
+                            _create_entry_lock(front_expiry, back_expiry, put_strike, call_strike,
+                                                _current_diag, _mode)
+                            st.session_state[_lock_toggle_key] = False
+                            st.rerun()
+                    with _cf2:
+                        if st.button("Cancel", key="cancel_lock_btn", use_container_width=True):
+                            st.session_state[_lock_toggle_key] = False
+                            st.rerun()
+
             fig_gap = go.Figure()
 
             # Shade every contiguous region where Transform Gap >= 5
@@ -2907,12 +3060,30 @@ if st.session_state["active_tab"] == "edge":
                     )
                     _region_start = None
 
-            fig_gap.add_trace(go.Scatter(
-                x=_gap_df["timestamp"], y=_gap_df["diagonal_mark"],
-                name="Diagonal Mark",
-                line=dict(color=CHART_COLORS["diagonal_mark"], width=1.8),
-                hovertemplate="Diagonal Mark: $%{y:.2f}<extra></extra>",
-            ))
+            if _lock is not None:
+                # Position-management mode: the live diagonal_mark line becomes
+                # dimmed reference context, and a fixed dashed line marks entry.
+                fig_gap.add_trace(go.Scatter(
+                    x=_gap_df["timestamp"], y=_gap_df["diagonal_mark"],
+                    name="Live Diagonal Mark (hypothetical)",
+                    line=dict(color=CHART_COLORS["diagonal_mark"], width=1.2, dash="dot"),
+                    opacity=0.45,
+                    hovertemplate="Live Diagonal Mark: $%{y:.2f}<extra></extra>",
+                ))
+                fig_gap.add_hline(
+                    y=_lock["entry_diagonal_mark"], line_width=1.6, line_dash="dash",
+                    line_color=CHART_COLORS["diagonal_mark"],
+                    annotation_text=f"Entry ${_lock['entry_diagonal_mark']:.2f}",
+                    annotation_position="right",
+                    annotation_font=dict(size=10, color=CHART_COLORS["diagonal_mark"]),
+                )
+            else:
+                fig_gap.add_trace(go.Scatter(
+                    x=_gap_df["timestamp"], y=_gap_df["diagonal_mark"],
+                    name="Diagonal Mark",
+                    line=dict(color=CHART_COLORS["diagonal_mark"], width=1.8),
+                    hovertemplate="Diagonal Mark: $%{y:.2f}<extra></extra>",
+                ))
             fig_gap.add_trace(go.Scatter(
                 x=_gap_df["timestamp"], y=_gap_df["transform_mark"],
                 name="Transform Order Mark",
@@ -2921,15 +3092,24 @@ if st.session_state["active_tab"] == "edge":
             ))
             # Invisible trace whose sole purpose is to add "Difference" as a
             # third line in the unified hover tooltip, without drawing
-            # anything on the chart itself. Shown as an absolute value per
-            # request — this is |Transform Order Mark − Diagonal Mark|.
+            # anything on the chart itself.
+            if _lock is not None:
+                # Position management: signed, against the fixed entry —
+                # Current Transform Order Mark − Fixed Entry Diagonal Mark.
+                # Sign is meaningful here (crossing zero/threshold is the
+                # whole point), so this one is NOT shown as absolute value.
+                _diff_series = _gap_df["transform_mark"] - _lock["entry_diagonal_mark"]
+                _diff_hover_label = "Live Difference (vs. entry)"
+            else:
+                # Discovery mode: unsigned distance between two live values.
+                _diff_series = (_gap_df["transform_mark"] - _gap_df["diagonal_mark"]).abs()
+                _diff_hover_label = "Difference"
             fig_gap.add_trace(go.Scatter(
-                x=_gap_df["timestamp"],
-                y=(_gap_df["transform_mark"] - _gap_df["diagonal_mark"]).abs(),
-                name="Difference",
+                x=_gap_df["timestamp"], y=_diff_series,
+                name=_diff_hover_label,
                 line=dict(width=0, color="rgba(0,0,0,0)"),
                 showlegend=False,
-                hovertemplate="Difference: $%{y:.2f}<extra></extra>",
+                hovertemplate=f"{_diff_hover_label}: $%{{y:.2f}}<extra></extra>",
             ))
             _add_market_open_lines(fig_gap, _gap_df["timestamp"])
 
@@ -2949,11 +3129,58 @@ if st.session_state["active_tab"] == "edge":
             )
             st.plotly_chart(fig_gap, use_container_width=True)
 
+            if _lock is not None:
+                # ── Position-management readout: progress + momentum ──────────
+                _since_entry = _gap_df[_gap_df["timestamp"] >= pd.Timestamp(_lock["locked_at"])]
+                if not _since_entry.empty:
+                    _live_diff_now = float(_since_entry.iloc[-1]["transform_mark"]) - float(_lock["entry_diagonal_mark"])
+                    _pct_to_threshold = max(0.0, min(1.0, _live_diff_now / 5.0))
+
+                    _win_min = st.session_state.get("momentum_window_min", 30)
+                    _win_start = _since_entry["timestamp"].iloc[-1] - pd.Timedelta(minutes=_win_min)
+                    _win_df = _since_entry[_since_entry["timestamp"] >= _win_start]
+                    _slope_per_hr = None
+                    if len(_win_df) >= 2:
+                        _t0, _t1 = _win_df["timestamp"].iloc[0], _win_df["timestamp"].iloc[-1]
+                        _hrs = (_t1 - _t0).total_seconds() / 3600.0
+                        if _hrs > 0:
+                            _d0 = float(_win_df["transform_mark"].iloc[0]) - float(_lock["entry_diagonal_mark"])
+                            _d1 = float(_win_df["transform_mark"].iloc[-1]) - float(_lock["entry_diagonal_mark"])
+                            _slope_per_hr = (_d1 - _d0) / _hrs
+
+                    _pcol1, _pcol2 = st.columns([2, 2])
+                    with _pcol1:
+                        st.progress(_pct_to_threshold,
+                                    text=f"Live Difference: ${_live_diff_now:+.2f}  ·  "
+                                         f"{_pct_to_threshold*100:.0f}% of the way to threshold ($5.00)")
+                    with _pcol2:
+                        if _slope_per_hr is None:
+                            st.caption(f"Not enough data yet in the last {_win_min} min to read momentum.")
+                        else:
+                            _closing = _slope_per_hr > 0
+                            _arrow = "↗" if _closing else ("↘" if _slope_per_hr < 0 else "→")
+                            _mcolor = "#10d4a3" if _closing else "#f05252"
+                            _label = "closing" if _closing else "widening" if _slope_per_hr < 0 else "flat"
+                            _eta_txt = ""
+                            if _closing and _live_diff_now < 5.0:
+                                _hrs_to_go = (5.0 - _live_diff_now) / _slope_per_hr
+                                if 0 < _hrs_to_go < 24:
+                                    _mins_to_go = _hrs_to_go * 60
+                                    _eta_txt = (f"  ·  ~{_mins_to_go:.0f} min to threshold "
+                                                f"at this pace (naive straight-line projection, not a forecast)")
+                            st.markdown(
+                                f'<span style="color:{_mcolor};font-weight:600;">{_arrow} {_label} '
+                                f'${abs(_slope_per_hr):.2f}/hr</span> over last {_win_min} min{_eta_txt}',
+                                unsafe_allow_html=True,
+                            )
+
             st.caption(
                 "Green shading marks every window where Transform Gap "
                 "(Transform Order Mark − Diagonal Mark) was ≥ 5 — the position "
                 "was eligible for transformation during that span. "
-                "Hover the chart for Diagonal Mark, Transform Order Mark, and their Difference at any point in time."
+                + ("Hover the chart for Live Diagonal Mark, Transform Order Mark, and Live Difference vs. entry."
+                   if _lock is not None else
+                   "Hover the chart for Diagonal Mark, Transform Order Mark, and their Difference at any point in time.")
             )
         else:
             st.caption(
