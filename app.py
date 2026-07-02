@@ -1968,7 +1968,22 @@ with st.sidebar.expander("Line colors", expanded=False):
 # Database init + latest complete snapshot
 # ─────────────────────────────────────────────────────────────────────────────
 
-db.init_db(config.DB_PATH)
+@st.cache_resource(show_spinner=False)
+def _init_db_once(_db_path: str) -> bool:
+    """Ensure schema exists — but only ONCE per dashboard process.
+
+    Previously db.init_db() ran on every script rerun (every tab click, widget
+    change, and autorefresh tick). init_db() executes the full DDL script and
+    COMMITS a write transaction, so the dashboard — nominally a pure reader —
+    was issuing a database write on every interaction, contending with the
+    collector's write lock. @st.cache_resource runs this exactly once and
+    caches the result for the life of the process.
+    """
+    db.init_db(_db_path)
+    return True
+
+
+_init_db_once(config.DB_PATH)
 latest_snap = db.get_latest_complete_snapshot(config.DB_PATH)
 
 if latest_snap is None:

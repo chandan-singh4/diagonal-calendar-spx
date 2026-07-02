@@ -166,34 +166,41 @@ CREATE INDEX IF NOT EXISTS idx_gaps_start
 # Connection Management
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _make_conn(db_path: str) -> sqlite3.Connection:
+def _make_conn(db_path: str, *, read_only: bool = False) -> sqlite3.Connection:
     """
-    Open a SQLite connection with:
-      - row_factory = sqlite3.Row  (columns accessible by name)
-      - WAL mode                   (readers don't block the collector writer)
-      - foreign_keys = ON          (enforces ON DELETE CASCADE)
-      - 15-second timeout          (handles transient locks gracefully)
+    Open a SQLite connection with row_factory = sqlite3.Row and a 15-second
+    timeout to ride out transient locks.
+
+    read_only=True  → dashboard reader path. Sets PRAGMA query_only=ON so this
+                      connection can NEVER take a write lock or contend with the
+                      collector. WAL already lets readers run concurrently with
+                      the writer, so no journal-mode PRAGMA is needed (and none
+                      that could stall on a lock is issued).
+    read_only=False → writer path (collector, journal). Ensures WAL journal mode
+                      and enforces foreign keys for ON DELETE CASCADE.
     """
     conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode = WAL;")
-    conn.execute("PRAGMA foreign_keys = ON;")
+    if read_only:
+        conn.execute("PRAGMA query_only = ON;")
+    else:
+        conn.execute("PRAGMA journal_mode = WAL;")
+        conn.execute("PRAGMA foreign_keys = ON;")
     return conn
 
 
 @contextmanager
 def get_conn(db_path: str | None = None):
     """
-    Context manager for app.py read operations.
+    Context manager for app.py READ operations. Opens a read-only connection
+    (PRAGMA query_only=ON) so the dashboard can never take a write lock, and
+    does NOT commit — a SELECT has nothing to commit, and the previous commit
+    on every read added pointless overhead on every rerun.
     Accepts optional db_path; defaults to config.DB_PATH.
     """
-    conn = _make_conn(db_path or config.DB_PATH)
+    conn = _make_conn(db_path or config.DB_PATH, read_only=True)
     try:
         yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
     finally:
         conn.close()
 
@@ -412,7 +419,7 @@ def get_latest_complete_snapshot(db_path: str) -> sqlite3.Row | None:
     Called once per dashboard refresh to get the current SPX price,
     VIX value, snapshot timestamp, and snapshot_id for chain reconstruction.
     """
-    with managed_conn(db_path) as conn:
+    with get_conn(db_path) as conn:
         return conn.execute(
             """
             SELECT * FROM snapshots
@@ -432,7 +439,7 @@ def get_latest_atm_iv_snapshots(db_path: str,
 
     IVs are returned in decimal form (0.18 = 18%) — multiply by 100 for display.
     """
-    with managed_conn(db_path) as conn:
+    with get_conn(db_path) as conn:
         return conn.execute(
             """
             SELECT a.atm_avg_iv, s.snapshot_timestamp
@@ -452,7 +459,7 @@ def get_last_snapshot_timestamp(db_path: str) -> str | None:
     UTC timestamp of the most recent snapshot (any status).
     Used by collector.py gap detection on startup.
     """
-    with managed_conn(db_path) as conn:
+    with get_conn(db_path) as conn:
         row = conn.execute(
             "SELECT MAX(snapshot_timestamp) AS ts FROM snapshots"
         ).fetchone()
@@ -462,7 +469,7 @@ def get_last_snapshot_timestamp(db_path: str) -> str | None:
 def get_snapshots(db_path: str, start: str, end: str,
                    status: str = "COMPLETE") -> list:
     """Snapshots between start and end (UTC ISO8601) with given status."""
-    with managed_conn(db_path) as conn:
+    with get_conn(db_path) as conn:
         return conn.execute(
             """
             SELECT * FROM snapshots
@@ -482,7 +489,7 @@ def get_option_chain(db_path: str, snapshot_id: int) -> list:
     Results ordered by expiry_date, strike, right for consistent display.
     IVs are in decimal form — app.py multiplies by 100 at the load boundary.
     """
-    with managed_conn(db_path) as conn:
+    with get_conn(db_path) as conn:
         return conn.execute(
             """
             SELECT * FROM option_rows
@@ -504,7 +511,7 @@ def get_contract_iv_history(db_path: str, expiry_date: str, strike: float,
 
     Performance: uses idx_option_rows_contract_snap (covering index).
     """
-    with managed_conn(db_path) as conn:
+    with get_conn(db_path) as conn:
         return conn.execute(
             """
             SELECT
@@ -538,7 +545,7 @@ def get_atm_iv_history(db_path: str, expiry_date: str,
     Performance: uses idx_atm_iv_expiry_snap. Scans ~3,150 rows per 30 days
     rather than scanning option_rows directly (~4.8M rows).
     """
-    with managed_conn(db_path) as conn:
+    with get_conn(db_path) as conn:
         return conn.execute(
             """
             SELECT
@@ -587,7 +594,7 @@ def get_entry_iv_context(db_path: str, entry_ts_utc: str,
         return ((f * b) ** 0.5) if (f and b and f > 0 and b > 0) else None
 
     cs, ps = float(call_strike), float(put_strike)
-    with managed_conn(db_path) as conn:
+    with get_conn(db_path) as conn:
         snap = conn.execute(
             """
             SELECT snapshot_id, snapshot_timestamp,
@@ -652,7 +659,7 @@ def get_entry_iv_context(db_path: str, entry_ts_utc: str,
 
 def get_term_structure(db_path: str, snapshot_id: int) -> list:
     """All expiries for a given snapshot, ordered by DTE ascending."""
-    with managed_conn(db_path) as conn:
+    with get_conn(db_path) as conn:
         return conn.execute(
             """
             SELECT * FROM atm_iv_by_expiry
@@ -670,7 +677,7 @@ def get_iv_spread_history(db_path: str, front_expiry: str, back_expiry: str,
     Returns one row per COMPLETE snapshot where both expiries are present.
     Used for 'current IV spread is at the Nth percentile of last 180 days'.
     """
-    with managed_conn(db_path) as conn:
+    with get_conn(db_path) as conn:
         return conn.execute(
             """
             SELECT
@@ -721,7 +728,7 @@ def get_diagonal_history(
     IVs are in decimal form (as stored in atm_iv_by_expiry) — multiply ×100
     at the caller if percentage display is needed.
     """
-    with managed_conn(db_path) as conn:
+    with get_conn(db_path) as conn:
         return conn.execute(
             """
             SELECT
@@ -803,7 +810,7 @@ def get_transform_mark_history(
         transform_mark = (back_call_mark + back_put_mark)
                         - (front_wing_call_mark + front_wing_put_mark)
     """
-    with managed_conn(db_path) as conn:
+    with get_conn(db_path) as conn:
         return conn.execute(
             """
             SELECT
@@ -859,7 +866,7 @@ def get_transform_mark_history(
 def get_gaps(db_path: str, start: str, end: str,
               exclude_reasons: list[str] | None = None) -> list:
     """Collection gaps within a date range."""
-    with managed_conn(db_path) as conn:
+    with get_conn(db_path) as conn:
         if exclude_reasons:
             placeholders = ",".join("?" * len(exclude_reasons))
             return conn.execute(
@@ -896,7 +903,7 @@ def get_prior_session_close(db_path: str, session_date: str) -> float | None:
 
     Returns None if no prior-session data exists (first ever collection day).
     """
-    with managed_conn(db_path) as conn:
+    with get_conn(db_path) as conn:
         row = conn.execute(
             """
             SELECT underlying_price FROM snapshots
@@ -927,7 +934,7 @@ def get_spx_intraday_today(db_path: str, session_date: str | None = None) -> lis
     Returns rows with: snapshot_timestamp (TEXT), underlying_price (REAL).
     """
     bound = session_date if session_date else datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    with managed_conn(db_path) as conn:
+    with get_conn(db_path) as conn:
         return conn.execute(
             """
             SELECT snapshot_timestamp, underlying_price
@@ -962,7 +969,7 @@ def get_all_expiry_atm_iv_today(db_path: str, session_date: str | None = None) -
     20 expirations for 6.5 market hours ≈ 1,560 rows/day — trivially fast.
     """
     bound = session_date if session_date else datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    with managed_conn(db_path) as conn:
+    with get_conn(db_path) as conn:
         return conn.execute(
             """
             SELECT
@@ -1140,12 +1147,12 @@ def update_trade(db_path: str, trade_id: str, **fields) -> None:
         )
 
 
-def delete_trade(db_path: str, trade_id: str) -> None:
+def delete_trade(db_path: str, trade_id: str) -> None:  # write path
     """Permanently removes a trade record by trade_id.
     Called only from pages/journal.py after explicit user confirmation.
     No cascade needed — trades have no child rows in other tables.
     """
-    with get_conn(db_path) as conn:
+    with managed_conn(db_path) as conn:
         conn.execute("DELETE FROM trades WHERE trade_id = ?", (trade_id,))
 
 
@@ -1155,7 +1162,7 @@ def delete_trade(db_path: str, trade_id: str) -> None:
 
 def get_all_trades(db_path: str) -> list:
     """All trades, newest entry date first."""
-    with managed_conn(db_path) as conn:
+    with get_conn(db_path) as conn:
         return conn.execute(
             "SELECT * FROM trades ORDER BY entry_date DESC, entry_time DESC"
         ).fetchall()
@@ -1163,7 +1170,7 @@ def get_all_trades(db_path: str) -> list:
 
 def get_trade(db_path: str, trade_id: str) -> "sqlite3.Row | None":
     """Single trade by ID. Returns None if not found."""
-    with managed_conn(db_path) as conn:
+    with get_conn(db_path) as conn:
         return conn.execute(
             "SELECT * FROM trades WHERE trade_id = ?", (trade_id,)
         ).fetchone()
@@ -1174,7 +1181,7 @@ def get_eod_spx(db_path: str, date_str: str) -> "float | None":
     Last COMPLETE snapshot underlying_price on or before date_str (YYYY-MM-DD).
     Used by journal.py to auto-suggest SPX close when recording expiration.
     """
-    with managed_conn(db_path) as conn:
+    with get_conn(db_path) as conn:
         row = conn.execute("""
             SELECT underlying_price FROM snapshots
             WHERE status             = 'COMPLETE'
@@ -1220,7 +1227,7 @@ def get_ic_marks(
         unrealized_per_sh = profit_locked_in - cost_to_close
         unrealized_per_contract = unrealized_per_sh * 100 * contracts
     """
-    with managed_conn(db_path) as conn:
+    with get_conn(db_path) as conn:
         if eod_date:
             snap = conn.execute("""
                 SELECT snapshot_id, snapshot_timestamp, underlying_price
