@@ -2960,12 +2960,27 @@ if st.session_state["active_tab"] == "edge":
         )
         atm_merged["iv_ratio"] = atm_merged["front_iv"] / atm_merged["back_iv"]
 
-    _gap_xaxis = (
-        dict(range=[f"{session_date} 09:30", f"{session_date} 16:15"],
-             rangebreaks=_SESSION_RANGEBREAKS, gridcolor="#0c1928")
-        if period_label == "Today"
-        else dict(rangebreaks=_SESSION_RANGEBREAKS, gridcolor="#0c1928")
-    )
+    # Both synced charts autorange independently unless given an explicit
+    # range, and their underlying queries don't cover the same history:
+    # get_transform_mark_history() drops any snapshot missing ANY of the six
+    # option legs it needs (including the ±5 wing strikes), while the ATM IV
+    # series is expiry-level and has no such strike dependency. For a given
+    # strike/expiry combo, Chart 1 can therefore have materially less history
+    # than Chart 2/3 even over the "same" 5D/10D/20D window — which is
+    # exactly what was making Chart 1 appear to start days later. Anchoring
+    # every chart's x-axis to the *fuller* series (ATM IV) makes the missing
+    # portion show as an honest gap in Chart 1 rather than a silently
+    # shifted, seemingly-synced axis.
+    if period_label == "Today":
+        _shared_range = [f"{session_date} 09:30", f"{session_date} 16:15"]
+    elif not atm_merged.empty:
+        _shared_range = [atm_merged["timestamp"].min(), atm_merged["timestamp"].max()]
+    else:
+        _shared_range = None
+
+    _gap_xaxis = dict(rangebreaks=_SESSION_RANGEBREAKS, gridcolor="#0c1928")
+    if _shared_range is not None:
+        _gap_xaxis["range"] = _shared_range
 
     # Shared left/right margins so 9:30 AM lands at the identical pixel
     # position on every synced chart below, regardless of each chart's own
@@ -3296,9 +3311,9 @@ if st.session_state["active_tab"] == "edge":
         for thr, dash in [(1.00, "solid"), (0.70, "dot"), (1.30, "dot")]:
             fig_stack.add_hline(
                 y=thr, line=dict(color="#2a3f56", width=1, dash=dash), row=2, col=1)
-        if period_label == "Today":
+        if _shared_range is not None:
             fig_stack.update_xaxes(
-                range=[f"{session_date} 09:30", f"{session_date} 16:15"],
+                range=_shared_range,
                 rangebreaks=_SESSION_RANGEBREAKS,
                 gridcolor="#0c1928",
             )
