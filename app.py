@@ -903,6 +903,64 @@ def _update_entry_lock_mark(front_expiry: str, back_expiry: str, put_strike: flo
         _save_entry_locks(locks)
 
 
+def _render_all_locks_popover(current_key: str | None) -> None:
+    """Page-level position-management control: a compact trigger + popover
+    listing every tracked entry lock, deliberately placed in the Calendar
+    Edge page header rather than next to any one chart — it manages
+    positions across strike/expiry combos, so it shouldn't read as part of
+    whichever chart happens to be showing right now."""
+    _locks = _load_entry_locks()
+    with st.popover(f"🔒 All Locks ({len(_locks)})"):
+        if not _locks:
+            st.caption('Nothing locked yet. Use "Lock Entry Here" on the Diagonal vs. '
+                       'Transform Order Mark chart once you\'re in a position.')
+            return
+        for _pk, _pl in sorted(_locks.items(), key=lambda kv: kv[1]["locked_at"], reverse=True):
+            _pl_dt = pd.Timestamp(_pl["locked_at"])
+            _is_current = (_pk == current_key)
+            st.markdown(
+                f'<div style="font-family:var(--mono);font-size:.78rem;line-height:1.5;'
+                f'color:#dde6f1;{"font-weight:700;" if _is_current else ""}">'
+                f'Put {_pl["put_strike"]:.0f} / Call {_pl["call_strike"]:.0f}'
+                f'{" <span style=\'color:#10d4a3;font-size:.68rem;font-weight:600;\'>● viewing</span>" if _is_current else ""}'
+                f'<br><span style="color:#6d8fa8;">{_pl["front_expiry"]} → {_pl["back_expiry"]}</span>'
+                f'<br>Entry ${_pl["entry_diagonal_mark"]:.2f} · {_pl_dt.strftime("%m/%d %I:%M %p")}'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+            st.markdown('<div style="margin-top:.35rem;"></div>', unsafe_allow_html=True)
+            _edit_key = f"_editing_lock_{_pk}"
+            _b1, _b2, _b3, _sp = st.columns([1, 1, 1, 3])
+            with _b1:
+                if st.button("👁", key=f"pop_view_{_pk}", help="View chart",
+                             disabled=_is_current):
+                    st.session_state["pending_front_expiry"] = _pl["front_expiry"]
+                    st.session_state["pending_back_expiry"]  = _pl["back_expiry"]
+                    st.session_state["pending_put_strike"]   = _pl["put_strike"]
+                    st.session_state["pending_call_strike"]  = _pl["call_strike"]
+                    st.session_state["active_tab"] = "edge"
+                    st.rerun()
+            with _b2:
+                if st.button("✏️", key=f"pop_edit_{_pk}", help="Edit entry price"):
+                    st.session_state[_edit_key] = not st.session_state.get(_edit_key, False)
+            with _b3:
+                if st.button("🗑️", key=f"pop_remove_{_pk}", help="Remove lock"):
+                    _clear_entry_lock(_pl["front_expiry"], _pl["back_expiry"],
+                                       _pl["put_strike"], _pl["call_strike"])
+                    st.rerun()
+            if st.session_state.get(_edit_key):
+                _new_mark = st.number_input(
+                    "Corrected entry Diagonal Mark", value=float(_pl["entry_diagonal_mark"]),
+                    step=0.05, format="%.2f", key=f"pop_edit_val_{_pk}",
+                )
+                if st.button("Save", key=f"pop_save_{_pk}", type="primary", use_container_width=True):
+                    _update_entry_lock_mark(_pl["front_expiry"], _pl["back_expiry"],
+                                             _pl["put_strike"], _pl["call_strike"], _new_mark)
+                    st.session_state[_edit_key] = False
+                    st.rerun()
+            st.markdown('<hr style="margin:.55rem 0;border-color:#1a2d45;">', unsafe_allow_html=True)
+
+
 def _get_entry_lock(front_expiry: str, back_expiry: str, put_strike: float, call_strike: float) -> dict | None:
     return _load_entry_locks().get(_entry_lock_key(front_expiry, back_expiry, put_strike, call_strike))
 
@@ -2862,13 +2920,23 @@ if st.session_state["active_tab"] == "entry":
 
 if st.session_state["active_tab"] == "edge":
 
-    st.markdown(
-        '<div class="sh"><span class="sh-ico">📈</span>'
-        f'<span class="sh-ttl">Calendar Edge</span>'
-        f'<span class="sh-bdg">{iv_engine.interpret_curve(ts_now)[:30]}</span>'
-        '</div>',
-        unsafe_allow_html=True,
-    )
+    _ce_ttl_col, _ce_locks_col = st.columns([4, 1.3])
+    with _ce_ttl_col:
+        st.markdown(
+            '<div class="sh"><span class="sh-ico">📈</span>'
+            f'<span class="sh-ttl">Calendar Edge</span>'
+            f'<span class="sh-bdg">{iv_engine.interpret_curve(ts_now)[:30]}</span>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+    with _ce_locks_col:
+        st.markdown('<div style="text-align:right;margin-top:.15rem;">', unsafe_allow_html=True)
+        _current_combo_key = (
+            _entry_lock_key(front_expiry, back_expiry, put_strike, call_strike)
+            if strikes_set else None
+        )
+        _render_all_locks_popover(_current_combo_key)
+        st.markdown('</div>', unsafe_allow_html=True)
 
     # Metrics row
     iv_index = float(chain_df.groupby("expiry")["iv"].mean().mean())
@@ -2987,7 +3055,7 @@ if st.session_state["active_tab"] == "edge":
             _lock = _get_entry_lock(front_expiry, back_expiry, put_strike, call_strike)
             _lock_toggle_key = f"_show_lock_panel_{_entry_lock_key(front_expiry, back_expiry, put_strike, call_strike)}"
 
-            _lk_l, _lk_m, _lk_r = st.columns([3, 2, 1.4])
+            _lk_l, _lk_m = st.columns([3, 2])
             with _lk_l:
                 if _lock is None:
                     if st.button("🔒 Lock Entry Here", key="lock_entry_btn",
@@ -3018,56 +3086,6 @@ if st.session_state["active_tab"] == "edge":
                                      help="Remove this entry lock and return to discovery mode."):
                             _clear_entry_lock(front_expiry, back_expiry, put_strike, call_strike)
                             st.rerun()
-            with _lk_r:
-                _all_locks_for_popover = _load_entry_locks()
-                with st.popover(f"🔒 All Locks ({len(_all_locks_for_popover)})", use_container_width=True):
-                    if not _all_locks_for_popover:
-                        st.caption("Nothing locked yet. Use \"Lock Entry Here\" on any strike/expiry combo above.")
-                    else:
-                        for _pk, _pl in sorted(_all_locks_for_popover.items(),
-                                                key=lambda kv: kv[1]["locked_at"], reverse=True):
-                            _pl_dt = pd.Timestamp(_pl["locked_at"])
-                            _is_current = (_pk == _entry_lock_key(front_expiry, back_expiry, put_strike, call_strike))
-                            st.markdown(
-                                f'<div style="font-family:var(--mono);font-size:.78rem;'
-                                f'color:#dde6f1;{"font-weight:700;" if _is_current else ""}">'
-                                f'Put {_pl["put_strike"]:.0f} / Call {_pl["call_strike"]:.0f}'
-                                f'{"  <span style=\'color:#10d4a3;font-size:.68rem;\'>● viewing</span>" if _is_current else ""}'
-                                f'<br><span style="color:#6d8fa8;">{_pl["front_expiry"]} → {_pl["back_expiry"]}</span>'
-                                f'<br>Entry ${_pl["entry_diagonal_mark"]:.2f} · {_pl_dt.strftime("%m/%d %I:%M %p")}'
-                                f'</div>',
-                                unsafe_allow_html=True,
-                            )
-                            _edit_key = f"_editing_lock_{_pk}"
-                            _b1, _b2, _b3 = st.columns(3)
-                            with _b1:
-                                if st.button("View Chart", key=f"pop_view_{_pk}", use_container_width=True,
-                                             disabled=_is_current):
-                                    st.session_state["pending_front_expiry"] = _pl["front_expiry"]
-                                    st.session_state["pending_back_expiry"]  = _pl["back_expiry"]
-                                    st.session_state["pending_put_strike"]   = _pl["put_strike"]
-                                    st.session_state["pending_call_strike"]  = _pl["call_strike"]
-                                    st.session_state["active_tab"] = "edge"
-                                    st.rerun()
-                            with _b2:
-                                if st.button("Edit", key=f"pop_edit_{_pk}", use_container_width=True):
-                                    st.session_state[_edit_key] = not st.session_state.get(_edit_key, False)
-                            with _b3:
-                                if st.button("Remove", key=f"pop_remove_{_pk}", use_container_width=True):
-                                    _clear_entry_lock(_pl["front_expiry"], _pl["back_expiry"],
-                                                       _pl["put_strike"], _pl["call_strike"])
-                                    st.rerun()
-                            if st.session_state.get(_edit_key):
-                                _new_mark = st.number_input(
-                                    "Corrected entry Diagonal Mark", value=float(_pl["entry_diagonal_mark"]),
-                                    step=0.05, format="%.2f", key=f"pop_edit_val_{_pk}",
-                                )
-                                if st.button("Save", key=f"pop_save_{_pk}", type="primary", use_container_width=True):
-                                    _update_entry_lock_mark(_pl["front_expiry"], _pl["back_expiry"],
-                                                             _pl["put_strike"], _pl["call_strike"], _new_mark)
-                                    st.session_state[_edit_key] = False
-                                    st.rerun()
-                            st.markdown('<hr style="margin:.4rem 0;border-color:#1a2d45;">', unsafe_allow_html=True)
 
             if _lock is None and st.session_state.get(_lock_toggle_key):
                 with st.container(border=True):
