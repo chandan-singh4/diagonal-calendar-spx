@@ -762,6 +762,69 @@ div[class*="st-key-mc_card_"] .stButton > button {
   font-size: .85em;
   margin: 6px 0;
 }
+
+/* ── Chart cards — wrap any chart in st.container(key="chartcard_*") ─────── */
+/* Reusable panel: gives a chart its own bordered container that sits above  */
+/* the page background, matching the Calendar Edge mockup's visual hierarchy.*/
+div[class*="st-key-chartcard_"] {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  padding: 1.05rem 1.15rem .8rem;
+  margin-bottom: 1rem;
+  box-shadow: var(--shadow);
+  animation: fadeUp .4s var(--ease) both;
+  transition: border-color .2s var(--ease), box-shadow .2s var(--ease);
+}
+div[class*="st-key-chartcard_"]:hover {
+  border-color: rgba(255,255,255,.10);
+  box-shadow: var(--shadow-up);
+}
+/* Chart caption strip below a chart card's plot */
+.chart-cap {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  font-size: .64rem;
+  color: var(--text-3);
+  letter-spacing: .02em;
+  padding: .1rem .15rem 0;
+  margin-top: -.2rem;
+}
+.chart-cap .cap-legend { color: var(--text-2); }
+.chart-cap .cap-tag {
+  font-family: var(--mono);
+  font-size: .58rem;
+  color: var(--amber);
+  background: rgba(240,164,41,.09);
+  border: 1px solid rgba(240,164,41,.26);
+  border-radius: 4px;
+  padding: .08rem .4rem;
+  letter-spacing: .03em;
+}
+
+/* ── Explanation note — self-explanatory context callout ────────────────── */
+/* Unobtrusive "what am I looking at" panel. Use sparingly (one per chart at */
+/* most) so density stays high. kind: info (blue) | good (green).           */
+.note {
+  display: flex;
+  gap: .6rem;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--blue);
+  border-radius: var(--r-sm);
+  padding: .6rem .85rem;
+  margin: .1rem 0 1rem;
+  font-size: .74rem;
+  line-height: 1.5;
+  color: var(--text-2);
+  animation: fadeUp .4s var(--ease) both;
+}
+.note.good { border-left-color: var(--green); }
+.note .note-ic { font-size: .82rem; opacity: .9; line-height: 1.3; flex-shrink: 0; }
+.note b, .note strong { color: var(--text); font-weight: 600; }
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -901,6 +964,22 @@ def _update_entry_lock_mark(front_expiry: str, back_expiry: str, put_strike: flo
     if key in locks:
         locks[key]["entry_diagonal_mark"] = new_mark
         _save_entry_locks(locks)
+
+
+def _render_note(text: str, *, kind: str = "info", icon: str | None = None) -> None:
+    """Render a small, unobtrusive explanation callout below a chart.
+
+    Keeps the dashboard self-explanatory without adding bulk. Use sparingly —
+    at most one per visualization — per the information-density-first principle.
+
+    kind: "info" (blue accent) | "good" (green accent).
+    """
+    _ic = icon if icon is not None else ("✓" if kind == "good" else "ℹ")
+    _cls = "note good" if kind == "good" else "note"
+    st.markdown(
+        f'<div class="{_cls}"><span class="note-ic">{_ic}</span><span>{text}</span></div>',
+        unsafe_allow_html=True,
+    )
 
 
 def _render_all_locks_popover(current_key: str | None) -> None:
@@ -3154,6 +3233,18 @@ if st.session_state["active_tab"] == "edge":
                     )
                     _region_start = None
 
+            # SPX underlying: invisible line on an overlaid, hidden axis. It draws
+            # nothing, but places "SPX" at the top of the unified hover tooltip so
+            # every readout leads with WHERE PRICE WAS when the marks moved.
+            if "spx" in _gap_df.columns and _gap_df["spx"].notna().any():
+                fig_gap.add_trace(go.Scatter(
+                    x=_gap_df["timestamp"], y=_gap_df["spx"],
+                    name="SPX", yaxis="y2", mode="lines",
+                    line=dict(width=0, color="rgba(0,0,0,0)"),
+                    showlegend=False,
+                    hovertemplate="SPX: %{y:,.2f}<extra></extra>",
+                ))
+
             if _lock is not None:
                 # Position-management mode: the live diagonal_mark line becomes
                 # dimmed reference context, and a fixed dashed line marks entry.
@@ -3178,11 +3269,18 @@ if st.session_state["active_tab"] == "edge":
                     line=dict(color=CHART_COLORS["diagonal_mark"], width=1.8),
                     hovertemplate="Diagonal Mark: $%{y:.2f}<extra></extra>",
                 ))
+            # Always-on Gap fill: the band between Diagonal and Transform IS the
+            # Gap, drawn directly so it reads at a glance rather than by comparing
+            # two lines. Discovery mode only — position-management mode tells a
+            # different story (distance vs. a fixed entry), so no band there.
+            _gap_fill = (dict(fill="tonexty", fillcolor="rgba(124,148,199,0.11)")
+                         if _lock is None else {})
             fig_gap.add_trace(go.Scatter(
                 x=_gap_df["timestamp"], y=_gap_df["transform_mark"],
                 name="Transform Order Mark",
                 line=dict(color=CHART_COLORS["transform_mark"], width=1.8),
                 hovertemplate="Transform Order Mark: $%{y:.2f}<extra></extra>",
+                **_gap_fill,
             ))
             # Invisible trace whose sole purpose is to add "Difference" as a
             # third line in the unified hover tooltip, without drawing
@@ -3197,7 +3295,7 @@ if st.session_state["active_tab"] == "edge":
             else:
                 # Discovery mode: unsigned distance between two live values.
                 _diff_series = (_gap_df["transform_mark"] - _gap_df["diagonal_mark"]).abs()
-                _diff_hover_label = "Difference"
+                _diff_hover_label = "Gap"
             fig_gap.add_trace(go.Scatter(
                 x=_gap_df["timestamp"], y=_diff_series,
                 name=_diff_hover_label,
@@ -3205,23 +3303,81 @@ if st.session_state["active_tab"] == "edge":
                 showlegend=False,
                 hovertemplate=f"{_diff_hover_label}: $%{{y:.2f}}<extra></extra>",
             ))
+
+            # Directional crossing markers: a caret wherever the Diagonal line
+            # crosses the Transform line. ▲ = Diagonal crossed UP through
+            # Transform; ▼ = crossed DOWN. Shape carries direction (no green/
+            # red — favorability isn't validated), so it reads without inspecting.
+            _dm = _gap_df["diagonal_mark"].to_numpy()
+            _tm = _gap_df["transform_mark"].to_numpy()
+            _tx = _gap_df["timestamp"].to_numpy()
+            _sgn = _dm - _tm
+            _up_x, _up_y, _dn_x, _dn_y = [], [], [], []
+            for _i in range(1, len(_sgn)):
+                if _sgn[_i - 1] < 0 <= _sgn[_i]:
+                    _up_x.append(_tx[_i]); _up_y.append(_tm[_i])
+                elif _sgn[_i - 1] > 0 >= _sgn[_i]:
+                    _dn_x.append(_tx[_i]); _dn_y.append(_tm[_i])
+            if _up_x:
+                fig_gap.add_trace(go.Scatter(
+                    x=_up_x, y=_up_y, mode="markers", name="cross-up",
+                    marker=dict(symbol="triangle-up", size=11,
+                                color=CHART_COLORS["transform_mark"],
+                                line=dict(width=1, color="#0c1421")),
+                    showlegend=False,
+                    hovertemplate="▲ Diagonal crossed up through Transform<extra></extra>",
+                ))
+            if _dn_x:
+                fig_gap.add_trace(go.Scatter(
+                    x=_dn_x, y=_dn_y, mode="markers", name="cross-down",
+                    marker=dict(symbol="triangle-down", size=11,
+                                color=CHART_COLORS["transform_mark"],
+                                line=dict(width=1, color="#0c1421")),
+                    showlegend=False,
+                    hovertemplate="▼ Diagonal crossed down through Transform<extra></extra>",
+                ))
             _add_market_open_lines(fig_gap, _gap_df["timestamp"])
 
             fig_gap.update_layout(
                 height=320,
                 margin=dict(l=_SYNC_MARGIN_L, r=_SYNC_MARGIN_R, t=10, b=20),
-                paper_bgcolor="#060b12",
-                plot_bgcolor="#060b12",
+                paper_bgcolor="#0c1421",
+                plot_bgcolor="#0c1421",
                 font=dict(family="Inter", color="#6d8fa8", size=11),
                 hovermode="x unified",
                 hoverlabel=dict(bgcolor="#111c2e", bordercolor="#1a2d45",
                                 font=dict(color="#dde6f1", size=12)),
                 xaxis=_gap_xaxis,
                 yaxis=dict(title="Mark ($)", gridcolor="#0c1928", automargin=False),
+                yaxis2=dict(overlaying="y", side="right", visible=False,
+                            showgrid=False, zeroline=False),
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0,
                             bgcolor="rgba(0,0,0,0)"),
             )
-            st.plotly_chart(fig_gap, use_container_width=True)
+            with st.container(key="chartcard_gap"):
+                st.plotly_chart(fig_gap, use_container_width=True)
+                st.markdown(
+                    '<div class="chart-cap"><span class="cap-legend">'
+                    'Filled band = live Gap (Transform − Diagonal) · '
+                    'brighter green = Gap ≥ threshold · '
+                    '▲▼ = Diagonal crosses Transform</span></div>',
+                    unsafe_allow_html=True,
+                )
+            if _lock is None:
+                _render_note(
+                    "This chart shows <b>why</b> the marks move. The shaded band is the Gap "
+                    "drawn directly — watch it thicken or thin instead of comparing two "
+                    "lines by eye. When it crosses your threshold the fill brightens green: "
+                    "a transformation window is open. Hover for SPX at that moment.",
+                    kind="info",
+                )
+            else:
+                _render_note(
+                    "Position-management mode: the dashed line is your locked entry; the dotted "
+                    "line is where the diagonal would be trading now. Hover any point for SPX, "
+                    "both marks, and your live difference vs. entry.",
+                    kind="good",
+                )
 
             if _lock is not None:
                 # ── Position-management readout: progress + momentum ──────────
@@ -3325,8 +3481,8 @@ if st.session_state["active_tab"] == "edge":
         fig_stack.update_layout(
             height=520,
             margin=dict(l=_SYNC_MARGIN_L, r=_SYNC_MARGIN_R, t=40, b=20),
-            paper_bgcolor="#060b12",
-            plot_bgcolor="#060b12",
+            paper_bgcolor="#0c1421",
+            plot_bgcolor="#0c1421",
             font=dict(family="Inter", color="#6d8fa8", size=11),
             hovermode="x unified",
             hoverlabel=dict(bgcolor="#111c2e", bordercolor="#1a2d45",
@@ -3335,7 +3491,8 @@ if st.session_state["active_tab"] == "edge":
                         xanchor="left", x=0, font=dict(size=10),
                         bgcolor="rgba(0,0,0,0)"),
         )
-        st.plotly_chart(fig_stack, use_container_width=True)
+        with st.container(key="chartcard_stack"):
+            st.plotly_chart(fig_stack, use_container_width=True)
         st.caption(
             "Top: front and back ATM IV share one axis — the vertical gap IS the spread. "
             "Bottom: ratio colored by regime at 0.70 / 1.00 / 1.30. "
@@ -3364,8 +3521,8 @@ if st.session_state["active_tab"] == "edge":
         fig_atm.update_layout(
             height=340,
             margin=dict(l=_SYNC_MARGIN_L, r=_SYNC_MARGIN_R, t=10, b=70),
-            paper_bgcolor="#060b12",
-            plot_bgcolor="#060b12",
+            paper_bgcolor="#0c1421",
+            plot_bgcolor="#0c1421",
             font=dict(family="Inter", color="#6d8fa8", size=11),
             hovermode="x unified",
             hoverlabel=dict(bgcolor="#111c2e", bordercolor="#1a2d45",
@@ -3376,7 +3533,8 @@ if st.session_state["active_tab"] == "edge":
             legend=dict(orientation="h", yanchor="top", y=-0.22, xanchor="center", x=0.5,
                         font=dict(size=10), bgcolor="rgba(0,0,0,0)"),
         )
-        st.plotly_chart(fig_atm, use_container_width=True)
+        with st.container(key="chartcard_atm"):
+            st.plotly_chart(fig_atm, use_container_width=True)
 
         samp_warn = iv_engine.sample_size_warning(atm_merged["iv_ratio"])
         if samp_warn:
@@ -3409,8 +3567,8 @@ if st.session_state["active_tab"] == "edge":
         fig_intra.update_layout(
             height=420,
             margin=dict(l=20, r=20, t=10, b=20),
-            paper_bgcolor="#060b12",
-            plot_bgcolor="#060b12",
+            paper_bgcolor="#0c1421",
+            plot_bgcolor="#0c1421",
             font=dict(family="Inter", color="#6d8fa8", size=11),
             hovermode="x unified",
             hoverlabel=dict(bgcolor="#111c2e", bordercolor="#1a2d45",
@@ -3420,7 +3578,8 @@ if st.session_state["active_tab"] == "edge":
             legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0,
                         bgcolor="rgba(0,0,0,0)"),
         )
-        st.plotly_chart(fig_intra, use_container_width=True)
+        with st.container(key="chartcard_intra"):
+            st.plotly_chart(fig_intra, use_container_width=True)
         st.caption(
             "Each dot is one snapshot. Above the dashed line = backwardation (R>1); below = contango. "
             "Color = time of day. A cloud hugging one ray → ratio ≈ constant; "
