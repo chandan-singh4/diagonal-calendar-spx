@@ -1304,6 +1304,66 @@ def _load_contract_hist(expiry: str, strike: float,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Snapshot-keyed read caches
+# ─────────────────────────────────────────────────────────────────────────────
+# Each of these wraps a raw DB read and is keyed on snapshot_id (a new snapshot
+# is the ONLY thing that changes their result). Within a snapshot window every
+# rerun — tab click, widget change, autorefresh tick — is a cache hit instead of
+# a fresh query + DataFrame rebuild. st.cache_data returns a COPY on each call,
+# so downstream code can safely mutate the returned frames.
+
+@st.cache_data(show_spinner=False)
+def _load_chain_df(snapshot_id: int) -> pd.DataFrame:
+    """Full option chain for a snapshot, built into the working DataFrame once."""
+    rows = db.get_option_chain(config.DB_PATH, snapshot_id)
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame([dict(r) for r in rows])
+    df = df.rename(columns={"expiry_date": "expiry"})
+    df["side"] = df["right"].map({"C": "CALL", "P": "PUT"})
+    df["iv"] = df["iv"] * 100  # decimal -> percent, at the load boundary
+    return df
+
+
+@st.cache_data(show_spinner=False)
+def _load_spx_intraday(session_date: str, snapshot_id: int) -> pd.DataFrame:
+    """Intraday SPX path for the session. snapshot_id is a cache-key only."""
+    rows = db.get_spx_intraday_today(config.DB_PATH, session_date)
+    return pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_prior_close(session_date: str) -> "float | None":
+    """Prior session close — stable for the whole session."""
+    return db.get_prior_session_close(config.DB_PATH, session_date)
+
+
+@st.cache_data(ttl=55, show_spinner=False)
+def _load_transform_marks(front: str, back: str, call_s: float, put_s: float,
+                           days: int, snapshot_id: int) -> pd.DataFrame:
+    """Transform/diagonal mark history for one strike pair (gap chart)."""
+    rows = db.get_transform_mark_history(config.DB_PATH, front, back,
+                                          call_s, put_s, days=days)
+    return pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
+
+
+@st.cache_data(ttl=55, show_spinner=False)
+def _load_latest_atm_iv(exp_date: str, snapshot_id: int, n: int = 2) -> list:
+    """The n most recent ATM-IV snapshots for an expiry (as plain dicts)."""
+    rows = db.get_latest_atm_iv_snapshots(config.DB_PATH, exp_date, n=n)
+    return [dict(r) for r in rows] if rows else []
+
+
+@st.cache_data(ttl=55, show_spinner=False)
+def _load_diagonal_hist(front: str, back: str, call_s: float, put_s: float,
+                         days: int, snapshot_id: int) -> pd.DataFrame:
+    """Diagonal net-debit history for one strike pair (scatter)."""
+    rows = db.get_diagonal_history(config.DB_PATH, front, back,
+                                    call_s, put_s, days=days)
+    return pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def _compute_transform_scanner(
     _chain_df: pd.DataFrame,
@@ -2008,18 +2068,13 @@ session_date  = snap_ts_str[:10]
 # Load option chain
 # ─────────────────────────────────────────────────────────────────────────────
 
-chain_rows = db.get_option_chain(config.DB_PATH, snapshot_id)
-if not chain_rows:
+chain_df = _load_chain_df(snapshot_id)
+if chain_df.empty:
     st.error(
         f"Snapshot {snapshot_id} exists but has no option rows. "
         "The database may be in an inconsistent state."
     )
     st.stop()
-
-chain_df = pd.DataFrame([dict(r) for r in chain_rows])
-chain_df = chain_df.rename(columns={"expiry_date": "expiry"})
-chain_df["side"] = chain_df["right"].map({"C": "CALL", "P": "PUT"})
-chain_df["iv"]   = chain_df["iv"] * 100
 
 available_expiries = sorted(chain_df["expiry"].unique())
 dte_by_expiry = chain_df.groupby("expiry")["dte"].first().astype(int).to_dict()
@@ -2046,11 +2101,7 @@ if len(available_expiries) < 2:
 # SPX intraday price series + daily change vs prior session close
 # ─────────────────────────────────────────────────────────────────────────────
 
-_intraday_rows = db.get_spx_intraday_today(config.DB_PATH, session_date)
-spx_intraday = (
-    pd.DataFrame([dict(r) for r in _intraday_rows])
-    if _intraday_rows else pd.DataFrame()
-)
+spx_intraday = _load_spx_intraday(session_date, snapshot_id)
 
 if not spx_intraday.empty:
     spx_intraday["ts_et"] = (
@@ -2059,7 +2110,7 @@ if not spx_intraday.empty:
         ).dt.tz_convert(config.DISPLAY_TIMEZONE)
     )
 
-prev_close = db.get_prior_session_close(config.DB_PATH, session_date)
+prev_close = _load_prior_close(session_date)
 
 if prev_close is not None:
     ref_price = prev_close
@@ -3119,11 +3170,10 @@ if st.session_state["active_tab"] == "edge":
     if not strikes_set:
         st.caption("Set call and put strikes in Controls above to see the Transform Gap chart.")
     else:
-        _gap_rows = db.get_transform_mark_history(
-            config.DB_PATH, front_expiry, back_expiry,
-            call_strike, put_strike, days=period_days,
+        _gap_df = _load_transform_marks(
+            front_expiry, back_expiry, call_strike, put_strike,
+            period_days, snapshot_id,
         )
-        _gap_df = pd.DataFrame([dict(r) for r in _gap_rows]) if _gap_rows else pd.DataFrame()
 
         if not _gap_df.empty:
             _gap_df["timestamp"] = (
@@ -3634,7 +3684,7 @@ if st.session_state["active_tab"] == "strike":
             ("Front", front_expiry, front_dte),
             ("Back",  back_expiry,  back_dte),
         ]:
-            exp_rows = db.get_latest_atm_iv_snapshots(config.DB_PATH, exp_date, n=2)
+            exp_rows = _load_latest_atm_iv(exp_date, snapshot_id, n=2)
             if exp_rows:
                 atm_now = exp_rows[0]["atm_avg_iv"] * 100
                 atm_chg = (
@@ -3848,11 +3898,10 @@ if st.session_state["active_tab"] == "research":
     if not strikes_set:
         st.info("Set call and put strikes in Controls to populate the scatter.")
     else:
-        _hist_rows = db.get_diagonal_history(
-            config.DB_PATH, front_expiry, back_expiry,
-            call_strike, put_strike, days=90,
+        _hist = _load_diagonal_hist(
+            front_expiry, back_expiry, call_strike, put_strike,
+            90, snapshot_id,
         )
-        _hist = pd.DataFrame([dict(r) for r in _hist_rows]) if _hist_rows else pd.DataFrame()
         if not _hist.empty:
             _hist["net_debit"] = (
                 _hist["back_call_mark"] + _hist["back_put_mark"]
