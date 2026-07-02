@@ -3444,6 +3444,110 @@ if st.session_state["active_tab"] == "edge":
                     kind="good",
                 )
 
+            # ── Strike Channel: SPX relative to the selected strikes ──────────
+            # Stacked directly under the gap chart, sharing its x-axis config and
+            # margins so the two align vertically. Answers "where was SPX vs. my
+            # position when the marks moved" — the band is the zone between the
+            # short strikes; the SPX line poking out = a short strike being tested.
+            if "spx" in _gap_df.columns and _gap_df["spx"].notna().any():
+                _lo_k = float(min(put_strike, call_strike))
+                _hi_k = float(max(put_strike, call_strike))
+                _spx_series = _gap_df["spx"].astype(float)
+
+                fig_spx = go.Figure()
+
+                # Neutral channel band between the short strikes (NOT green — SPX
+                # being inside the channel is a fact, not a validated good signal).
+                fig_spx.add_hrect(
+                    y0=_lo_k, y1=_hi_k,
+                    fillcolor="rgba(124,148,199,0.09)", line_width=0, layer="below",
+                )
+                for _k, _lbl in [(call_strike, f"{call_strike:.0f} C"),
+                                 (put_strike, f"{put_strike:.0f} P")]:
+                    fig_spx.add_hline(
+                        y=float(_k), line_width=1.2, line_dash="dash",
+                        line_color="#4a5d80",
+                        annotation_text=_lbl, annotation_position="right",
+                        annotation_font=dict(size=10, color="#8b9ab3"),
+                    )
+
+                # SPX line — light gray so it doesn't compete with blue/amber/green.
+                _cd = np.column_stack([
+                    _spx_series.to_numpy() - put_strike,
+                    _spx_series.to_numpy() - call_strike,
+                ])
+                fig_spx.add_trace(go.Scatter(
+                    x=_gap_df["timestamp"], y=_spx_series,
+                    name="SPX", mode="lines",
+                    line=dict(color="#d7deea", width=2),
+                    customdata=_cd,
+                    hovertemplate=("SPX: %{y:,.2f}"
+                                   "<br>vs Put: %{customdata[0]:+.0f}"
+                                   "<br>vs Call: %{customdata[1]:+.0f}<extra></extra>"),
+                ))
+
+                # Directional crossing markers where SPX crosses a short strike.
+                _sx = _spx_series.to_numpy()
+                _tx = _gap_df["timestamp"].to_numpy()
+                _cu_x, _cu_y, _cd_x, _cd_y = [], [], [], []
+                for _k in (put_strike, call_strike):
+                    for _i in range(1, len(_sx)):
+                        if _sx[_i - 1] < _k <= _sx[_i]:
+                            _cu_x.append(_tx[_i]); _cu_y.append(float(_k))
+                        elif _sx[_i - 1] > _k >= _sx[_i]:
+                            _cd_x.append(_tx[_i]); _cd_y.append(float(_k))
+                if _cu_x:
+                    fig_spx.add_trace(go.Scatter(
+                        x=_cu_x, y=_cu_y, mode="markers", name="cross-up",
+                        marker=dict(symbol="triangle-up", size=11,
+                                    color=CHART_COLORS["transform_mark"],
+                                    line=dict(width=1, color="#0c1421")),
+                        showlegend=False,
+                        hovertemplate="▲ SPX crossed up through strike<extra></extra>",
+                    ))
+                if _cd_x:
+                    fig_spx.add_trace(go.Scatter(
+                        x=_cd_x, y=_cd_y, mode="markers", name="cross-down",
+                        marker=dict(symbol="triangle-down", size=11,
+                                    color=CHART_COLORS["transform_mark"],
+                                    line=dict(width=1, color="#0c1421")),
+                        showlegend=False,
+                        hovertemplate="▼ SPX crossed down through strike<extra></extra>",
+                    ))
+                _add_market_open_lines(fig_spx, _gap_df["timestamp"])
+
+                # Y-range padded around both the band and the SPX path.
+                _y_lo = min(_lo_k, float(_spx_series.min()))
+                _y_hi = max(_hi_k, float(_spx_series.max()))
+                _y_pad = max((_y_hi - _y_lo) * 0.08, 2.0)
+                fig_spx.update_layout(
+                    height=230,
+                    margin=dict(l=_SYNC_MARGIN_L, r=_SYNC_MARGIN_R, t=10, b=20),
+                    paper_bgcolor="#0c1421", plot_bgcolor="#0c1421",
+                    font=dict(family="Inter", color="#6d8fa8", size=11),
+                    hovermode="x unified",
+                    hoverlabel=dict(bgcolor="#111c2e", bordercolor="#1a2d45",
+                                    font=dict(color="#dde6f1", size=12)),
+                    xaxis=_gap_xaxis,
+                    yaxis=dict(title="SPX", gridcolor="#0c1928", automargin=False,
+                               range=[_y_lo - _y_pad, _y_hi + _y_pad]),
+                    showlegend=False,
+                )
+                with st.container(key="chartcard_spx"):
+                    st.plotly_chart(fig_spx, use_container_width=True)
+                    st.markdown(
+                        '<div class="chart-cap"><span class="cap-legend">'
+                        'Shaded band = between your short strikes · line = SPX · '
+                        '▲▼ = SPX crosses a strike</span></div>',
+                        unsafe_allow_html=True,
+                    )
+                _render_note(
+                    "Where SPX sat relative to your position. Line inside the band = both "
+                    "shorts OTM; the line poking above the call or below the put = that short "
+                    "is being tested — which is usually what moved the marks above.",
+                    kind="info",
+                )
+
             if _lock is not None:
                 # ── Position-management readout: progress + momentum ──────────
                 _since_entry = _gap_df[_gap_df["timestamp"] >= pd.Timestamp(_lock["locked_at"])]
