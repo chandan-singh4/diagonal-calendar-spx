@@ -40,6 +40,7 @@ from pathlib import Path
 import streamlit.components.v1 as components
 
 import numpy as np
+from time import perf_counter as _perf_counter
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -3170,10 +3171,12 @@ if st.session_state["active_tab"] == "edge":
     if not strikes_set:
         st.caption("Set call and put strikes in Controls above to see the Transform Gap chart.")
     else:
+        _perf_marks0 = _perf_counter()
         _gap_df = _load_transform_marks(
             front_expiry, back_expiry, call_strike, put_strike,
             period_days, snapshot_id,
         )
+        _perf_marks_ms = (_perf_counter() - _perf_marks0) * 1000.0
 
         if not _gap_df.empty:
             _gap_df["timestamp"] = (
@@ -3281,6 +3284,7 @@ if st.session_state["active_tab"] == "edge":
                             st.session_state[_lock_toggle_key] = False
                             st.rerun()
 
+            _perf_build0 = _perf_counter()
             fig_gap = go.Figure()
 
             # Shade every contiguous region where Transform Gap >= 5
@@ -3334,6 +3338,36 @@ if st.session_state["active_tab"] == "edge":
                     line=dict(color=CHART_COLORS["diagonal_mark"], width=1.8),
                     hovertemplate="Diagonal Mark: $%{y:.2f}<extra></extra>",
                 ))
+            # Gap / live-difference series (computed first so it can feed the
+            # unified master tooltip below).
+            if _lock is not None:
+                # Position management: signed, against the fixed entry —
+                # Current Transform Order Mark − Fixed Entry Diagonal Mark.
+                _diff_series = _gap_df["transform_mark"] - _lock["entry_diagonal_mark"]
+                _diff_hover_label = "Live Difference (vs. entry)"
+            else:
+                # Discovery mode: unsigned distance between two live values.
+                _diff_series = (_gap_df["transform_mark"] - _gap_df["diagonal_mark"]).abs()
+                _diff_hover_label = "Gap"
+
+            # A SINGLE master tooltip, carried by the Transform trace, in a FIXED
+            # line order: SPX, Diagonal, Transform, Gap. Every other trace's hover
+            # is suppressed (loop below), so the unified tooltip shows exactly
+            # these four lines in this order — independent of Plotly's trace/axis
+            # ordering, which is what silently reversed it before.
+            _master_cd = np.column_stack([
+                _gap_df["spx"].to_numpy(dtype=float),
+                _gap_df["diagonal_mark"].to_numpy(dtype=float),
+                _gap_df["transform_mark"].to_numpy(dtype=float),
+                _diff_series.to_numpy(dtype=float),
+            ])
+            _master_ht = (
+                "SPX: %{customdata[0]:,.2f}"
+                "<br>Diagonal Mark: $%{customdata[1]:.2f}"
+                "<br>Transform Order Mark: $%{customdata[2]:.2f}"
+                f"<br>{_diff_hover_label}: $%{{customdata[3]:.2f}}<extra></extra>"
+            )
+
             # Always-on Gap fill: the band between Diagonal and Transform IS the
             # Gap, drawn directly so it reads at a glance rather than by comparing
             # two lines. Discovery mode only — position-management mode tells a
@@ -3344,29 +3378,18 @@ if st.session_state["active_tab"] == "edge":
                 x=_gap_df["timestamp"], y=_gap_df["transform_mark"],
                 name="Transform Order Mark",
                 line=dict(color=CHART_COLORS["transform_mark"], width=1.8),
-                hovertemplate="Transform Order Mark: $%{y:.2f}<extra></extra>",
+                customdata=_master_cd,
+                hovertemplate=_master_ht,
                 **_gap_fill,
             ))
-            # Invisible trace whose sole purpose is to add "Difference" as a
-            # third line in the unified hover tooltip, without drawing
-            # anything on the chart itself.
-            if _lock is not None:
-                # Position management: signed, against the fixed entry —
-                # Current Transform Order Mark − Fixed Entry Diagonal Mark.
-                # Sign is meaningful here (crossing zero/threshold is the
-                # whole point), so this one is NOT shown as absolute value.
-                _diff_series = _gap_df["transform_mark"] - _lock["entry_diagonal_mark"]
-                _diff_hover_label = "Live Difference (vs. entry)"
-            else:
-                # Discovery mode: unsigned distance between two live values.
-                _diff_series = (_gap_df["transform_mark"] - _gap_df["diagonal_mark"]).abs()
-                _diff_hover_label = "Gap"
+            # Invisible trace kept for figure structure; hover suppressed (the
+            # master tooltip already reports the Gap line).
             fig_gap.add_trace(go.Scatter(
                 x=_gap_df["timestamp"], y=_diff_series,
                 name=_diff_hover_label,
                 line=dict(width=0, color="rgba(0,0,0,0)"),
                 showlegend=False,
-                hovertemplate=f"{_diff_hover_label}: $%{{y:.2f}}<extra></extra>",
+                hoverinfo="skip",
             ))
 
             # Directional crossing markers: a caret wherever the Diagonal line
@@ -3403,6 +3426,13 @@ if st.session_state["active_tab"] == "edge":
                 ))
             _add_market_open_lines(fig_gap, _gap_df["timestamp"])
 
+            # Only the Transform trace drives the unified tooltip; silence the
+            # rest so the four master lines appear alone, in fixed order.
+            for _tr in fig_gap.data:
+                if _tr.name != "Transform Order Mark":
+                    _tr.hoverinfo = "skip"
+                    _tr.hovertemplate = None
+
             fig_gap.update_layout(
                 height=320,
                 margin=dict(l=_SYNC_MARGIN_L, r=_SYNC_MARGIN_R, t=10, b=20),
@@ -3419,8 +3449,24 @@ if st.session_state["active_tab"] == "edge":
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0,
                             bgcolor="rgba(0,0,0,0)"),
             )
+            _perf_build_ms = (_perf_counter() - _perf_build0) * 1000.0
             with st.container(key="chartcard_gap"):
                 st.plotly_chart(fig_gap, use_container_width=True)
+                # ── #3 profiling: real numbers on the current (esp. OTM) load ──
+                # A cache MISS (new/OTM strike pair) shows the true query cost;
+                # a cache HIT reads ~0 ms. This isolates data-retrieval vs.
+                # chart-generation so we optimise the actual bottleneck.
+                try:
+                    _spx_now = float(_gap_df["spx"].iloc[-1])
+                    _dist_txt = (f" · call {call_strike - _spx_now:+.0f} / "
+                                 f"put {put_strike - _spx_now:+.0f} pts from spot")
+                except Exception:
+                    _dist_txt = ""
+                st.caption(
+                    f"⏱ marks query {_perf_marks_ms:.0f} ms · "
+                    f"chart build {_perf_build_ms:.0f} ms · "
+                    f"{len(_gap_df)} pts{_dist_txt}"
+                )
                 st.markdown(
                     '<div class="chart-cap"><span class="cap-legend">'
                     'Filled band = live Gap (Transform − Diagonal) · '

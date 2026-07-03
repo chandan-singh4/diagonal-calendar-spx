@@ -249,6 +249,35 @@ def init_db(db_path: str | None = None) -> None:
         conn.executescript(_DDL)
         conn.commit()
 
+        # ── Foundational integrity migration ─────────────────────────────────
+        # option_rows historically had no uniqueness guarantee on
+        # (snapshot_id, expiry_date, strike, right), so a re-fetch or overlapping
+        # poll could store the same contract twice in one snapshot. Those
+        # duplicates fan out across the six-leg mark-history joins and render as
+        # a sawtooth. Deduplicate ONCE (keeping the earliest row per contract),
+        # then create a UNIQUE index so it can never recur. Guarded on the index
+        # so the (potentially expensive) DELETE runs only the first time.
+        _has_uq = conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type = 'index' AND name = 'uq_option_rows_contract'"
+        ).fetchone()
+        if not _has_uq:
+            _dupes = conn.execute(
+                "DELETE FROM option_rows WHERE id NOT IN ("
+                "  SELECT MIN(id) FROM option_rows "
+                "  GROUP BY snapshot_id, expiry_date, strike, right)"
+            ).rowcount
+            conn.execute(
+                "CREATE UNIQUE INDEX uq_option_rows_contract "
+                "ON option_rows(snapshot_id, expiry_date, strike, right)"
+            )
+            conn.commit()
+            logger.info(
+                "option_rows integrity migration: removed %d duplicate row(s), "
+                "UNIQUE(snapshot_id, expiry_date, strike, right) enforced",
+                _dupes,
+            )
+
         row = conn.execute(
             "SELECT MAX(version) AS v FROM schema_version"
         ).fetchone()
@@ -346,7 +375,7 @@ def insert_option_rows(db_path: str, rows: list[dict]) -> int:
         return 0
 
     sql = """
-        INSERT INTO option_rows (
+        INSERT OR IGNORE INTO option_rows (
             snapshot_id, expiry_date, dte, strike, right,
             bid, ask, mark, last,
             iv, delta, gamma, theta, vega,
