@@ -767,6 +767,9 @@ def get_diagonal_history(
               AND COALESCE(obc.mark, (obc.bid + obc.ask) / 2.0) IS NOT NULL
               AND COALESCE(ofp.mark, (ofp.bid + ofp.ask) / 2.0) IS NOT NULL
               AND COALESCE(obp.mark, (obp.bid + obp.ask) / 2.0) IS NOT NULL
+            -- Collapse duplicate-contract fan-out to one row per snapshot
+            -- (see get_transform_mark_history for the full rationale).
+            GROUP BY s.snapshot_id
             ORDER BY s.snapshot_timestamp
             """,
             (
@@ -849,6 +852,12 @@ def get_transform_mark_history(
               AND COALESCE(obp.mark, (obp.bid + obp.ask) / 2.0) IS NOT NULL
               AND COALESCE(owc.mark, (owc.bid + owc.ask) / 2.0) IS NOT NULL
               AND COALESCE(owp.mark, (owp.bid + owp.ask) / 2.0) IS NOT NULL
+            -- One row per snapshot. option_rows has no uniqueness guarantee on
+            -- (snapshot_id, expiry, strike, right), so duplicate contract rows
+            -- fan out across the six LEFT JOINs and get plotted as a sawtooth.
+            -- Duplicates within a snapshot are identical (same poll), so grouping
+            -- by snapshot_id collapses the fan-out to the correct single value.
+            GROUP BY s.snapshot_id
             ORDER BY s.snapshot_timestamp
             """,
             (

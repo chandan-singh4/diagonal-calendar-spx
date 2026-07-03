@@ -1247,7 +1247,7 @@ def _banded_ratio_traces(x, y) -> list:
     return traces
 
 
-@st.cache_data(ttl=55, show_spinner=False)
+@st.cache_data(ttl=55, show_spinner=False, max_entries=48)
 def _load_atm_hist(expiry: str, days: int) -> pd.DataFrame:
     rows = db.get_atm_iv_history(config.DB_PATH, expiry, days)
     if not rows:
@@ -1263,7 +1263,7 @@ def _load_atm_hist(expiry: str, days: int) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(ttl=55, show_spinner=False)
+@st.cache_data(ttl=55, show_spinner=False, max_entries=48)
 def _load_atm_hist_fb(expiry: str, days: int) -> pd.DataFrame:
     df = _load_atm_hist(expiry, days)
     if df.empty and days == 1:
@@ -1278,7 +1278,7 @@ def _load_atm_hist_fb(expiry: str, days: int) -> pd.DataFrame:
 # Helper — per-contract IV history
 # ─────────────────────────────────────────────────────────────────────────────
 
-@st.cache_data(ttl=55, show_spinner=False)
+@st.cache_data(ttl=55, show_spinner=False, max_entries=48)
 def _load_contract_hist(expiry: str, strike: float,
                          side: str, days: int) -> pd.DataFrame:
     right_char = "C" if side == "CALL" else "P"
@@ -1312,7 +1312,7 @@ def _load_contract_hist(expiry: str, strike: float,
 # a fresh query + DataFrame rebuild. st.cache_data returns a COPY on each call,
 # so downstream code can safely mutate the returned frames.
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(ttl=120, show_spinner=False, max_entries=3)
 def _load_chain_df(snapshot_id: int) -> pd.DataFrame:
     """Full option chain for a snapshot, built into the working DataFrame once."""
     rows = db.get_option_chain(config.DB_PATH, snapshot_id)
@@ -1325,20 +1325,20 @@ def _load_chain_df(snapshot_id: int) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(ttl=120, show_spinner=False, max_entries=3)
 def _load_spx_intraday(session_date: str, snapshot_id: int) -> pd.DataFrame:
     """Intraday SPX path for the session. snapshot_id is a cache-key only."""
     rows = db.get_spx_intraday_today(config.DB_PATH, session_date)
     return pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False, max_entries=3)
 def _load_prior_close(session_date: str) -> "float | None":
     """Prior session close — stable for the whole session."""
     return db.get_prior_session_close(config.DB_PATH, session_date)
 
 
-@st.cache_data(ttl=55, show_spinner=False)
+@st.cache_data(ttl=55, show_spinner=False, max_entries=32)
 def _load_transform_marks(front: str, back: str, call_s: float, put_s: float,
                            days: int, snapshot_id: int) -> pd.DataFrame:
     """Transform/diagonal mark history for one strike pair (gap chart)."""
@@ -1347,14 +1347,14 @@ def _load_transform_marks(front: str, back: str, call_s: float, put_s: float,
     return pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
 
 
-@st.cache_data(ttl=55, show_spinner=False)
+@st.cache_data(ttl=55, show_spinner=False, max_entries=32)
 def _load_latest_atm_iv(exp_date: str, snapshot_id: int, n: int = 2) -> list:
     """The n most recent ATM-IV snapshots for an expiry (as plain dicts)."""
     rows = db.get_latest_atm_iv_snapshots(config.DB_PATH, exp_date, n=n)
     return [dict(r) for r in rows] if rows else []
 
 
-@st.cache_data(ttl=55, show_spinner=False)
+@st.cache_data(ttl=55, show_spinner=False, max_entries=32)
 def _load_diagonal_hist(front: str, back: str, call_s: float, put_s: float,
                          days: int, snapshot_id: int) -> pd.DataFrame:
     """Diagonal net-debit history for one strike pair (scatter)."""
@@ -1364,7 +1364,7 @@ def _load_diagonal_hist(front: str, back: str, call_s: float, put_s: float,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-@st.cache_data(show_spinner=False)
+@st.cache_data(ttl=120, show_spinner=False, max_entries=8)
 def _compute_transform_scanner(
     _chain_df: pd.DataFrame,
     spx_price: float,
@@ -1582,7 +1582,7 @@ def _scan_all_offsets(
     return combined.sort_values("Transform Diff", ascending=False).reset_index(drop=True)
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False, max_entries=64)
 def _candidate_signals(front_raw: str, back_raw: str,
                         put_strike: float, call_strike: float,
                         days: int = 1) -> dict | None:
@@ -1691,7 +1691,7 @@ def _card_key(card: dict) -> str:
     return f"{card['front_raw']}|{card['back_raw']}|{int(card['put_strike'])}|{int(card['call_strike'])}"
 
 
-@st.cache_data(show_spinner="Scanning transform opportunities…")
+@st.cache_data(ttl=120, show_spinner="Scanning transform opportunities…", max_entries=3)
 def _compute_mc_core(_chain_df: pd.DataFrame, spx_price: float,
                       snapshot_id: int, snapshot_ts: str) -> dict:
     """
