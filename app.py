@@ -1989,7 +1989,34 @@ else:
     poll_interval = config.POLL_INTERVAL_NORMAL
     poll_label    = "300s"
 
-st_autorefresh(interval=poll_interval * 1000, key="autorefresh")
+# ── Live data refresh (silent, change-triggered) ─────────────────────────────
+# Previously st_autorefresh forced a FULL-PAGE rerun every poll_interval, which
+# reset charts (losing zoom/pan) and interrupted analysis even when NO new data
+# had arrived. Instead, a background fragment polls for a new COMPLETE snapshot
+# on a short timer and reruns the app ONLY when the snapshot_id actually changes.
+# While the snapshot is unchanged — mid-analysis, or after hours when the
+# collector is idle — nothing reruns, so the page stays put.
+_LIVE_POLL_SECONDS = max(5, min(int(poll_interval), 20))
+_fragment = getattr(st, "fragment", None) or getattr(st, "experimental_fragment", None)
+
+if _fragment is not None:
+    @_fragment(run_every=_LIVE_POLL_SECONDS)
+    def _live_refresh_poller():
+        # Cheap: one indexed lookup of the newest COMPLETE snapshot. Triggers a
+        # full-app rerun only when new data has landed since the current render.
+        try:
+            _snap = db.get_latest_complete_snapshot(config.DB_PATH)
+        except Exception:
+            return
+        _latest_id = _snap["snapshot_id"] if _snap else None
+        if (_latest_id is not None
+                and _latest_id != st.session_state.get("_active_snapshot_id")):
+            st.rerun()
+
+    _live_refresh_poller()
+else:
+    # Fallback for Streamlit builds without fragment support.
+    st_autorefresh(interval=poll_interval * 1000, key="autorefresh")
 
 st.sidebar.divider()
 st.sidebar.markdown("**🔭 Transform Scanner**")
@@ -2055,6 +2082,8 @@ if latest_snap is None:
     st.stop()
 
 snapshot_id   = latest_snap["snapshot_id"]
+# The poller (defined above) reruns the app only when a newer snapshot appears.
+st.session_state["_active_snapshot_id"] = snapshot_id
 spx_price     = latest_snap["underlying_price"]
 vix_value     = latest_snap["vix_value"]
 snap_ts_str   = latest_snap["snapshot_timestamp"]

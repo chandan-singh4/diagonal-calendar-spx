@@ -31,6 +31,7 @@
 12. [Trade Journal — v3.1 Reference](#12-trade-journal--v31-reference)
 13. [Dashboard v3.2 — Entry Analysis, Layout Reorder, Normalized Metrics (detailed)](#13-dashboard-v32--entry-analysis-layout-reorder-normalized-metrics-detailed)
 14. [Dashboard v4.0 — Premium Redesign, Mission Control, Journal P&L Lifecycle Fix](#14-dashboard-v40--premium-redesign-mission-control-journal-pl-lifecycle-fix)
+15. [Dashboard v4.1 — Design Language, Strike Channel, Performance, Stabilization & Silent Refresh](#15-dashboard-v41--design-language-strike-channel-performance-stabilization--silent-refresh)
 
 ---
 
@@ -46,6 +47,7 @@
 | 1.5 | 2026-06-29 | Chandan Singh | **Dashboard v3.2 — Entry Analysis overhaul, layout reorder, IC payoff chart, normalized metrics, Transform Order Mark, weekend fallbacks.** (1) "Transform Credit" panel replaced by "Entry Analysis" with six real metrics: Diagonal Mark (dual-format pts+$), ATM Straddle, Normalized Debit, Net Daily θ/contract, Transform Order Mark, Transform Difference (with progress indicator + green signal at ≥5). (2) Section order rewritten: Entry Analysis→Calendar Edge→Historical Stats→Strike Detail→Pinned Pairs→Scanner→Research scatter. (3) IC Risk Profile payoff-at-expiration chart added to journal.py (replaces P&L by Expiry Zone table). (4) Three new `iv_engine.py` functions: `atm_straddle_price`, `normalized_debit`, `theta_differential` (+ `ThetaDifferential` dataclass). (5) New `db.py` function: `get_diagonal_history` for research scatter. (6) Put/Call order swapped to Put-left, Call-right throughout. (7) Period radio moved into Calendar Edge section header; `atm_merged_90d` (fixed 90-day) used for Entry Analysis percentile. (8) Weekend/gap fallback added to `_load_atm_hist_fb` and `_load_contract_hist`: Today falls back to last available session. (9) Historical Stats enhanced: percentile rank + LOW/MID/HIGH label per column. (10) Calendar Edge expanders removed — stacked view and intraday scatter now inline. (11) x-axis pinned to 09:30–16:15 ET on Today view. Added Section 13. |
 | 1.6 | 2026-06-29 | Chandan Singh | **Dashboard v3.3 — Transformation Opportunity Scanner, design system v2, layout cleanup.** (1) Transformation Opportunity Scanner: core new feature — batch version of Entry Analysis scanning all expiry pairs for a user-specified strike gap; put/call offset dropdowns inline above table; exact-match wing validation; nearest-common-strike resolution for main legs; bisect-based O(log n) mark cache replacing per-call DataFrame filters. (2) Token expiry banner: amber pulse at day 6, red flash at day 7+, inline re-auth command. (3) Collector-aware refresh: dashboard auto-detects OPEN (9:30–10:00) and CLOSE (3:30–4:00) sessions and switches to 60s to match collector. (4) Countdown timer anchored to collector's last DB write, not the browser session. (5) SPX change display simplified to static `+64.0 (0.87%)` — toggle removed. (6) Strike selectors changed from `number_input` to `selectbox` showing only strikes present in both expiries. (7) Design system v2: Inter + JetBrains Mono fonts; 2rem metric values; `hr { display:none }`; no decorative lines on headings; card hover lift; `config.toml` for base theme; page icon 📈. (8) Pinned Pairs and Pair Scanner removed. (9) Front/Back ATM IV duplicate metrics removed. (10) Period radio moved inline with Contango/Backwardation info. (11) SPX price font increased to 2.6rem. |
 | 1.7 | 2026-06-30 | Chandan Singh | **Dashboard v4.0 — Premium redesign, Mission Control, Trade Journal P&L lifecycle fix.** (1) Design System v3.4: dark navy palette (`--bg: #060b12`), teal-green `#10d4a3`, `pulseGreen` glow animation on best-diff card. (2) Custom session-state tab navigation (6 tabs) replacing vertical scroll — enables programmatic tab switching from Mission Control cards. (3) Persistent Controls Bar above all tabs. (4) Mission Control: cross-sectional opportunity discovery replacing single-instrument chart inspection — Phase A (21-offset sweep, cached) + Phase B (history queries for candidate set only); non-ATM eligibility registry (`eligible_history.json`); opportunistic backfill from Calendar Edge; never-empty panel guarantee. (5) Attention Strip in header: Eligible / Approaching / New counts + best opportunity, visible on every tab. (6) New DB function `get_transform_mark_history`. (7) New chart: Diagonal vs. Transform Order Mark with green-shaded transform windows. (8) Chart Appearance sidebar: color pickers persisted to `chart_colors.json`. (9) Scanner row selection → "→ View Chart" one-click drill-down. (10) Trade Journal: `resolved_pl(t)` function as single source of truth for all P&L display; `ic_expiry_pnl_per_share` for IC assignment calculation; Mark Expired fully automated for transformed trades (manual input removed); P&L Lifecycle Breakdown panel in Expiration tab. See Section 14. |
+| 1.8 | 2026-07-03 | Chandan Singh | **Dashboard v4.1 — Design language, Strike Channel, performance & stabilization, silent refresh.** (1) Reusable chart-card system (`st.container(key="chartcard_*")` + `div[class*="st-key-chartcard_"]` CSS), `_render_note()` explanation callouts, `.chart-cap` captions; Calendar Edge charts + Strike Channel wrapped in cards, plot backgrounds moved to card interior `#0c1421`; always-on Gap fill (`fill="tonexty"`) under the ≥-threshold shading. (2) **Strike Channel subplot** stacked under the Diagonal/Transform chart (shared `_gap_xaxis` + `_SYNC_MARGIN_L/R`): SPX line through a neutral strike band with ▲/▼ strike-crossing markers; reads cached `_gap_df`, no new query. (3) **Performance:** `init_db` moved behind `@st.cache_resource` (was committing a write every rerun → Ctrl+C hang); read-only non-committing connections (`_make_conn(read_only=True)`/`PRAGMA query_only=ON`, `get_conn` repointed for 20 read fns; `delete_trade` write-path bug fixed); six snapshot-keyed cached loaders; `max_entries`+`ttl` on all 12 caches. (4) **Data integrity / sawtooth root cause:** duplicate `option_rows` fan out across the six-leg history joins — fixed with `GROUP BY s.snapshot_id` **and** a one-time dedupe migration + `UNIQUE(snapshot_id, expiry_date, strike, right)` index + `INSERT OR IGNORE`. (5) Far-OTM slowness (same fan-out) resolved (~56 ms after fix); timing caption added. (6) **Silent refresh:** `st_autorefresh` replaced by a change-triggered `st.fragment` poller that reruns only on a new snapshot. (7) Gap-chart tooltip pinned to a single master template in fixed order (SPX, Diagonal, Transform, Gap). No trading-math/scanner/Mission-Control logic changed. See Section 15. |
 
 ---
 
@@ -1405,3 +1407,253 @@ The Full Scanner table (inside the expander) now supports one-click navigation:
 | `chart_colors.json` | User color preferences | Already in `.gitignore` |
 
 *End of Section 14 — added in DOCUMENTATION.md v1.7 (2026-06-30)*
+
+
+---
+
+## 15. Dashboard v4.1 — Design Language, Strike Channel, Performance, Stabilization & Silent Refresh
+
+*Added in DOCUMENTATION.md v1.8 (2026-07-03). This section is the in-depth companion to the v4.1 overview in DEV_JOURNAL.md.*
+
+### 15.0 Scope discipline (what did NOT change)
+
+Every change in v4.1 is one of three kinds: **presentation** (CSS, chart styling, tooltips), **data-plumbing** (connection lifecycle, caching, refresh mechanism), or **data-integrity** (duplicate prevention). No options math, IV-engine formula, scanner logic, Mission Control ranking, or Trade Journal P&L rule was modified. The `$5.00` transform threshold and the demotion of the Trade Quality Score to raw metrics both stand unchanged (see §9 and §13).
+
+---
+
+### 15.1 Design-language system
+
+The dashboard previously rendered charts directly onto the page background, which read as flat. v4.1 introduces a small, reusable visual vocabulary.
+
+**Chart cards.** Any chart can be given its own bordered, elevated panel by wrapping its render in a keyed container:
+
+```python
+with st.container(key="chartcard_gap"):
+    st.plotly_chart(fig_gap, use_container_width=True)
+```
+
+Streamlit emits the key as a CSS class `st-key-chartcard_gap` on the container element. A single wildcard rule styles every such card, so adding a new carded chart needs no new CSS:
+
+```css
+div[class*="st-key-chartcard_"] {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  padding: 1.05rem 1.15rem .8rem;
+  box-shadow: var(--shadow);
+}
+```
+
+Cards in use: `chartcard_gap` (Diagonal vs. Transform), `chartcard_spx` (Strike Channel), `chartcard_stack` (IV term structure), `chartcard_atm` (dual-axis IV + ratio), `chartcard_intra` (IV scatter). Each chart's Plotly `paper_bgcolor`/`plot_bgcolor` was changed from the page color `#060b12` to the card interior `#0c1421` so the plot sits *inside* the card rather than punching through it.
+
+**Explanation callouts.** A helper renders an unobtrusive "what am I looking at" note beneath a chart:
+
+```python
+def _render_note(text: str, *, kind: str = "info", icon: str | None = None) -> None:
+    ...  # renders <div class="note"> / <div class="note good">
+```
+
+Styled by `.note` (blue left-accent) and `.note.good` (green). Used sparingly — at most one per chart — to keep information density high per the design philosophy in §8.
+
+**Caption strip.** `.chart-cap` renders a thin legend/aside line under a chart (e.g. "Filled band = live Gap … ▲▼ = Diagonal crosses Transform").
+
+**Always-on Gap fill.** On the Diagonal vs. Transform chart, the area *between* the two lines is now shaded — the Gap drawn directly, so it reads at a glance instead of by eye-comparing two lines. It is implemented as `fill="tonexty"` on the Transform trace (filling down to the Diagonal trace), in **discovery mode only** (in position-management/lock mode the chart tells a different story — distance vs. a fixed entry — so no band). The pre-existing bright-green ≥-threshold shading layers on top, giving two honest signals in one fill: *there is always a gap* and *the gap is currently transformable*.
+
+**KPI panel.** The four Calendar Edge KPIs (ATM IV Ratio, Front/Back ATM IV, IV Index) were given their own bounded panel rather than floating on the bare background, with matching card elevation.
+
+---
+
+### 15.2 Strike Channel subplot
+
+**Problem it solves.** The Diagonal and Transform marks move primarily because SPX moves relative to the selected strikes. Plotting raw SPX underneath does not help — what matters is *where SPX sat relative to the position*, not its absolute level. The Strike Channel answers: **"where was SPX relative to my strikes when these option values changed?"**
+
+**Design chosen (and alternatives rejected).** Candidates considered were: distance-from-strike as two lines; a normalized "wings from strike" scale; moneyness; and a raw SPX overlay. The chosen design plots **SPX as a literal price line through a shaded band bounded by the two short strikes**, because (a) price reads natively — the user already thinks "SPX is at 7480, my call is 7450" — with no mental translation, and (b) the band makes "inside the position vs. a short strike being tested" obvious at a glance. Normalization was explicitly deferred to a future cross-trade comparison view (it loses the point value that P&L is denominated in). A composite position score was rejected on the standing "no unvalidated blended metrics" principle.
+
+**Placement & axis sync.** The channel is a **separate Plotly figure** (`fig_spx`) rendered in its own `chartcard_spx` immediately beneath the gap chart. It shares the gap chart's x-axis configuration (`_gap_xaxis`, which carries the session `rangebreaks` and autoranges off the same `_gap_df["timestamp"]`) and the same left/right margins (`_SYNC_MARGIN_L`, `_SYNC_MARGIN_R`). Identical margins + identical x-domain ⇒ the two panels align vertically, so a spike in the gap chart and SPX poking out of the band fall on the same vertical.
+
+**Components:**
+- **SPX line** — light gray `#d7deea`, width 2, so it doesn't compete with the blue/amber/green already spoken for.
+- **Strike band** — `add_hrect(y0=min(strikes), y1=max(strikes))` in neutral slate `rgba(124,148,199,0.09)`, `layer="below"`. Deliberately **not** green: SPX being inside the channel is a fact, not a validated favorable signal.
+- **Strike reference lines** — dashed `#4a5d80` `add_hline` at the put and call strikes, labelled `"7400 P"` / `"7450 C"` on the right.
+- **Directional crossing markers** — `▲` (`triangle-up`) where SPX crosses **up** through a strike, `▼` (`triangle-down`) for down, in amber to match the crossing vocabulary on the gap chart. Direction is carried by shape alone (no green/red — favorability isn't validated).
+- **Market-open dividers** — reuses `_add_market_open_lines(fig_spx, …)` so multi-day views get the same 09:30 markers.
+- **Y-range** — padded around both the band and the SPX path so the band never collapses to a sliver.
+
+**Hover.** SPX line hover shows `SPX: 7,503.20`, `vs Put: +103`, `vs Call: +53` via `customdata`. (Distance-to-strike was removed from the *gap* chart tooltip but belongs here, where it is the chart's whole purpose.)
+
+**Data cost.** Zero new queries — the channel reads the `spx` column already present in the cached `_gap_df` (from `get_transform_mark_history`).
+
+---
+
+### 15.3 Tooltip architecture (Diagonal vs. Transform chart)
+
+**Requirement (from the design pass).** The gap-chart tooltip must contain, in this order: **SPX, Diagonal Mark, Transform Order Mark, Gap**.
+
+**Why a naive approach failed.** Under `hovermode="x unified"`, Plotly does not reliably honor trace insertion order, and with SPX sitting on a hidden secondary axis the order silently reversed (observed as *Gap, Transform, Diagonal, SPX*). Relying on trace/axis order is fragile.
+
+**Solution — a single master tooltip.** All four values are carried by **one** trace (Transform), via `customdata`, with a fixed multi-line `hovertemplate`:
+
+```python
+_master_cd = np.column_stack([
+    _gap_df["spx"], _gap_df["diagonal_mark"],
+    _gap_df["transform_mark"], _diff_series,
+])
+_master_ht = ("SPX: %{customdata[0]:,.2f}"
+              "<br>Diagonal Mark: $%{customdata[1]:.2f}"
+              "<br>Transform Order Mark: $%{customdata[2]:.2f}"
+              f"<br>{_diff_hover_label}: $%{{customdata[3]:.2f}}<extra></extra>")
+```
+
+Every other trace (the SPX axis-2 trace, the Diagonal line, the invisible diff trace, the carets) has its hover suppressed after the figure is built:
+
+```python
+for _tr in fig_gap.data:
+    if _tr.name != "Transform Order Mark":
+        _tr.hoverinfo = "skip"
+        _tr.hovertemplate = None
+```
+
+The result is exactly four lines in a guaranteed order, independent of Plotly's internal ordering. In position-management (lock) mode the fourth line's label becomes "Live Difference (vs. entry)"; the order is unchanged.
+
+---
+
+### 15.4 Performance — connection & caching model
+
+Three problems were diagnosed and fixed. All symptoms shared a root family: heavy, write-touching, uncached work running on every Streamlit rerun against a WAL database the collector is actively writing.
+
+**(a) `init_db` was writing on every rerun → the Ctrl+C hang.** `init_db()` executes the full DDL script and **commits a write transaction**. It was being called at the top of the script, so every rerun (tab click, widget change, autorefresh tick) issued a database write, contending with the collector's write lock; a blocked connection with `timeout=15` meant a `Ctrl+C` during that wait stalled for up to 15 s. Fixed by running it once per process:
+
+```python
+@st.cache_resource(show_spinner=False)
+def _init_db_once(_db_path: str) -> bool:
+    db.init_db(_db_path)
+    return True
+_init_db_once(config.DB_PATH)
+```
+
+Because the dashboard is otherwise a pure reader and WAL lets readers run concurrently with the writer, removing this single per-rerun write is what eliminated the hang.
+
+**(b) Read-only, non-committing connections.** All read helpers had been routed through `managed_conn`, a context manager intended for *writes* that runs `conn.commit()` on every exit — so every `SELECT` did a pointless commit. `db.py` was changed as follows:
+- `_make_conn(db_path, *, read_only=False)` — when `read_only=True`, sets `PRAGMA query_only = ON` (the connection physically cannot take a write lock) and skips the WAL/foreign-key PRAGMAs.
+- `get_conn` (the read context manager) now opens read-only and **does not commit**.
+- The **20 pure-read `get_*` functions** were repointed from `managed_conn` to `get_conn`.
+- **Bug fixed along the way:** `delete_trade` (a `DELETE`) was wrongly using the read context manager; it now uses `managed_conn`.
+
+Writers (collector inserts, journal writes, `init_db`) are untouched and still use `managed_conn` / direct write connections.
+
+**(c) Snapshot-keyed read caches.** The option chain was re-queried and rebuilt into a DataFrame on every rerun, and per-tab history reads fired each time. Six cached loaders were added, each keyed on `snapshot_id` (the only thing that changes their result), so tab clicks within one snapshot are cache hits:
+
+| Loader | Wraps | Cache key(s) |
+|--------|-------|--------------|
+| `_load_chain_df` | `get_option_chain` + DataFrame build | `snapshot_id` |
+| `_load_spx_intraday` | `get_spx_intraday_today` | `session_date, snapshot_id` |
+| `_load_prior_close` | `get_prior_session_close` | `session_date` |
+| `_load_transform_marks` | `get_transform_mark_history` | strikes, expiries, days, `snapshot_id` |
+| `_load_latest_atm_iv` | `get_latest_atm_iv_snapshots` | `exp_date, snapshot_id` |
+| `_load_diagonal_hist` | `get_diagonal_history` | strikes, expiries, days, `snapshot_id` |
+
+`st.cache_data` returns a fresh copy on each call, so downstream code that mutates these frames (adding `diagonal_mark`, `timestamp`, etc.) cannot corrupt the cache. Per-tab **lazy loading was already in place** — tabs dispatch via `if st.session_state["active_tab"] == …`, so a tab's history queries only run when it is active; no restructuring was needed.
+
+**(d) Bounded cache growth → fixes the long-session slowdown.** None of the `@st.cache_data` loaders capped their size, and several snapshot-keyed ones (the full chain frame, the scanner, Mission Control) had no `ttl`, so every new snapshot (every 60–300 s) minted new entries that were never evicted — memory grew all session, degrading performance. `max_entries` (and a `ttl` backstop where missing) was added to **all twelve** cached loaders:
+
+| Loader group | `ttl` | `max_entries` |
+|--------------|------:|--------------:|
+| `_load_chain_df`, `_load_spx_intraday`, `_load_prior_close`, `_compute_mc_core` | 120–300 s | 3 |
+| `_compute_transform_scanner` | 120 s | 8 |
+| `_load_transform_marks`, `_load_latest_atm_iv`, `_load_diagonal_hist` | 55 s | 32 |
+| `_load_atm_hist`, `_load_atm_hist_fb`, `_load_contract_hist` | 55 s | 48 |
+| `_candidate_signals` | 60 s | 64 |
+
+---
+
+### 15.5 Data integrity — `option_rows` uniqueness & the sawtooth fan-out
+
+**Symptom.** The Diagonal vs. Transform chart rendered as a tight, regular **sawtooth band** with the correct value range — most visible on wide / far-OTM strike pairs.
+
+**Root cause (not markers, not scaling, not ordering).** `option_rows` had **no uniqueness guarantee** on `(snapshot_id, expiry_date, strike, right)` — its only key is an autoincrement `id`. A re-fetch or overlapping poll could therefore store the same contract more than once within a single snapshot. The mark-history queries (`get_transform_mark_history` — six legs; `get_diagonal_history` — four legs + two ATM-IV joins) use `LEFT JOIN`s on those columns, so duplicates **fan out**: one snapshot emits several rows with identical marks, and the line connects them high→low→high→low. Consistent duplicate structure ⇒ regular sawtooth. Wide/OTM strikes place the ±5 wing legs near the edge of the collector's fetch window where duplicates are likelier, which is why those pairs were worst (and also why they were **slow** — more rows to materialize; this was issue #3).
+
+**Two-layer fix:**
+
+1. **Query level (all callers benefit):** `GROUP BY s.snapshot_id` added before `ORDER BY s.snapshot_timestamp` in both history queries. Duplicates within a snapshot are identical (same poll), so grouping collapses the fan-out to the correct single row per snapshot.
+
+2. **Foundational (prevents recurrence at the data core):**
+   - `init_db` runs a **one-time, guarded migration**: if the unique index is absent, it deletes duplicate rows keeping the earliest per contract, then creates the index:
+     ```sql
+     DELETE FROM option_rows WHERE id NOT IN (
+       SELECT MIN(id) FROM option_rows
+       GROUP BY snapshot_id, expiry_date, strike, right);
+     CREATE UNIQUE INDEX uq_option_rows_contract
+       ON option_rows(snapshot_id, expiry_date, strike, right);
+     ```
+     Guarded on the index's existence, so the (potentially expensive) `DELETE` runs only the first time and logs the number of rows removed.
+   - `insert_option_rows` now uses `INSERT OR IGNORE`, so a re-fetched contract is a silent no-op instead of a duplicate. The collector needs no change — all inserts flow through this function.
+
+**Operational note.** The **first launch after this change** runs the one-time dedupe `DELETE`, which may take a moment on a database with many historical duplicates. Subsequent launches are no-ops.
+
+---
+
+### 15.6 Far-OTM load performance & instrumentation
+
+Far-OTM strike selection was slow. It was the **same fan-out** (wider strikes → more duplicate rows → larger result set). The foundational fix resolved it: a genuinely far-OTM pair (≈ call +144 / put −186 points from spot) now loads its marks in **~56 ms** (query) with an ~80 ms chart build.
+
+A lightweight timing caption was added beneath the gap chart to keep this observable:
+
+```
+⏱ marks query 56 ms · chart build 80 ms · 177 pts · call +144 / put -186 pts from spot
+```
+
+A cache **miss** (a new/OTM pair) shows the true query cost; a cache **hit** reads ~0 ms. This separates *data retrieval* from *chart generation* so any future regression can be attributed correctly. The caption is diagnostic and may be removed once no longer needed.
+
+---
+
+### 15.7 Silent, change-triggered refresh (fragment poller)
+
+**Problem.** `st_autorefresh` forced a **full-page rerun** every `poll_interval` (60 s open/close, 300 s midday) regardless of whether new data existed — resetting charts (losing Plotly zoom/pan) and interrupting analysis. Over long sessions this, combined with unbounded caches, produced the "gets sluggish then does a noticeable refresh" complaint.
+
+**Fix.** The blind autorefresh is replaced by a background **fragment** that polls for a new completed snapshot and reruns the app **only when the snapshot id changes**:
+
+```python
+_LIVE_POLL_SECONDS = max(5, min(int(poll_interval), 20))
+_fragment = getattr(st, "fragment", None) or getattr(st, "experimental_fragment", None)
+
+if _fragment is not None:
+    @_fragment(run_every=_LIVE_POLL_SECONDS)
+    def _live_refresh_poller():
+        _snap = db.get_latest_complete_snapshot(config.DB_PATH)   # cheap indexed read
+        _latest_id = _snap["snapshot_id"] if _snap else None
+        if _latest_id is not None and _latest_id != st.session_state.get("_active_snapshot_id"):
+            st.rerun()
+    _live_refresh_poller()
+else:
+    st_autorefresh(interval=poll_interval * 1000, key="autorefresh")   # fallback
+```
+
+The main render records the snapshot it was built on: `st.session_state["_active_snapshot_id"] = snapshot_id`.
+
+**Behavior matrix:**
+
+| Situation | What the poller does |
+|-----------|----------------------|
+| Mid-analysis, same snapshot | Ticks, finds no change, does nothing → **no rerun, no chart reset** |
+| After hours (collector idle) | Same — page stays completely static |
+| New snapshot lands | One clean full-app rerun refreshes all data, within ~20 s |
+
+**Known limitation.** When a new snapshot *does* arrive, the rerun is still full-page, so charts re-render (a zoomed Plotly view resets) at that moment. Truly in-place updates would require moving the charts themselves into fragments — deferred. The win here is that refreshes now happen **only on real data changes**, not on a blind timer. A `getattr` shim keeps a fallback to `st_autorefresh` for any Streamlit build lacking the fragment API.
+
+---
+
+### 15.8 Files & surfaces touched in v4.1
+
+| File | Changes |
+|------|---------|
+| `app.py` | Chart-card CSS + `_render_note` + `.chart-cap`; gap-fill, master tooltip, Strike Channel figure; `_init_db_once`; six cached loaders + `max_entries`/`ttl` on all caches; fragment refresh poller + `_active_snapshot_id`; timing caption. |
+| `db.py` | `_make_conn(read_only=…)` + `query_only`; `get_conn` read-only/non-committing; 20 read fns repointed; `delete_trade` write-path fix; `GROUP BY s.snapshot_id` in both history queries; `init_db` dedupe migration + `UNIQUE` index; `insert_option_rows` → `INSERT OR IGNORE`. |
+
+### 15.9 Deferred / follow-ups
+
+- In-place silent refresh (charts inside fragments) so zoom/pan survives a new snapshot.
+- Remove the ▲/▼ carets from the Diagonal/Transform chart (low information once data is clean; the meaningful crossings live on the Strike Channel).
+- Live calibration of the `$5.00` transform threshold toward `$6.50–$7.00` from real fills.
+- Full Journal integration for entry locks (`journal_trade_id` scaffold already present).
+
+*End of Section 15 — added in DOCUMENTATION.md v1.8 (2026-07-03)*
