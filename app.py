@@ -53,6 +53,7 @@ import iv_engine
 import schwab_client
 
 logger = logging.getLogger(__name__)
+print("STARTUP: script execution began", flush=True)
 
 # ─── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -2071,8 +2072,11 @@ def _init_db_once(_db_path: str) -> bool:
     return True
 
 
+print("STARTUP: about to init_db", flush=True)
 _init_db_once(config.DB_PATH)
+print("STARTUP: init_db done, fetching latest snapshot", flush=True)
 latest_snap = db.get_latest_complete_snapshot(config.DB_PATH)
+print("STARTUP: latest snapshot fetched", flush=True)
 
 if latest_snap is None:
     st.error(
@@ -2194,9 +2198,11 @@ if "mc_lookback_select" not in st.session_state:
     st.session_state["mc_lookback_select"] = "Today"
 _mc_lookback_days = _MC_LOOKBACK_DAYS_MAP[st.session_state["mc_lookback_select"]]
 
+print("STARTUP: about to run mission control scan", flush=True)
 MC = _run_mission_control(
     chain_df, spx_price, snapshot_id, snap_ts_str, dte_by_expiry, _mc_lookback_days,
 )
+print("STARTUP: mission control scan complete", flush=True)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # HEADER — Premium top bar
