@@ -12,6 +12,19 @@ Log every change here. Format:
 
 ---
 
+## Schwab Token Reauthentication (recurring, ~every 7 days)
+
+1. Stop collector.py (Ctrl+C)
+2. Delete the token file: `del data\token.json`
+3. Run: `python -c "import schwab_client; schwab_client.get_client()"`
+4. Open the printed URL in browser, log in, authorize
+5. Copy the resulting (broken-looking) redirect URL from the address bar,
+   paste it back into the terminal when prompted
+6. Token is cached automatically to data/token.json — restart collector.py
+   and streamlit run app.py
+   
+---
+
 ## HOW TO START A NEW CHAT SESSION IF REPO IS PRIVATE
 *(Read this every time before opening a new Claude chat)*
 

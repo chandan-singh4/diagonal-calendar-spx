@@ -53,7 +53,7 @@ import iv_engine
 import schwab_client
 
 logger = logging.getLogger(__name__)
-print("STARTUP: script execution began", flush=True)
+#print("STARTUP: script execution began", flush=True)
 
 # ─── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -2010,8 +2010,15 @@ if _fragment is not None:
         except Exception:
             return
         _latest_id = _snap["snapshot_id"] if _snap else None
-        if (_latest_id is not None
-                and _latest_id != st.session_state.get("_active_snapshot_id")):
+        if "_active_snapshot_id" not in st.session_state:
+            # First check of a brand-new session: nothing has rendered yet,
+            # so there's nothing to refresh. Adopt the latest snapshot
+            # silently. (Rerunning here — before _active_snapshot_id is ever
+            # set further down the script — would rerun forever and the
+            # page would never render.)
+            st.session_state["_active_snapshot_id"] = _latest_id
+        elif (_latest_id is not None
+                and _latest_id != st.session_state["_active_snapshot_id"]):
             st.rerun()
 
     _live_refresh_poller()
