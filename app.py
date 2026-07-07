@@ -53,7 +53,6 @@ import iv_engine
 import schwab_client
 
 logger = logging.getLogger(__name__)
-#print("STARTUP: script execution began", flush=True)
 
 # ─── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -833,11 +832,39 @@ div[class*="st-key-chartcard_"]:hover {
 # ─── Constants ────────────────────────────────────────────────────────────────
 _SPARK_BARS = "▁▂▃▄▅▆▇█"
 
+# NOTE (2026-07-07): Holidays are deliberately NOT collapsed by rangebreaks.
+# Empirically isolated by toggling breaks one at a time: ANY per-date
+# rangebreak -- `values=[dates]` AND per-day `bounds=[date, date]` variants
+# were both tested -- corrupts Plotly's point positioning for all data after
+# the break (ghost/duplicate lines, out-of-order hover, dead tooltips) the
+# moment a holiday falls inside the viewed window (first hit: 2026-07-03).
+# Only the weekday-name and hour-pattern bounds below are safe. A holiday
+# therefore shows as one session-width of honest blank space, with the line
+# cleanly broken across it by _break_sessions().
 _SESSION_RANGEBREAKS = [
     dict(bounds=["sat", "mon"]),
     dict(bounds=[16, 9.5], pattern="hour"),
-    dict(values=sorted(config.MARKET_HOLIDAYS)),
 ]
+
+
+def _break_sessions(df: pd.DataFrame, ts_col: str = "timestamp",
+                     max_gap_minutes: int = 60) -> pd.DataFrame:
+    """Insert a NaN row wherever consecutive points gap more than
+    max_gap_minutes, so Plotly breaks the line instead of drawing a
+    connector across holidays/weekends/collector outages. Rangebreaks
+    (_SESSION_RANGEBREAKS) collapse the empty axis SPACE; this handles the
+    LINE across it -- they're complementary, not redundant."""
+    if df.empty or len(df) < 2 or ts_col not in df.columns:
+        return df
+    ts = df[ts_col]
+    gap = ts.diff() > pd.Timedelta(minutes=max_gap_minutes)
+    if not gap.any():
+        return df
+    breakers = df.loc[gap, [ts_col]].copy()
+    breakers[ts_col] = ts.shift(1)[gap] + pd.Timedelta(minutes=1)
+    return (pd.concat([df, breakers], ignore_index=True)
+            .sort_values(ts_col, kind="stable")
+            .reset_index(drop=True))
 
 _RATIO_THRESHOLDS = [0.70, 1.00, 1.30]
 _RATIO_BANDS = [
@@ -1139,14 +1166,21 @@ def _backfill_eligible_history(front_raw: str, back_raw: str,
     if crossings.empty:
         return
 
-    # gap_df's timestamps come from Calendar Edge already converted to
-    # config.DISPLAY_TIMEZONE (tz-aware), but the registry stores naive UTC
+    # gap_df's timestamps come from Calendar Edge converted to
+    # config.DISPLAY_TIMEZONE and then stripped to NAIVE ET wall-clock (Plotly
+    # rangebreaks require naive timestamps). The registry stores naive UTC
     # strings everywhere else (snapshot_ts from the live scan path). Normalize
-    # to naive UTC here so the two paths stay comparable and don't raise
-    # "Cannot compare tz-naive and tz-aware timestamps."
+    # to naive UTC here so the two paths stay comparable.
     _ts = crossings["timestamp"]
     if getattr(_ts.dt, "tz", None) is not None:
         crossings["timestamp"] = _ts.dt.tz_convert("UTC").dt.tz_localize(None)
+    else:
+        # Naive ET wall-clock in, naive UTC out — localize back to ET first,
+        # otherwise ET times would be stored as UTC (a silent 4/5-hour skew).
+        crossings["timestamp"] = (
+            _ts.dt.tz_localize(config.DISPLAY_TIMEZONE)
+            .dt.tz_convert("UTC").dt.tz_localize(None)
+        )
 
     registry = _load_eligible_history()
     key = f"{front_raw}|{back_raw}|{int(put_strike)}|{int(call_strike)}"
@@ -1261,6 +1295,7 @@ def _load_atm_hist(expiry: str, days: int) -> pd.DataFrame:
     df["timestamp"] = (
         pd.to_datetime(df["timestamp"], format="ISO8601", utc=True)
         .dt.tz_convert(config.DISPLAY_TIMEZONE)
+        .dt.tz_localize(None)  # naive wall-clock: required by Plotly rangebreaks
     )
     return df
 
@@ -1298,6 +1333,7 @@ def _load_contract_hist(expiry: str, strike: float,
     df["timestamp"] = (
         pd.to_datetime(df["snapshot_timestamp"], format="ISO8601", utc=True)
         .dt.tz_convert(config.DISPLAY_TIMEZONE)
+        .dt.tz_localize(None)  # naive wall-clock: required by Plotly rangebreaks
     )
     if days == 1 and not df.empty:
         last_date = df["timestamp"].dt.date.max()
@@ -1608,6 +1644,7 @@ def _candidate_signals(front_raw: str, back_raw: str,
     df["timestamp"] = (
         pd.to_datetime(df["snapshot_timestamp"], format="ISO8601", utc=True)
         .dt.tz_convert(config.DISPLAY_TIMEZONE)
+        .dt.tz_localize(None)  # naive wall-clock: required by Plotly rangebreaks
     )
     df["diagonal_mark"] = (
         df["back_call_mark"] + df["back_put_mark"]
@@ -2079,11 +2116,8 @@ def _init_db_once(_db_path: str) -> bool:
     return True
 
 
-print("STARTUP: about to init_db", flush=True)
 _init_db_once(config.DB_PATH)
-print("STARTUP: init_db done, fetching latest snapshot", flush=True)
 latest_snap = db.get_latest_complete_snapshot(config.DB_PATH)
-print("STARTUP: latest snapshot fetched", flush=True)
 
 if latest_snap is None:
     st.error(
@@ -2149,6 +2183,7 @@ if not spx_intraday.empty:
         pd.to_datetime(
             spx_intraday["snapshot_timestamp"], format="ISO8601", utc=True
         ).dt.tz_convert(config.DISPLAY_TIMEZONE)
+        .dt.tz_localize(None)  # naive wall-clock: required by Plotly rangebreaks
     )
 
 prev_close = _load_prior_close(session_date)
@@ -2205,11 +2240,9 @@ if "mc_lookback_select" not in st.session_state:
     st.session_state["mc_lookback_select"] = "Today"
 _mc_lookback_days = _MC_LOOKBACK_DAYS_MAP[st.session_state["mc_lookback_select"]]
 
-print("STARTUP: about to run mission control scan", flush=True)
 MC = _run_mission_control(
     chain_df, spx_price, snapshot_id, snap_ts_str, dte_by_expiry, _mc_lookback_days,
 )
-print("STARTUP: mission control scan complete", flush=True)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # HEADER — Premium top bar
@@ -3147,6 +3180,7 @@ if st.session_state["active_tab"] == "edge":
             on="timestamp", how="inner",
         )
         atm_merged["iv_ratio"] = atm_merged["front_iv"] / atm_merged["back_iv"]
+        atm_merged = _break_sessions(atm_merged)
 
     # Both synced charts autorange independently unless given an explicit
     # range, and their underlying queries don't cover the same history:
@@ -3182,7 +3216,7 @@ if st.session_state["active_tab"] == "edge":
         if period_label == "Today" or ts_series is None or ts_series.empty:
             return
         for _day in sorted(pd.to_datetime(ts_series).dt.date.unique()):
-            _open_ts = pd.Timestamp(f"{_day} 09:30").tz_localize(config.DISPLAY_TIMEZONE)
+            _open_ts = pd.Timestamp(f"{_day} 09:30")  # naive, matches naive plotted timestamps
             fig.add_vline(
                 x=_open_ts, line_width=1, line_dash="dot",
                 line_color="#3a5170", opacity=0.6, **vline_kwargs,
@@ -3224,6 +3258,7 @@ if st.session_state["active_tab"] == "edge":
             _gap_df["timestamp"] = (
                 pd.to_datetime(_gap_df["snapshot_timestamp"], format="ISO8601", utc=True)
                 .dt.tz_convert(config.DISPLAY_TIMEZONE)
+                .dt.tz_localize(None)  # naive wall-clock: required by Plotly rangebreaks
             )
             if period_label == "Today":
                 _last_date = _gap_df["timestamp"].dt.date.max()
@@ -3248,6 +3283,8 @@ if st.session_state["active_tab"] == "edge":
                     front_expiry, back_expiry, put_strike, call_strike,
                     _gap_df.rename(columns={"transform_gap": "gap"})[["timestamp", "gap"]],
                 )
+
+            _gap_df = _break_sessions(_gap_df)
 
             # ── Entry Lock — position management mode ────────────────────────
             # Once a diagonal is actually filled, the trader stops caring where
@@ -3638,7 +3675,12 @@ if st.session_state["active_tab"] == "edge":
 
             if _lock is not None:
                 # ── Position-management readout: progress + momentum ──────────
-                _since_entry = _gap_df[_gap_df["timestamp"] >= pd.Timestamp(_lock["locked_at"])]
+                # locked_at is stored tz-aware (America/New_York offset embedded,
+                # see _lock_entry). _gap_df["timestamp"] is naive ET (stripped for
+                # Plotly rangebreaks). Drop the tz before comparing so both sides
+                # are naive ET wall-clock.
+                _locked_at_naive = pd.Timestamp(_lock["locked_at"]).tz_localize(None)
+                _since_entry = _gap_df[_gap_df["timestamp"] >= _locked_at_naive]
                 if not _since_entry.empty:
                     _live_diff_now = float(_since_entry.iloc[-1]["transform_mark"]) - float(_lock["entry_diagonal_mark"])
                     _pct_to_threshold = max(0.0, min(1.0, _live_diff_now / 5.0))
