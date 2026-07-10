@@ -9,5 +9,27 @@
     "locked_at": "2026-07-01T13:50:31.345649-04:00",
     "mode": "monitor_only",
     "journal_trade_id": null
+  },
+  "2026-07-10|2026-07-13|7475|7550": {
+    "lock_id": "d6e9c3f2-2c79-434d-a2d0-158b99d6f29a",
+    "front_expiry": "2026-07-10",
+    "back_expiry": "2026-07-13",
+    "put_strike": 7475.0,
+    "call_strike": 7550.0,
+    "entry_diagonal_mark": 11.350000000000009,
+    "locked_at": "2026-07-07T22:49:47.979940-04:00",
+    "mode": "monitor_only",
+    "journal_trade_id": null
+  },
+  "2026-07-17|2026-07-20|7550|7620": {
+    "lock_id": "413d663f-2a76-449e-81c1-215a3c8634e5",
+    "front_expiry": "2026-07-17",
+    "back_expiry": "2026-07-20",
+    "put_strike": 7550.0,
+    "call_strike": 7620.0,
+    "entry_diagonal_mark": 13.800000000000004,
+    "locked_at": "2026-07-10T15:20:49.218287-04:00",
+    "mode": "monitor_only",
+    "journal_trade_id": null
   }
 }

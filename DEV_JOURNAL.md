@@ -12,19 +12,6 @@ Log every change here. Format:
 
 ---
 
-## Schwab Token Reauthentication (recurring, ~every 7 days)
-
-1. Stop collector.py (Ctrl+C)
-2. Delete the token file: `del data\token.json`
-3. Run: `python -c "import schwab_client; schwab_client.get_client()"`
-4. Open the printed URL in browser, log in, authorize
-5. Copy the resulting (broken-looking) redirect URL from the address bar,
-   paste it back into the terminal when prompted
-6. Token is cached automatically to data/token.json — restart collector.py
-   and streamlit run app.py
-   
----
-
 ## HOW TO START A NEW CHAT SESSION IF REPO IS PRIVATE
 *(Read this every time before opening a new Claude chat)*
 
@@ -49,6 +36,177 @@ GitHub repo: https://github.com/chandan-singh4/diagonal-calendar-spx
 Primary branch: main
 
 Newest entries begins from here - 
+
+## 2026-07-07 — v4.1.1: Multi-Day Chart Rendering Corruption — Root Cause & Fix (Rangebreaks), Plus the Great Duplicate-Collector Goose Chase
+
+**Status note:** User reported remaining issues at session end that were NOT diagnosed
+before the chat closed. Treat the "Open questions" section below as the FIRST agenda
+item of the next session — this entry documents what is fixed and verified vs. what
+is not.
+
+**Changed:**
+
+1. **`_SESSION_RANGEBREAKS` — removed the holiday `values` rangebreak (root-cause
+   fix for the multi-day chart corruption).** Final config is ONLY the two
+   empirically-proven-safe breaks:
+   ```python
+   _SESSION_RANGEBREAKS = [
+       dict(bounds=["sat", "mon"]),
+       dict(bounds=[16, 9.5], pattern="hour"),
+   ]
+   ```
+   **Hard-won rule: ANY per-date rangebreak corrupts Plotly's point positioning
+   for all data rendered after the break** — ghost/duplicate parallel lines,
+   out-of-chronological-order hover (Jun 30 rendering right of Jul 6), dead
+   tooltips on some views, and single-tick axes. BOTH variants were tested and
+   BOTH fail: `dict(values=[dates])` AND per-day `dict(bounds=["2026-07-03",
+   "2026-07-04"])`. Only weekday-name bounds (`["sat","mon"]`) and hour-pattern
+   bounds (`[16, 9.5], pattern="hour"`) are safe. Consequence: a market holiday
+   now shows as one session-width of honest blank space instead of being
+   collapsed. This is the accepted trade-off — correct rendering with a visible
+   holiday gap beats collapsed holidays with corrupted charts. Affects a few
+   days per year.
+
+2. **Reinstated `_break_sessions()` NaN line-breaker** (the pre-v4.1
+   `_session_breaks` concept, lost in the v4.1 loader rewrite). Inserts a
+   NaN row wherever consecutive points gap > 60 minutes so Plotly breaks the
+   line instead of drawing a connector across holidays/outages. Wired into
+   `_gap_df` (Chart 1 + SPX Strike Channel — applied AFTER
+   `_backfill_eligible_history` so the registry receives pure data) and
+   `atm_merged` (ATM IV chart). Rangebreaks collapse empty axis SPACE; the NaN
+   breaker breaks the LINE across whatever space remains — complementary, not
+   redundant.
+
+3. **Timestamps are now naive ET wall-clock everywhere they reach Plotly**
+   ("the seven tz edits"). All five loader conversion sites
+   (`_load_atm_hist`, `_load_contract_hist`, the transform-marks loader,
+   `spx_intraday["ts_et"]`, Chart 1 `_gap_df["timestamp"]`) now do
+   `.dt.tz_convert(config.DISPLAY_TIMEZONE).dt.tz_localize(None)`. The
+   market-open vline in `_add_market_open_lines` is naive to match. NOTE:
+   applying these did NOT fix the corruption (the rangebreak was the actual
+   cause) — but they are kept deliberately: Plotly.js has no timezone support,
+   naive wall-clock is the documented correct input for this axis config, and
+   the naive/aware mixing they removed was real (Today's axis range was naive
+   strings while 5D/10D's was tz-aware Timestamps).
+
+4. **Two downstream consumers fixed for the naive-timestamp convention:**
+   - `_backfill_eligible_history`: the registry normalizer previously assumed
+     tz-aware input; a naive-ET input would have been silently stored as UTC
+     (4/5-hour skew). Added an explicit else-branch:
+     `tz_localize(DISPLAY_TIMEZONE) → tz_convert("UTC") → tz_localize(None)`.
+   - Entry-lock momentum readout: `locked_at` is stored tz-aware
+     (`pd.Timestamp.now(tz=DISPLAY_TIMEZONE).isoformat()`), which raised
+     `TypeError: Invalid comparison between dtype=datetime64[us] and Timestamp`
+     against the now-naive `_gap_df["timestamp"]`. Fixed with
+     `_locked_at_naive = pd.Timestamp(_lock["locked_at"]).tz_localize(None)`.
+     The other two `locked_at` reads are display-only (`.strftime`) — untouched.
+
+5. **`dedupe_option_rows.py` — standalone one-time migration script** (already
+   run successfully; kept for reference). The v4.1 startup migration ran a
+   full-table `DELETE ... GROUP BY` on a 619 MB DB synchronously before first
+   render — looked like a frozen dashboard. The standalone script chunks the
+   dedupe per-snapshot via `idx_option_rows_snapshot_id` (fast lookups, no
+   full-table sort), prints progress with ETA, commits every 200 snapshots,
+   is idempotent/Ctrl-C-safe, and creates `uq_option_rows_contract` at the
+   end so app.py's own guarded migration now no-ops instantly forever.
+
+6. **Infinite-rerun loop in `_live_refresh_poller` fixed** (dashboard never
+   rendered on a fresh session). The poller compared the newest snapshot_id
+   against `st.session_state["_active_snapshot_id"]` — but that key is only
+   set much further down the script. First check of a new session: key absent
+   → mismatch → `st.rerun()` → script restarts from the top → never reaches
+   the line that sets the key → loops forever. Fix: on first check, adopt the
+   latest snapshot silently (nothing has rendered yet, so there is nothing to
+   refresh); only rerun on a genuine mid-session change.
+
+7. **Canonical `app.py` delivered** (4,230 lines), assembled from the pushed
+   v4.1 baseline + all fixes above, machine-verified: every fix grep-confirmed
+   present, `py_compile` + `ast.parse` clean, zero debug code. All temporary
+   diagnostics removed: `_debug_dump_fig` figure-inventory expanders,
+   `STARTUP:` print checkpoints. The six standalone diagnostic scripts
+   (`check_dupe_collectors.py`, `check_dupe_collectors_full_range.py`,
+   `check_leg_duplicates.py`, `check_timestamp_order.py`,
+   `check_chart_pipeline_stage1.py`, `check_leg_presence.py`) are safe to
+   delete. User advised to keep local file as `app_backup.py` and diff —
+   any local change never pushed/discussed would not be in the canonical file.
+
+**Why:** First trading day on v4.1 (Mon Jul 6) produced: ghost/duplicate lines
+on 10D/20D views across every time-series chart, wrong chronology (Jun 30
+plotted after Jul 6), dead hover on 5D, and apparent data truncation. July 3
+was the FIRST market holiday to fall inside a viewed multi-day window since
+`MARKET_HOLIDAYS` was wired into the rangebreaks — the buggy code path had
+never been exercised before, which is why "it worked until today."
+
+**Diagnostic method that cracked it (worth repeating):** evidence-first
+pipeline trace after multiple plausible theories failed. Stage 1: raw SQL dump
+of `get_transform_mark_history` for every lookback — clean, ordered, zero
+duplicate timestamps (including delta==0, a blind spot in earlier checks).
+Stage 2: `_debug_dump_fig` trace-inventory expanders rendered in-app — figure
+object clean in every view (exact expected traces, correct point counts,
+ordered x). Clean figure + wrong pixels = the fault is in Plotly's browser-side
+axis mapping. Stage 3: binary toggle — breaks removed one at a time, rebroken
+one at a time. The holiday entry was the switch. Falsified along the way, in
+order: duplicate concurrent collectors (timestamps clean across 20 days),
+duplicate rows per leg (unique index intact), out-of-order timestamps,
+same-second duplicate snapshots, tz-aware-timestamps-as-cause (fix applied,
+corruption persisted), missing legs (`check_leg_presence`: all six legs `ok`
+in every snapshot to 19:59 UTC, strike coverage steady 7340–7740).
+
+**The duplicate-collector goose chase (permanent Windows lesson):** hours were
+lost killing "duplicate" processes that were never duplicates. **On Windows,
+one script run through `.venv` ALWAYS shows as two `python.exe` processes:**
+the venv launcher shim (`.venv\Scripts\python.exe`, ~0.6 MB, 0% CPU) spawns
+the real interpreter (base install / uv-managed CPython) as its child and
+waits. Same CommandLine in WMI, parent-child pair, born and dying together.
+**Count pairs, not processes; check `ExecutablePath` (not CommandLine) to tell
+shim from worker.** Confirmed empirically: parent = `.venv\Scripts\python.exe`,
+child = `...\uv\python\cpython-3.14-...\python.exe`. Corollaries discovered
+en route: `register_collector_task.ps1` exists in the repo but was NEVER
+registered (no scheduled task exists); VS Code integrated terminals have blank
+`MainWindowTitle` in WMI and don't appear in Alt+Tab; Windows recycles PIDs,
+so an apparent parent-chain of "collector spawning collector" was PID reuse.
+
+**Also resolved along the way:**
+- "Today view stops at 2:39 PM" was a screenshot-timing artifact, not
+  truncation: at capture time 14:39 WAS the last DB snapshot (the mass
+  process-kill happened at exactly 18:39 UTC); the collector resumed and the
+  DB provably contains the full session to 19:59 UTC with all six legs.
+- "5D shows nothing" was the same rendering corruption (209 rows returned
+  fine at the SQL layer).
+- Schwab token reauth procedure documented (see standalone entry below/above):
+  stop collector → `del data\token.json` →
+  `python -c "import schwab_client; schwab_client.get_client()"` → open
+  printed URL, authorize, paste redirect URL back. ~Every 7 days.
+
+**Impact:** No trading math, scanner logic, SQL, collector, or Entry Lock
+semantics changed — every edit is presentation-layer (timestamps, rangebreaks,
+line-breaking) plus the two consumer-compatibility fixes. Multi-day views
+(5D/10D/20D) render correct single lines with working hover; holidays show as
+an honest one-session gap; startup is instant (dedupe done, rerun loop fixed).
+
+**Open questions / follow-ups (NEXT SESSION STARTS HERE):**
+- **UNRESOLVED: user reported "still having some issue" after receiving the
+  canonical app.py, with no specifics captured before the session ended.**
+  First steps: get the exact symptom + view + screenshot; confirm the
+  canonical file actually replaced the local one (check for `app_backup.py`);
+  confirm a clean restart (kill streamlit, hard-refresh browser); confirm
+  collector running and DB current. Do NOT assume it's the same bug — verify
+  from evidence, per this session's method.
+- Verify during a live market session: Today view runs to 15:59, silent
+  refresh advances the charts, holiday gap renders as designed.
+- The five combo-loader tz edits mean cached DataFrames changed shape/dtype;
+  if anything odd appears, clear Streamlit cache / restart once.
+- Selected-strike IV chart (cm/pm frames): if a diagonal connector appears
+  across a holiday, apply the same one-line `_break_sessions()` call — not
+  yet wired there.
+- Consider pushing the canonical app.py + this journal to GitHub immediately
+  so the next session starts from a known baseline (the drift between local
+  file and discussed state was a root cause of this session's churn).
+- Deferred from earlier sessions (unchanged): Journal tab "Monitor + Log
+  Trade" wiring; single-sided diagonal threshold calc; threshold calibration
+  from real fills; `git rm --cached data/demo_dashboard.db` + .gitignore.
+
+---
 
 ## 2026-07-03 — v4.1: Design Language, Strike Channel, Stabilization & Silent Refresh
 
