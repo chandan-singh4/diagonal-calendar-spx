@@ -5,7 +5,7 @@ what broke, and what remains.
 
 ---
 
-## 2026-07-26 (session 2) — M1.5 + M1.9: `db.py` tested, checks now automatic (151 → 265 tests)
+## 2026-07-26 (session 2) — M1.5 + M1.9: `db.py` tested, checks now automatic, 3 bugs fixed (151 → 274 tests)
 
 ### Completed
 
@@ -104,15 +104,51 @@ with `VIRTUAL_ENV` unset; **blocks a deliberately-failing test** (probe file cre
 confirmed to exit 1, probe deleted); and honours the `SKIP_TESTS=1` bypass. This closes the
 "checks only run when someone remembers" gap that M1 exists to remove.
 
+### Also completed (same session, third pass)
+
+**Work committed.** Four commits on `main`: the db.py suite + DEBT-008 fix, the M1.9 hook, the
+docs, and then the three bug fixes. The M1.9 hook ran the suite for real on every commit that
+touched Python — its first live use was the commit that introduced it.
+
+**All three bugs found this session are fixed — BUG-016, BUG-015, BUG-014 (ADR-023).** Each
+was pinned first and fixed as a deliberate rewrite of its pinned test (ADR-019), and each fix
+was verified load-bearing by reverting it on the isolated copy: **10 reverts, 10 caught.**
+
+- **BUG-016** — `get_next_trade_id()` now derives from `MAX()` of the numeric part rather than
+  `COUNT(*) + 1`. IDs are never reused; a deleted T-003 leaves a permanent gap. The tidier
+  alternative (refill the gap) was rejected because the journal is *evidence* — an ID that
+  once meant one trade must never later mean another (ADR-023 §1). **This unblocks discarding
+  the 6 practice trades**, which previously would have raised on the first real trade after.
+- **BUG-015** — `get_spx_intraday_today()` bounded at both ends, with a test proving the upper
+  bound does not clip the 19:59 UTC close.
+- **BUG-014** — three truthiness-on-float sites. The one that mattered was `get_ic_marks()`,
+  where a missing quote became a real-looking `0.00` that flowed into `cost_to_close` and out
+  to the unrealized-P&L figure. It now falls back to the bid/ask midpoint as the rest of the
+  module always did, and withholds the whole valuation if a leg has no computable mark at all
+  (ADR-023 §2). The Journal will occasionally show nothing where it previously showed a
+  confident wrong number — the correct trade.
+
+**A test of mine was caught being fake, again.** `test_next_trade_id_ignores_ids_that_are_not_
+trade_ids` used `SEED` and `x` as junk IDs; SQLite casts both tails to 0, so they lose the
+`MAX()` with or without the `LIKE 'T-_%'` filter — the test appeared to protect the filter and
+did not. Mutation-testing the test caught it. Adding `TX999` (whose tail casts to 999) made it
+real. Second instance this session of a plausible-looking test proving nothing.
+
+**Backlog cleaned per ADR-017.** BUG-014, BUG-015 and BUG-016 rows deleted, not marked done —
+git is the archive, and the reasoning worth keeping went into ADR-023 first. Also corrected two
+entries this session's work had made stale: DEBT-012's mark-fallback duplication count (×4
+→ ×5, since `get_ic_marks()` now uses it too) and DEBT-001's test count. BUG-007 is now
+annotated as the last surviving site of the truthiness-on-floats pattern.
+
 ### Notes
 
-- Full suite: **265 passing** (151 before this session, +114). `db.py` at 100%.
+- Full suite: **274 passing** (151 before this session, +123). `db.py` at 100%.
 - `ruff` is not installed in the shared venv (`No module named ruff`), so the new files were
   not linted. It is declared in the `dev` optional-dependency group but never installed —
   worth folding into M1.9 alongside the automated test run.
-- Nothing was committed. The only production-code change is the DEBT-008 fix in
-  `insert_option_rows()`, made with explicit approval; everything else is tests, the
-  pre-commit hook, and documentation.
+- Committed to `main` in four commits (`84c7cb2`, `c57f91a`, `df1f80c`, `725a75b`), plus
+  this documentation pass. **Not pushed** — `origin/main` is still at `eac2461`.
+- Production code touched: `db.py` only (DEBT-008 reporting, plus the three bug fixes).
 
 ---
 

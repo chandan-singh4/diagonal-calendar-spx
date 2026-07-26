@@ -7,6 +7,62 @@ it was recorded here.
 
 ---
 
+## ADR-023 — Trade IDs are never reused, and a valuation is withheld rather than guessed
+**Date:** 2026-07-26 · **Status:** ACCEPTED
+
+Two choices made while fixing BUG-016 and BUG-014. Both are about the same thing: what the
+software should do when it does not know something.
+
+### 1. A deleted trade number is retired forever
+
+**In plain terms:** if you delete trade T-003, the next trade is not T-003 again. The number is
+gone for good and there is a permanent gap in the sequence.
+
+**Why.** `get_next_trade_id()` used `COUNT(*) + 1`, which is a count, not a sequence. Delete any
+trade that was not the newest and the next number collided with one still in use — and since
+`trade_id` is the PRIMARY KEY, saving raised a raw sqlite error and lost the trade being
+recorded. Reachable through a plan already committed to in STATUS.md: discard the six practice
+trades, then record a real one.
+
+**The alternative was to fill the gap** — find the lowest unused number and reuse it, keeping
+the sequence tidy. Rejected. The journal is **evidence**: it exists to check real results
+against predictions at M6, and screenshots, notes and `DEV_JOURNAL.md` entries all refer to
+trades by ID. An ID that once meant one trade must never later mean a different one, or every
+historical reference to it silently becomes a reference to something else. A gap in the
+numbering costs nothing; an ambiguous identifier corrupts the record the whole project exists
+to keep.
+
+Compared as an INTEGER rather than as text, so `T-010` outranks `T-009` — which a string
+comparison gets right only by luck of zero-padding, and not at all past `T-999`.
+
+### 2. An incomputable valuation is withheld, not zero-filled
+
+**In plain terms:** if a price is missing, the screen shows nothing rather than showing zero.
+
+**Why.** `get_ic_marks()` did `r["mark"] or 0.0`, so a missing quote became a real-looking
+`0.00`. That number went straight into `cost_to_close`, which is subtracted from
+`profit_locked_in` to produce the unrealized P&L figure. The result was a **wrong money number
+presented as a right one**, with nothing to distinguish it from a genuine zero mark — and a
+far-OTM leg really can mark at 0.00, so the two cases are not theoretically separable after the
+fact.
+
+**Decision, in order of preference:** use the stored mark; failing that, fall back to the
+bid/ask midpoint, exactly as every history query in `db.py` already did (DEBT-012 records this
+as the one place that was missing it); failing *that*, return `None` for the whole valuation.
+The function was already all-four-legs-or-nothing, so this is consistent rather than new.
+
+**Tradeoff accepted:** the Journal will occasionally show no unrealized P&L where it previously
+showed a confident wrong figure. That is the correct trade. This is the same principle already
+recorded in BUG-010 — "a flawless record and a missing calculation look identical on screen"
+— approached from the other side: there, a blank was ambiguous; here, a number was a lie.
+Ambiguity is recoverable, a false figure is not.
+
+**Generalisation, worth applying at M2:** truthiness tests on floats (`if x`, `x or default`)
+are wrong wherever `0.0` is a legitimate value. Three sites were fixed here; BUG-007 records the
+surviving one in `iv_engine.calendar_edge()`.
+
+---
+
 ## ADR-022 — `INSERT OR IGNORE` is a data-loss risk, not just a logging gap
 **Date:** 2026-07-26 · **Status:** ACCEPTED — **step 1 implemented same day**; step 2 remains M3.6 · **Revises:** ADR-004
 

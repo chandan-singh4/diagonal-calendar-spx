@@ -3,7 +3,7 @@
 **Last updated:** 2026-07-26
 **Current milestone:** M1 — Test Foundation
 **Status:** 🔄 IN PROGRESS (started 2026-07-26). M0 ✅ COMPLETE and merged to `main`.
-M1.1–1.5 and 1.9 done — **265 tests**, now run automatically on every commit. `iv_engine` and `db.py` both at 100% statement coverage. Remaining: M1.6, M1.7.
+M1.1–1.5 and 1.9 done — **274 tests**, now run automatically on every commit. `iv_engine` and `db.py` both at 100% statement coverage. Remaining: M1.6, M1.7.
 **Reference:** [`AUDIT_2026-07-25.md`](AUDIT_2026-07-25.md) §10 for the full roadmap
 
 ---
@@ -62,7 +62,7 @@ frozen before M2 moves it, and checks that run without being remembered.
 | 1.2 | `iv_engine.py` unit tests | ✅ Done | 73 tests, **100% statement coverage**. Mutation-verified: 3 injected faults produced 6 failures. Also pins 3 decisions — no favorability claim, no framework imports (AST-checked), M0.11 removals stay removed. Found BUG-006, BUG-007. |
 | 1.3 | Journal P&L maths (`resolved_pl`, `ic_expiry_pnl_per_share`, `derive_ic`, `compute_stats`) | ✅ Done | 53 tests. All 5 condor payoff regions + a cent either side of all 4 strikes. Asserts `resolved_pl` and `auto_final_pl` agree. Mutation-verified. Found BUG-009…013; **BUG-011 and BUG-012 fixed** (see ADR-021). |
 | 1.4 | Scanner golden/characterization net before M2 | ✅ Done | 14 tests over 2 real snapshots (2608, 2482) captured read-only. Asserts no correctness — only that M2 changes nothing. Mutation-verified. **Known gap: DEBT-014**, the bid/ask fallback branch is not protected. |
-| 1.5 | `db.py` tests (temporary SQLite DB, `integration` marker) | ✅ Done | **111 tests, 100% statement coverage.** Mutation-verified on an isolated copy of the source: 26 injected faults, **24 caught**; the 2 survivors are proven *equivalent* mutants, documented in-test rather than left looking like holes. Covers the read-only guarantee, the FK cascade, transaction rollback, the dedup migration, every read query's filters/ordering/date-window, and the trades table. Found BUG-014, BUG-015, BUG-016, and **uncovered DEBT-008 as a silent data-loss risk (ADR-022)** — whose reporting half was then fixed in the same session, taking this file to 114 tests. |
+| 1.5 | `db.py` tests (temporary SQLite DB, `integration` marker) | ✅ Done | **111 tests, 100% statement coverage.** Mutation-verified on an isolated copy of the source: 26 injected faults, **24 caught**; the 2 survivors are proven *equivalent* mutants, documented in-test rather than left looking like holes. Covers the read-only guarantee, the FK cascade, transaction rollback, the dedup migration, every read query's filters/ordering/date-window, and the trades table. Found BUG-014, BUG-015, BUG-016, and **uncovered DEBT-008 as a silent data-loss risk (ADR-022)** — whose reporting half was then fixed in the same session. All three bugs were fixed later the same day (ADR-023); this file is now 123 tests. |
 | 1.6 | `collector.py` tests — session logic, gap classification | ⬜ Not started | Gap classifier is BUG-005; test it *before* fixing so the fix is a visible diff (ADR-019). |
 | 1.7 | `schwab_client.py` tests — chain filtering, strike window | ⬜ Not started | Needs a fake API response fixture; no live calls. |
 | 1.8 | Reach ~70% coverage of non-UI code | 🔄 Partial | `iv_engine` 100%, **`db.py` 100%**; `collector.py`/`schwab_client.py` still at 0%. Now enforced on every commit by the M1.9 hook. |
@@ -80,9 +80,11 @@ imported. Both raise rather than guess if a target moves.
 1. **M1.6 — test `collector.py`**, covering the gap classifier *before* fixing
    BUG-005, so the fix lands as a visible change to an existing test (ADR-019).
    This is now the largest untested surface left, and BUG-005 blocks M3.4.
-2. **BUG-016 — fix `get_next_trade_id()` before discarding the 6 practice trades.**
-   Deleting a non-newest trade makes the next generated ID collide with a live
-   PRIMARY KEY, and the save then raises. The discard is already committed to.
+2. **The 6 practice trades can now safely be discarded.** BUG-016 was the blocker — the
+   next ID after a deletion collided with a live PRIMARY KEY and the save raised. Fixed
+   2026-07-26 (ADR-023 §1) and covered by a test that runs exactly that sequence. Note the
+   related commitment in STATUS.md: the app must save market conditions *with each trade*
+   before serious trading resumes.
 3. **Close DEBT-014** — capture a scanner fixture whose near-the-money rows have no stored
    price, so the bid/ask fallback is actually protected before M2 moves it.
 4. **Install `ruff`** into the shared venv. It is declared in the `dev` optional-dependency
