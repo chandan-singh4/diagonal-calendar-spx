@@ -239,6 +239,7 @@ against the source.
 
 | File | Contents |
 |---|---|
+| [`STATUS.md`](STATUS.md) | **Start here.** Plain-language project status — background, what's done, what's open. No technical background assumed. Regenerated each session by `/wrap`. |
 | [`DOCUMENTATION.md`](docs/DOCUMENTATION.md) | Strategy, metric definitions, dashboard reference, data architecture |
 | [`AUDIT_2026-07-25.md`](docs/AUDIT_2026-07-25.md) | Engineering audit + roadmap |
 | [`plan.md`](docs/plan.md) | Current implementation plan |
