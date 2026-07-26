@@ -3,6 +3,7 @@
 **Last updated:** 2026-07-26
 **Current milestone:** M1 — Test Foundation
 **Status:** 🔄 IN PROGRESS (started 2026-07-26). M0 ✅ COMPLETE and merged to `main`.
+M1.1–1.5 and 1.9 done — **265 tests**, now run automatically on every commit. `iv_engine` and `db.py` both at 100% statement coverage. Remaining: M1.6, M1.7.
 **Reference:** [`AUDIT_2026-07-25.md`](AUDIT_2026-07-25.md) §10 for the full roadmap
 
 ---
@@ -61,11 +62,11 @@ frozen before M2 moves it, and checks that run without being remembered.
 | 1.2 | `iv_engine.py` unit tests | ✅ Done | 73 tests, **100% statement coverage**. Mutation-verified: 3 injected faults produced 6 failures. Also pins 3 decisions — no favorability claim, no framework imports (AST-checked), M0.11 removals stay removed. Found BUG-006, BUG-007. |
 | 1.3 | Journal P&L maths (`resolved_pl`, `ic_expiry_pnl_per_share`, `derive_ic`, `compute_stats`) | ✅ Done | 53 tests. All 5 condor payoff regions + a cent either side of all 4 strikes. Asserts `resolved_pl` and `auto_final_pl` agree. Mutation-verified. Found BUG-009…013; **BUG-011 and BUG-012 fixed** (see ADR-021). |
 | 1.4 | Scanner golden/characterization net before M2 | ✅ Done | 14 tests over 2 real snapshots (2608, 2482) captured read-only. Asserts no correctness — only that M2 changes nothing. Mutation-verified. **Known gap: DEBT-014**, the bid/ask fallback branch is not protected. |
-| 1.5 | `db.py` tests (temporary SQLite DB, `integration` marker) | ⬜ Not started | **Next.** Everything reads through it and it has no tests. Marker already declared in `pyproject.toml`. |
+| 1.5 | `db.py` tests (temporary SQLite DB, `integration` marker) | ✅ Done | **111 tests, 100% statement coverage.** Mutation-verified on an isolated copy of the source: 26 injected faults, **24 caught**; the 2 survivors are proven *equivalent* mutants, documented in-test rather than left looking like holes. Covers the read-only guarantee, the FK cascade, transaction rollback, the dedup migration, every read query's filters/ordering/date-window, and the trades table. Found BUG-014, BUG-015, BUG-016, and **uncovered DEBT-008 as a silent data-loss risk (ADR-022)** — whose reporting half was then fixed in the same session, taking this file to 114 tests. |
 | 1.6 | `collector.py` tests — session logic, gap classification | ⬜ Not started | Gap classifier is BUG-005; test it *before* fixing so the fix is a visible diff (ADR-019). |
 | 1.7 | `schwab_client.py` tests — chain filtering, strike window | ⬜ Not started | Needs a fake API response fixture; no live calls. |
-| 1.8 | Reach ~70% coverage of non-UI code | 🔄 Partial | `iv_engine` 100%; `db.py`/`collector.py`/`schwab_client.py` at 0%. |
-| 1.9 | Checks that run on every save/commit without being remembered | ⬜ Not started | `.githooks/pre-commit` exists from M0.3 but only blocks secrets — it does not run the tests. |
+| 1.8 | Reach ~70% coverage of non-UI code | 🔄 Partial | `iv_engine` 100%, **`db.py` 100%**; `collector.py`/`schwab_client.py` still at 0%. Now enforced on every commit by the M1.9 hook. |
+| 1.9 | Checks that run on every save/commit without being remembered | ✅ Done | `.githooks/pre-commit` now runs the full suite when any `.py` file is staged (docs-only commits skip it, so editing the backlog stays instant). `core.hooksPath` was already set, so it is live. **Exercised, not assumed:** verified it skips on a docs-only commit, passes with `VIRTUAL_ENV` unset (the venv is outside the project — DEBT-020), **blocks a deliberately failing test**, and honours the `SKIP_TESTS=1` bypass. |
 
 **Scaffolding with an expiry date:** `tests/journal_loader.py` and `tests/app_loader.py` pull
 functions out of Streamlit scripts via AST so they can be tested without launching a page or
@@ -76,15 +77,17 @@ imported. Both raise rather than guess if a target moves.
 
 ## Immediate next actions
 
-1. **M1.5 — test `db.py`.** Highest value remaining: every other module reads through it,
-   and it has no tests at all. Use a temporary SQLite database per test (the `integration`
-   marker is already declared); never the real one.
-2. **M1.9 — make the checks run themselves.** They currently only run when someone
-   remembers to type the command, which is the failure mode M1 exists to remove.
-3. **M1.6 — test `collector.py`**, covering the gap classifier *before* fixing BUG-005, so
-   the fix lands as a visible change to an existing test (ADR-019).
-4. **Close DEBT-014** — capture a scanner fixture whose near-the-money rows have no stored
+1. **M1.6 — test `collector.py`**, covering the gap classifier *before* fixing
+   BUG-005, so the fix lands as a visible change to an existing test (ADR-019).
+   This is now the largest untested surface left, and BUG-005 blocks M3.4.
+2. **BUG-016 — fix `get_next_trade_id()` before discarding the 6 practice trades.**
+   Deleting a non-newest trade makes the next generated ID collide with a live
+   PRIMARY KEY, and the save then raises. The discard is already committed to.
+3. **Close DEBT-014** — capture a scanner fixture whose near-the-money rows have no stored
    price, so the bid/ask fallback is actually protected before M2 moves it.
+4. **Install `ruff`** into the shared venv. It is declared in the `dev` optional-dependency
+   group but was never installed, so nothing is linted — including the M1.5 test files. Once
+   present, add it to the M1.9 pre-commit hook alongside the test run.
 5. **Still blocked on the user: BUG-001.** The duplicate-collector theory is dead (ADR-018).
    Needs a symptom, a tab, and a screenshot.
 

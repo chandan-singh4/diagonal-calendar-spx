@@ -7,6 +7,67 @@ it was recorded here.
 
 ---
 
+## ADR-022 — `INSERT OR IGNORE` is a data-loss risk, not just a logging gap
+**Date:** 2026-07-26 · **Status:** ACCEPTED — **step 1 implemented same day**; step 2 remains M3.6 · **Revises:** ADR-004
+
+**In plain terms:** the collector has a rule that stops it recording the same option contract
+twice in one snapshot. The way that rule is written also tells the database *"if anything at all
+is wrong with a row, throw it away quietly."* Not just duplicates — anything. And the collector
+then reports every thrown-away row as successfully saved.
+
+**What we believed (ADR-004):** `INSERT OR IGNORE` silences legitimate write failures, "with no
+count and no log line." Logged as DEBT-008 at P1 — a **logging** shortcoming.
+
+**What is actually true.** `OR IGNORE` is not scoped to uniqueness. SQLite applies the conflict
+resolution to *every* constraint on the statement, so a `CHECK` or `NOT NULL` violation also
+skips the row instead of raising. Verified directly against `sqlite3`: a plain `INSERT` of a row
+with `right = 'CALL'` raises `IntegrityError`; the same row through `insert_option_rows()`
+disappears without a trace. `insert_option_rows()` then compounds it by returning `len(rows)`,
+which is computed *before* the statement runs.
+
+**Why that combination is the dangerous one.** If Schwab ever changed its `right` convention from
+`'C'` to `'CALL'` — exactly the kind of change an **unofficial community API wrapper** is prone
+to, and `schwab-py` is pinned tightest in `pyproject.toml` for precisely this reason — then:
+
+- every option row would be silently discarded;
+- `insert_option_rows()` would return 3,096;
+- `collector.log` would record a full, healthy cycle;
+- `scripts/check_db.py` would show snapshots accumulating with `status = COMPLETE`;
+- the only symptom would be charts that quietly stop moving.
+
+The database is the product (STATUS.md). Prices missed are gone — the broker will not sell you
+last Tuesday's. This is the one failure mode in the system that is both silent and unrecoverable,
+which is why it is now **P0** rather than P1.
+
+**Decision:** raise DEBT-008 to P0 and split the fix in two.
+
+1. **DONE 2026-07-26, same session.** `insert_option_rows()` now returns
+   `cursor.rowcount` — the rows actually stored — and logs a WARNING naming the shortfall
+   and pointing at this ADR. This converts a silent, permanent data loss into a line in
+   `collector.log`. It does not change what is stored, so it could not make anything worse.
+   Verified load-bearing by reverting both halves on an isolated copy and confirming the
+   suite fails (4 tests on the return value, 1 on the warning).
+   **Residual, deliberately not changed:** `collector.py:565` still records
+   `strikes_fetched = len(option_rows)` — the offered count — and discards this function's
+   return value entirely. So the WARNING in the log is currently the ONLY signal. Correcting
+   the collector's own reporting changes what is written to the `snapshots` table and was
+   outside the approved scope.
+2. **At M3.6, as planned:** decide per-constraint behaviour deliberately — keep `OR IGNORE`
+   for the genuine duplicate case, let anything else raise.
+
+**Not fixed in this session on purpose.** ADR-019 governs: the fault was recorded first and is
+pinned by tests (`test_insert_option_rows_silently_discards_a_row_failing_the_check`,
+`test_insert_option_rows_keeps_the_good_rows_when_one_is_bad`) so that the fix later lands as a
+visible, deliberate change to an existing test rather than a test written to fit a fix.
+
+**Alternative considered and rejected:** drop the `CHECK(right IN ('C','P'))` constraint, since
+`OR IGNORE` makes it unenforceable through the write path anyway. Rejected — the constraint is
+real and does fire on a plain `INSERT` (pinned by
+`test_option_right_check_constraint_rejects_anything_but_c_or_p`); the defect is the conflict
+clause, not the constraint. Removing it would delete the evidence rather than the fault.
+
+---
+
 ## ADR-021 — A break-even trade is neither a win nor a loss
 **Date:** 2026-07-26 · **Status:** ACCEPTED
 

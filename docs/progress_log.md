@@ -5,6 +5,117 @@ what broke, and what remains.
 
 ---
 
+## 2026-07-26 (session 2) — M1.5 + M1.9: `db.py` tested, checks now automatic (151 → 265 tests)
+
+### Completed
+
+**M1.5 — `db.py` now has 111 tests at 100% statement coverage.** The module every other
+component reads through went from zero tests to fully covered. `tests/test_db.py`, plus
+`temp_db` / `trades_db` fixtures in `conftest.py` that build a throwaway database under
+pytest's `tmp_path` and **assert they did not resolve to the production path** — several
+db.py functions default to `config.DB_PATH` when `db_path` is None, so one missing argument
+in a future test would have pointed the suite at 1.42 GB of irreplaceable history.
+
+Covered: the read-only guarantee (`PRAGMA query_only`), the foreign-key cascade, transaction
+rollback, the one-time dedup migration, the schema-version gate, and every read query's status
+filter, ordering, date boundary and N-day window — plus the trades table end to end.
+
+**Mutation-verified, and this time on an ISOLATED COPY of the source.** 26 deliberate faults,
+**24 caught**. Previous sessions mutated files in the working tree and restored them; this run
+copied `db.py`, `config.py` and the tests into a scratch directory with no `data/` in it, so
+the production database was not merely untouched but unreachable, and a crash mid-run could not
+have left a mutated `db.py` on disk for the collector to load on its next restart.
+
+**The 2 survivors are equivalent mutants, not holes.** Both were verified against sqlite3
+directly rather than assumed:
+- *ORDER BY drops the `right` tiebreak* — unobservable, because
+  `idx_option_rows_contract_snap(expiry_date, strike, right, snapshot_id)` satisfies the query
+  as a covering-index scan that already emits rows in `right` order (EXPLAIN QUERY PLAN).
+  The clause still matters if that index is ever dropped — and DEBT-016 shows indexes here
+  *do* get dropped for size.
+- *`<` → `<=` on the prior-session-close boundary* — no `'YYYY-MM-DD HH:MM:SS'` string can
+  ever compare equal to a bare `'YYYY-MM-DD'`, so the two operators are indistinguishable.
+  The boundary is correct by accident of the timestamp *format*, not the operator, so a test
+  was added pinning that format invariant.
+
+Both are documented in the tests themselves, so a future audit does not mistake them for
+untested branches.
+
+**One test was found to be fake and fixed.** `test_update_trade_with_no_fields_is_a_no_op`
+passed even with the early return deleted, because `_utcnow()` has one-second resolution and
+the test ran inside a single second. It now backdates `updated_at` to a value `now()` cannot
+produce. This is exactly the failure the mutation run exists to catch — a test that looked
+real and proved nothing.
+
+### Discovered
+
+**DEBT-008 is much worse than recorded, and is now P0 — ADR-022.** ADR-004 described
+`INSERT OR IGNORE` as a *logging* shortcoming. It is a **silent data-loss** risk. `OR IGNORE`
+is not scoped to uniqueness: SQLite applies it to every constraint on the statement, so a
+`CHECK` or `NOT NULL` violation skips the row rather than raising. `insert_option_rows()` then
+returns `len(rows)`, computed *before* the statement runs. So if Schwab ever changed its `right`
+convention from `'C'` to `'CALL'` — the kind of change an unofficial community wrapper is
+prone to, which is why `schwab-py` is pinned tightest — every row would be discarded,
+`insert_option_rows()` would return 3,096, `collector.log` would record a healthy cycle, and
+`check_db.py` would show COMPLETE snapshots accumulating. The only symptom would be charts
+that quietly stop moving, and the missed prices are unrecoverable.
+
+**Three new defects, all pinned rather than fixed** (ADR-019 — record first, fix separately):
+- **BUG-016 (P1)** — `get_next_trade_id()` uses `COUNT(*) + 1`, which is not a sequence.
+  Delete any non-newest trade and the next ID collides with a surviving PRIMARY KEY, so
+  `insert_trade()` raises and the trade being recorded is lost. **Reachable and scheduled:**
+  STATUS.md commits to discarding the 6 practice trades before serious trading resumes.
+- **BUG-015 (P2)** — `get_spx_intraday_today()` has no upper date bound; asking for an older
+  session silently returns that session *and every session after it* as one "intraday" series.
+  `app.py` is safe only by accident of always passing the latest snapshot's date.
+- **BUG-014 (P3)** — the BUG-007 truthiness-on-floats trap, three more sites in `db.py`.
+
+### Also completed (same session, after review)
+
+**DEBT-008 step 1 fixed — the silent loss is now a log line (ADR-022).**
+`insert_option_rows()` returns `cursor.rowcount` (verified to report the true stored count
+under `executemany` + `OR IGNORE`) instead of `len(rows)`, and logs a WARNING naming the
+shortfall and pointing at DEBT-008/ADR-022. Per ADR-019 the fix landed as a **visible change
+to the pinned tests**: the two tests that asserted the dishonest count were rewritten to
+assert the honest one and relabelled from PINNED to FIXED, and two new tests cover the
+warning firing and staying quiet on a clean write.
+
+Verified load-bearing by reverting both halves on the isolated copy: removing the rowcount
+change fails 4 tests, removing the warning fails 1. Full mutation set re-run against the new
+`db.py` — **26 of 28 caught**, same two equivalent mutants, no new holes.
+
+**What was deliberately NOT changed.** `OR IGNORE` still discards constraint-violating rows
+rather than raising (that is the M3.6 per-constraint decision, ADR-022 step 2), and
+`collector.py:565` still records `strikes_fetched = len(option_rows)` — the offered count —
+while discarding this function's return value entirely. So the WARNING is currently the only
+signal. Correcting the collector's own reporting changes what is written to the `snapshots`
+table, which was outside the approved scope. DEBT-008 is therefore **half fixed** and back to
+P1, not closed.
+
+**M1.9 done — the checks now run themselves.** `.githooks/pre-commit` (which already existed
+from M0.3 as a secrets guard, with `core.hooksPath` already configured) now runs the full
+suite whenever a `.py` file is staged. Docs-only commits skip it, so editing the backlog stays
+instant. Interpreter resolution falls back through `$VIRTUAL_ENV` → the known venv path →
+`PATH`, because the venv lives outside the project and is shared (DEBT-020) and a commit from
+a fresh terminal or IDE will not have `VIRTUAL_ENV` set.
+
+**Exercised in all four directions rather than assumed:** skips on a docs-only commit; passes
+with `VIRTUAL_ENV` unset; **blocks a deliberately-failing test** (probe file created, hook
+confirmed to exit 1, probe deleted); and honours the `SKIP_TESTS=1` bypass. This closes the
+"checks only run when someone remembers" gap that M1 exists to remove.
+
+### Notes
+
+- Full suite: **265 passing** (151 before this session, +114). `db.py` at 100%.
+- `ruff` is not installed in the shared venv (`No module named ruff`), so the new files were
+  not linted. It is declared in the `dev` optional-dependency group but never installed —
+  worth folding into M1.9 alongside the automated test run.
+- Nothing was committed. The only production-code change is the DEBT-008 fix in
+  `insert_option_rows()`, made with explicit approval; everything else is tests, the
+  pre-commit hook, and documentation.
+
+---
+
 ## 2026-07-26 — M0 merged; M1 Test Foundation begun (0 → 140 tests)
 
 ### Completed
