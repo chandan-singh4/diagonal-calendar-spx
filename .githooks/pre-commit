@@ -71,4 +71,49 @@ if [ "$fail" -ne 0 ]; then
     echo "Commit rejected. Override only if you are certain:  git commit --no-verify"
     exit 1
 fi
+
+# ── 5. Test suite ────────────────────────────────────────────────────────────
+# (M1.9, 2026-07-26)
+#
+# Why this exists: M1 built 265 tests that only ran when somebody remembered to
+# type the command. A check nobody remembers to run is not a check — it is a
+# check-shaped object. This is the step that makes the milestone real.
+#
+# Scope: runs only when a .py file is staged. Docs-only commits skip it, so
+# editing the backlog stays instant.
+#
+# The suite is ~10 s and touches no production data: every database fixture is
+# a throwaway under pytest's tmp_path, and conftest.py asserts it did not
+# resolve to config.DB_PATH. Nothing here can read, lock or write
+# data/dashboard.db, so a commit can never contend with the collector.
+py_staged=0
+for f in $staged; do
+    case "$f" in *.py) py_staged=1 ;; esac
+done
+
+if [ "$py_staged" -eq 1 ] && [ "${SKIP_TESTS:-0}" != "1" ]; then
+    # Resolve an interpreter. A commit from a fresh terminal or an IDE will not
+    # have VIRTUAL_ENV set, and the venv lives OUTSIDE the project and is shared
+    # (DEBT-020), so the path cannot be assumed relative to the repo.
+    if [ -n "$VIRTUAL_ENV" ] && [ -x "$VIRTUAL_ENV/Scripts/python.exe" ]; then
+        PY="$VIRTUAL_ENV/Scripts/python.exe"
+    elif [ -x "/c/Users/chand/Python/.venv/Scripts/python.exe" ]; then
+        PY="/c/Users/chand/Python/.venv/Scripts/python.exe"
+    elif command -v python >/dev/null 2>&1; then
+        PY=python
+    else
+        echo "BLOCKED: no Python interpreter found; cannot run the test suite."
+        echo "         Fix the environment, or bypass once with: SKIP_TESTS=1 git commit"
+        exit 1
+    fi
+
+    echo "pre-commit: running the test suite ($PY)..."
+    if ! "$PY" -m pytest -q --no-header -x; then
+        echo ""
+        echo "BLOCKED: tests failed. The commit was not created."
+        echo "         Fix the failure, or bypass once with: SKIP_TESTS=1 git commit"
+        exit 1
+    fi
+fi
+
 exit 0
