@@ -97,6 +97,6 @@ def load_journal_functions() -> dict:
 
     module = ast.Module(body=picked, type_ignores=[])
     ast.fix_missing_locations(module)
-    exec(compile(module, filename=str(JOURNAL_PATH), mode="exec"), namespace)  # noqa: S102
+    exec(compile(module, filename=str(JOURNAL_PATH), mode="exec"), namespace)
 
     return {name: namespace[name] for name in _WANTED}

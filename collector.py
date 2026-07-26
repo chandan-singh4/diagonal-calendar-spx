@@ -40,7 +40,8 @@ import logging
 import os
 import sys
 import time
-from datetime import date, datetime, time as dtime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
+from datetime import time as dtime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -494,9 +495,9 @@ def _check_startup_gap(db_path: str) -> None:
 
     last_dt = datetime.fromisoformat(last_ts_str)
     if last_dt.tzinfo is None:
-        last_dt = last_dt.replace(tzinfo=timezone.utc)
+        last_dt = last_dt.replace(tzinfo=UTC)
 
-    now_utc     = datetime.now(timezone.utc)
+    now_utc     = datetime.now(UTC)
     gap_minutes = (now_utc - last_dt).total_seconds() / 60
 
     logger.info(
@@ -566,7 +567,7 @@ def _run_cycle(client, db_path: str, session: str, poll_interval: int) -> int:
     during steps 4–9, an auditable record exists (no orphaned data, no silent loss).
     """
     cycle_start  = time.monotonic()
-    now_utc      = datetime.now(timezone.utc)
+    now_utc      = datetime.now(UTC)
     now_utc_str  = now_utc.strftime("%Y-%m-%d %H:%M:%S")
     snapshot_id: int | None = None
 
@@ -604,7 +605,7 @@ def _run_cycle(client, db_path: str, session: str, poll_interval: int) -> int:
         chain_df = schwab_client.chain_to_dataframe(raw_chain)
         if chain_df.empty:
             raise ValueError("Option chain contained no contracts after parsing")
-        
+
         # NEW: keep only the nearest MAX_EXPIRY_COUNT expirations (sorted by date)
         all_expiries = sorted(chain_df["expiry"].unique())
         keep_expiries = set(all_expiries[:config.MAX_EXPIRY_COUNT])
@@ -737,7 +738,11 @@ def _check_token_expiry() -> None:
     """Log a warning when the Schwab token is close to expiring, or has expired."""
     try:
         age = schwab_client.get_token_age_days()
-    except Exception:  # noqa: BLE001 — a broken check must never stop collection
+    # A broken check must never stop collection: this catch is deliberately
+    # broad. (The `# noqa: BLE001` that carried this note was redundant --
+    # BLE is not in the enabled rule set -- so ruff removed it, and the
+    # reasoning with it.)
+    except Exception:
         return
 
     remaining = token_days_remaining(age)
@@ -906,7 +911,7 @@ def main() -> None:
     prev_snapshot_ts: str | None = None
 
     while True:
-        now_utc = datetime.now(timezone.utc)
+        now_utc = datetime.now(UTC)
         now_et  = now_utc.astimezone(_ET)
         session = get_session(now_et)
 
@@ -952,13 +957,13 @@ def main() -> None:
 
             # Mid-session gap detection: flag if time since the previous snapshot
             # is much larger than expected (indicates a stall or silent failure)
-            current_ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            current_ts = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
             if prev_snapshot_ts is not None:
                 prev_dt = (
                     datetime.fromisoformat(prev_snapshot_ts)
-                    .replace(tzinfo=timezone.utc)
+                    .replace(tzinfo=UTC)
                 )
-                now_dt    = datetime.now(timezone.utc)
+                now_dt    = datetime.now(UTC)
                 gap_min   = (now_dt - prev_dt).total_seconds() / 60
                 reason    = _midsession_gap_reason(prev_dt, now_dt, poll_interval)
                 if reason is not None:

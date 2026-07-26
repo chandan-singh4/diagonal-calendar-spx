@@ -7,6 +7,7 @@ so there's exactly one place to look when you need to change a setting.
 
 import os
 from pathlib import Path
+
 from dotenv import load_dotenv
 
 load_dotenv()

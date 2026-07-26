@@ -34,7 +34,7 @@ Priority: **P0** blocks the current milestone · **P1** next milestone · **P2**
 
 | ID | P | Item | Milestone |
 |---|---|---|---|
-| DEBT-001 | **P0** partly cleared | ~~No automated tests anywhere (9,628 lines)~~ — 329 tests as of 2026-07-26: `iv_engine` at 100%, the journal P&L maths, a scanner golden net, token expiry, and **`db.py` at 100% statement coverage / 24-of-26 mutation score** (M1.5). **Still bare:** `collector.py`, `schwab_client.py`, and the rest of `app.py`. | M1 |
+| DEBT-001 | **P0** partly cleared | ~~No automated tests anywhere (9,628 lines)~~ — 329 tests, and the codebase is now linted as of 2026-07-26: `iv_engine` at 100%, the journal P&L maths, a scanner golden net, token expiry, and **`db.py` at 100% statement coverage / 24-of-26 mutation score** (M1.5). **Still bare:** `collector.py`, `schwab_client.py`, and the rest of `app.py`. | M1 |
 | DEBT-014 | P2 | Scanner golden fixtures do not exercise the bid/ask midpoint fallback | Found 2026-07-26 by mutation-testing the golden net: altering the midpoint formula inside `_compute_transform_scanner` changed nothing, so the net does **not** protect that branch during M2. Both captured snapshots do contain NULL-`mark` rows (77 of 3,096 in snapshot 2608), but none reach the top-50 output — the branch runs and its result is discarded. **Fix:** capture a third fixture chosen for NULL marks near the money, or add a synthetic chain. | M2 |
 | DEBT-002 | **P0** | `app.py` is a 4,230-line procedural script (757 lines CSS, 257 top-level statements) | M2 |
 | DEBT-003 | **P0** | Unbounded DB growth (~82 MB/trading day, ~20 GB/yr) | M3 |
@@ -46,7 +46,10 @@ Priority: **P0** blocks the current milestone · **P1** next milestone · **P2**
 
 | ID | P | Item | Milestone |
 |---|---|---|---|
-| DEBT-007 | P1 | Silent exception swallowing: 11× `except: pass`, 4× bare `except:` in `journal.py` — in P&L display paths | M2.13 |
+| DEBT-007 | P1 | Silent exception swallowing in P&L display paths | M2.13 |
+
+> **DEBT-007 detail (measured 2026-07-26, first real ruff run).** The estimate is now exact: **4 bare `except:`** (`pages/journal.py` 1298, 1507, 1546, and one more) and **~30 blind `except Exception:`** across `journal.py` (18), `app.py` (3), `collector.py` (3) and `db.py` (2). These swallow every error silently, so a failed P&L calculation renders as a blank cell indistinguishable from a real value — the same confusion as BUG-010. `ruff check --select BLE001,E722` reproduces the list with line numbers. Note `collector.py`'s and `db.py`'s are deliberate and now carry a comment saying so; `journal.py`'s are not.
+
 | DEBT-008 | P1 (was P0) — **half fixed** | ~~The caller is told discarded rows were stored~~ — fixed 2026-07-26 (M1.5): `insert_option_rows()` now returns `cursor.rowcount` and logs a WARNING naming the shortfall. **Still open:** `OR IGNORE` continues to discard constraint-violating rows rather than raising, and the collector still records `strikes_fetched = len(option_rows)` (the offered count) rather than the stored one. Per-constraint behaviour is the M3.6 decision (ADR-022 step 2). | M3.6 |
 
 > **DEBT-008 detail (raised to P0, 2026-07-26, M1.5 tests).** The severity in ADR-004 was understated. `OR IGNORE` is not scoped to uniqueness — SQLite applies it to *every* constraint on the statement, so a `CHECK` or `NOT NULL` violation skips the row rather than raising. `insert_option_rows()` compounds this by returning `len(rows)`, computed before the statement runs. **Combined failure mode:** if Schwab ever changed its `right` convention from `'C'` to `'CALL'`, every option row would be silently discarded, `insert_option_rows()` would return 3,096, and `collector.log` would record a full healthy cycle — indefinitely, until someone noticed the charts had stopped moving. Nothing in the system would say otherwise, and the missing data is unrecoverable (the broker will not sell you last Tuesday's prices). **Minimum fix, cheap and independent of the M3.6 refactor:** compare `cursor.rowcount` against `len(rows)` and log any shortfall as a warning. Pinned by `test_insert_option_rows_silently_discards_a_row_failing_the_check` and `test_insert_option_rows_keeps_the_good_rows_when_one_is_bad`.
@@ -65,6 +68,7 @@ Priority: **P0** blocks the current milestone · **P1** next milestone · **P2**
 
 | ID | P | Item |
 |---|---|---|
+| DEBT-025 | P2 | **85 ruff findings remain after the first lint pass** | Config was written in M0 but ruff was never installed, so nothing had ever been linted. Installed 2026-07-26; noise families silenced, 55 mechanical items auto-fixed, **85 judgement calls left**: 18 PLR0917 (too many positional args — pervasive in `db.py` readers), 12 PLC0415 (imports not at top), 12 E741 (variables named `l`, in `journal.py`'s leg parsing), 8 SIM118, 6 SIM105, 4 E722 + 4 B905 + 3 PLW0603, 2 F841. None is a defect; the `except` ones belong to DEBT-007. Mostly lands naturally during the M2 decomposition. **Do not wire ruff into the pre-commit hook until this is at zero** — a gate that fails on every commit teaches everyone to bypass it. |
 | DEBT-019 | P2 | `README.md` fully obsolete (describes an MVP scaffold, references nonexistent `.env.example` flow, Demo Mode) |
 | DEBT-020 | P2 | `start_collector.bat` hardcodes absolute paths; venv lives *outside* the project at `C:\Users\chand\Python\.venv` and is shared |
 | DEBT-021 | P2 | `collector.log` unrotated (486 KB and growing) |

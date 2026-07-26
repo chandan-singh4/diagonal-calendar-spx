@@ -22,7 +22,9 @@ DATA FLOW
 
 from __future__ import annotations
 
-import sys, os
+import os
+import sys
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import json
@@ -1204,8 +1206,8 @@ elif page_mode == "➕ Log a Trade":
     if st.session_state["_show_leave_warning"]:
         dest = st.session_state.get("_interrupted_nav_dest", "📊 Overview")
         st.warning(
-            f"⚠️ You have unsaved changes on this page. "
-            f"If you leave, your edits will be discarded."
+            "⚠️ You have unsaved changes on this page. "
+            "If you leave, your edits will be discarded."
         )
         lv1, lv2, _ = st.columns([1,1,6])
         if lv1.button("Leave (discard changes)", key="btn_leave"):

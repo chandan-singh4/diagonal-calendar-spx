@@ -19,9 +19,7 @@ from __future__ import annotations
 import json
 
 import pytest
-
 from conftest import FakeRow, make_legacy_trade, make_trade
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ic_expiry_pnl_per_share — the iron condor payoff at expiry

@@ -28,7 +28,6 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
-
 from app_loader import APP_PATH, load_scanner_functions
 
 

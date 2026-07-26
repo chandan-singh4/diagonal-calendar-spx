@@ -9,11 +9,13 @@ get_spx_quote() or get_option_chain() and gets clean data back.
 Reference: https://schwab-py.readthedocs.io/
 """
 
-import math
 import logging
-import schwab
-import pandas as pd
+import math
 from pathlib import Path
+
+import pandas as pd
+import schwab
+
 import config
 
 logger = logging.getLogger(__name__)

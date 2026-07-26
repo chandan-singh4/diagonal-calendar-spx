@@ -90,6 +90,21 @@ ignore = [
     "PLR2004",  # magic values — will be genuinely fixed by M2.2 (constants extraction)
     "PLR0912",  # too many branches — app.py is being decomposed in M2
     "PLR0915",  # too many statements — same
+
+    # ── Silenced after the first real ruff run, 2026-07-26 ────────────────────
+    # Ruff was configured in M0 but never installed, so nothing had ever been
+    # linted. The first run produced 435 findings, ~70% of them from these three
+    # families. They are house style or false positives, not defects, and left
+    # enabled they bury the ~130 findings worth reading. A report nobody reads
+    # is worth nothing.
+    "C408",     # dict() instead of {} — 147 hits, nearly all Plotly chart specs,
+                # where dict(color=..., width=...) is the library's own idiom.
+                # Rewriting them as literals would make the charts read worse.
+    "RUF001",   # "ambiguous" unicode in strings   — these are the em-dashes,
+    "RUF002",   # ...in docstrings                    arrows and × signs the
+    "RUF003",   # ...in comments                      house style uses on purpose.
+    "E701",     # multiple statements on one line (colon) — 45 hits combined,
+    "E702",     # multiple statements on one line (semicolon) — pure preference.
 ]
 
 [tool.ruff.lint.per-file-ignores]

@@ -35,17 +35,17 @@ import json
 import logging
 import sys
 import uuid
-from datetime import date, datetime, timezone, time as dt_time
+from datetime import UTC, datetime
+from datetime import time as dt_time
 from pathlib import Path
-
-import streamlit.components.v1 as components
+from time import perf_counter as _perf_counter
 
 import numpy as np
-from time import perf_counter as _perf_counter
 import pandas as pd
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import streamlit as st
+import streamlit.components.v1 as components
+from plotly.subplots import make_subplots
 from streamlit_autorefresh import st_autorefresh
 
 import config
@@ -2178,9 +2178,9 @@ vix_value     = latest_snap["vix_value"]
 snap_ts_str   = latest_snap["snapshot_timestamp"]
 
 snap_dt = datetime.strptime(snap_ts_str[:19], "%Y-%m-%d %H:%M:%S").replace(
-    tzinfo=timezone.utc
+    tzinfo=UTC
 )
-snap_age_secs = (datetime.now(timezone.utc) - snap_dt).total_seconds()
+snap_age_secs = (datetime.now(UTC) - snap_dt).total_seconds()
 session_date  = snap_ts_str[:10]
 
 # ─────────────────────────────────────────────────────────────────────────────

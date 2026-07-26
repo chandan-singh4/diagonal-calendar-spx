@@ -37,7 +37,7 @@ migration, no analytics until the foundation exists.
 | 0.3 | Verify `.env`/`token.json` untracked; secret pre-commit hook | ✅ Done | `.githooks/pre-commit` installed via `core.hooksPath`. Blocks credentials, DBs, logs, runtime state, >1 MB files, and NULL bytes in `.gitignore`. Tested both directions. |
 | 0.4 | Clean dirty index; delete orphans + superseded docs | ✅ Done | Removed `dashboard.db` (0 B orphan), `pinned_pairs.json`, June audit, original implementation plan. Index `AD` entries cleared. |
 | 0.5 | `pyproject.toml`, pinned deps, lockfile, dev deps | ✅ Done | Upper bounds on all deps; `requirements.lock` = 63 packages pinned with provenance via `uv pip compile`. |
-| 0.6 | `ruff` + `black` + `mypy` config; format in one isolated commit | 🔄 Partial | Config written into `pyproject.toml`. **Formatter run deferred** — see Decisions. |
+| 0.6 | `ruff` + `black` + `mypy` config; format in one isolated commit | 🔄 Partial | Config written into `pyproject.toml` in M0 but **ruff was never installed**, so nothing was linted until 2026-07-26. Now installed and run: noise families silenced with reasons, 55 mechanical items auto-fixed, 85 judgement calls left (DEBT-025). **Formatter run still deferred** — ADR-015 holds while `app.py` and `pages/journal.py` remain untested. |
 | 0.7 | `.env.example`; rewrite `README.md` | ✅ Done | Both complete. README now documents real architecture, setup, backups, and conventions. |
 | 0.8 | Establish `plan.md`, `progress_log.md`, `decisions.md`, `backlog.md`, `handoff.md` | ✅ Done | This file is part of it. |
 | 0.9 | Backfill `decisions.md` with historical ADRs | ✅ Done | 12 ADRs backfilled from `DEV_JOURNAL.md` + 4 new decisions from this session. |
@@ -87,9 +87,10 @@ imported. Both raise rather than guess if a target moves.
    before serious trading resumes.
 3. **Close DEBT-014** — capture a scanner fixture whose near-the-money rows have no stored
    price, so the bid/ask fallback is actually protected before M2 moves it.
-4. **Install `ruff`** into the shared venv. It is declared in the `dev` optional-dependency
-   group but was never installed, so nothing is linted — including the M1.5 test files. Once
-   present, add it to the M1.9 pre-commit hook alongside the test run.
+4. **Work DEBT-025 down toward zero, then gate on it.** 85 lint findings remain after the
+   first pass. Most dissolve during the M2 decomposition. Only wire `ruff check` into the
+   M1.9 pre-commit hook once it is at zero — a gate that fails on every commit teaches
+   everyone to bypass it.
 5. **Still blocked on the user: BUG-001.** The duplicate-collector theory is dead (ADR-018).
    Needs a symptom, a tab, and a screenshot.
 

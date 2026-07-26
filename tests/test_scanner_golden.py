@@ -39,7 +39,6 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
-
 from app_loader import load_scanner_functions
 
 FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "scanner"

@@ -5,6 +5,69 @@ what broke, and what remains.
 
 ---
 
+## 2026-07-26 (session 4) — the codebase is linted for the first time
+
+### Completed
+
+**`ruff` installed and run.** It was configured in M0 and declared in the dev dependencies, but
+never actually installed — so in a 9,628-line codebase nothing had ever been linted. First run:
+**435 findings**.
+
+**Tuned the config before acting on it.** ~70% of those were three families that are house style
+or false positives, not defects: 147 `dict()`-instead-of-`{}` (nearly all Plotly chart specs,
+where `dict(...)` is the library's own idiom), 110 "ambiguous unicode" (the em-dashes and multiply
+signs this codebase uses deliberately), 45 multiple-statements-per-line. Silenced in
+`pyproject.toml` **with the reasoning written next to each**, which took the report to 133 — a
+list someone will actually read. A report nobody reads is worth nothing.
+
+**Auto-fixed 55 mechanical items** — unused import, missing trailing newlines, import ordering,
+quoted type annotations, stale `# noqa` directives, `timezone.utc` to `UTC`. **85 remain**, all
+judgement calls, logged as DEBT-025.
+
+**No defects found.** Worth stating plainly: nothing ruff surfaced will crash, corrupt data or
+produce a wrong number. The value was elsewhere.
+
+### Discovered
+
+**DEBT-007 is now measured rather than estimated.** The backlog said "11x `except: pass`, 4x
+bare `except:`". The real figures: **4 bare `except:`** and **~30 blind `except Exception:`** —
+18 in `journal.py`, 3 each in `app.py` and `collector.py`, 2 in `db.py` — with exact line
+numbers, reproducible via `ruff check --select BLE001,E722`. A vague known-issue became a
+worklist.
+
+**A possible unfinished job in the stats panel.** `compute_stats()` computes
+`scratch = [p for p in pls if p == 0]` and never uses it. Left over from last session's ADR-021
+break-even work. The behaviour is correct — scratches already reach the win-rate denominator and
+stay out of Average Loser through other filters — so this is not a bug, but it may be a display
+that was intended and never finished. **Left in place; Chandan's call.**
+
+**The auto-fix was not as inert as "mechanical" implies, and the tests caught it.** Ruff's
+`timezone.utc` to `UTC` modernisation also dropped `timezone` from `collector.py`'s imports — and
+`tests/test_collector_gaps.py` was reaching through the module for it (`collector.timezone.utc`),
+so **34 tests broke instantly**. The right fix was the tests, not a revert: reaching into another
+module for its imports is fragile coupling, and the test file now imports `UTC` itself. Two
+lessons — run the suite after every "safe" auto-fix, and the M1.9 hook earned its keep on the
+very first lint pass.
+
+**Ruff deleted two comments that carried reasoning.** `RUF100` strips redundant `# noqa`
+directives — correctly, since those rules were not enabled — but it takes the trailing
+explanation with them. Lost: *"a broken check must never stop collection"* in `collector.py` and
+*"import must follow the sys.path shim above"* in `scripts/check_db.py`. Both restored as plain
+comments. Worth knowing before anyone runs `--fix` again: **check the diff for prose, not just
+for code.**
+
+### Notes
+
+- 329 tests still passing; `db.py` still 100%.
+- **`ruff` is NOT wired into the pre-commit hook**, deliberately. 85 findings remain, and a gate
+  that fails on every commit teaches everyone to bypass it. Wire it when DEBT-025 hits zero.
+- The formatter (`black` / `ruff format`) was **not** run. ADR-015 still holds: `app.py` and
+  `pages/journal.py` are the files it would touch most and they remain largely untested.
+- `ruff 0.16.0` installed into the shared venv, which serves other projects too (DEBT-020). It is
+  a standalone linter — nothing imports it, so it cannot affect runtime behaviour anywhere.
+
+---
+
 ## 2026-07-26 (session 3) — BUG-005 and BUG-002 closed; M1.6 begun (274 → 329 tests)
 
 ### Completed

@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -63,7 +63,7 @@ def ts_ago(*, days: int = 0, minutes: int = 0) -> str:
     hardcoded a calendar date would fall out of the window and start returning
     zero rows on some future date. Timestamps here are always relative to now.
     """
-    when = datetime.now(timezone.utc) - timedelta(days=days, minutes=minutes)
+    when = datetime.now(UTC) - timedelta(days=days, minutes=minutes)
     return when.strftime("%Y-%m-%d %H:%M:%S")
 
 
@@ -291,13 +291,12 @@ def test_managed_conn_rolls_back_on_exception(temp_db):
     class Boom(Exception):
         pass
 
-    with pytest.raises(Boom):
-        with db.managed_conn(temp_db) as conn:
-            conn.execute(
-                "INSERT INTO snapshots (snapshot_timestamp, status) "
-                "VALUES ('2026-07-01 15:00:00', 'COMPLETE')"
-            )
-            raise Boom
+    with pytest.raises(Boom), db.managed_conn(temp_db) as conn:
+        conn.execute(
+            "INSERT INTO snapshots (snapshot_timestamp, status) "
+            "VALUES ('2026-07-01 15:00:00', 'COMPLETE')"
+        )
+        raise Boom
 
     assert db.get_last_snapshot_timestamp(temp_db) is None
 

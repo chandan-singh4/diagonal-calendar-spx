@@ -47,7 +47,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 
-from app_loader import load_scanner_functions  # noqa: E402
+from app_loader import load_scanner_functions
 
 DB_PATH = ROOT / "data" / "dashboard.db"
 FIXTURE_DIR = ROOT / "tests" / "fixtures" / "scanner"

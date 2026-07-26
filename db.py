@@ -41,13 +41,13 @@ IV SCALE
   Callers are responsible for multiplying by 100 before display or passing
   to iv_engine functions (which expect percentage form).
 """
-from __future__ import annotations   # allows X | Y type hints on Python 3.7+
+from __future__ import annotations  # allows X | Y type hints on Python 3.7+
 
 import json
 import logging
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import config
 
@@ -253,7 +253,7 @@ def managed_conn(db_path: str):
 
 def _utcnow() -> str:
     """Current UTC time as a sortable ISO8601 string: 'YYYY-MM-DD HH:MM:SS'."""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -980,7 +980,7 @@ def get_spx_intraday_today(db_path: str, session_date: str | None = None) -> lis
     coincidentally correct. Any caller asking for a historical session (a
     backtest replay, a per-day chart) got silently wrong data with no error.
     """
-    bound = session_date if session_date else datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    bound = session_date if session_date else datetime.now(UTC).strftime("%Y-%m-%d")
     with get_conn(db_path) as conn:
         return conn.execute(
             """
@@ -1176,7 +1176,7 @@ def get_all_trades(db_path: str) -> list:
         ).fetchall()
 
 
-def get_trade(db_path: str, trade_id: str) -> "sqlite3.Row | None":
+def get_trade(db_path: str, trade_id: str) -> sqlite3.Row | None:
     """Single trade by ID. Returns None if not found."""
     with get_conn(db_path) as conn:
         return conn.execute(
@@ -1184,7 +1184,7 @@ def get_trade(db_path: str, trade_id: str) -> "sqlite3.Row | None":
         ).fetchone()
 
 
-def get_eod_spx(db_path: str, date_str: str) -> "float | None":
+def get_eod_spx(db_path: str, date_str: str) -> float | None:
     """
     Last COMPLETE snapshot underlying_price on or before date_str (YYYY-MM-DD).
     Used by journal.py to auto-suggest SPX close when recording expiration.
@@ -1210,8 +1210,8 @@ def get_ic_marks(
     long_call: float,
     short_put: float,
     long_put: float,
-    eod_date: "str | None" = None,
-) -> "dict | None":
+    eod_date: str | None = None,
+) -> dict | None:
     """
     Retrieve bid/ask/mark prices for the four Iron Condor legs from option_rows.
 

@@ -25,7 +25,7 @@ cannot silently move a boundary. In July, ET is UTC-4.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -46,8 +46,8 @@ def et(year, month, day, hour, minute=0, second=0) -> datetime:
 def classify(start_et: datetime, end_et: datetime) -> str:
     """Classify a gap given its ET endpoints (the function takes UTC)."""
     return collector._classify_gap(
-        start_et.astimezone(collector.timezone.utc),
-        end_et.astimezone(collector.timezone.utc),
+        start_et.astimezone(UTC),
+        end_et.astimezone(UTC),
     )
 
 
@@ -239,8 +239,8 @@ def test_holiday_outranks_market_closed_only_when_a_weekday_is_lost():
 
 def midsession(start_et, end_et, poll_interval=300):
     return collector._midsession_gap_reason(
-        start_et.astimezone(collector.timezone.utc),
-        end_et.astimezone(collector.timezone.utc),
+        start_et.astimezone(UTC),
+        end_et.astimezone(UTC),
         poll_interval,
     )
 
@@ -339,8 +339,8 @@ def test_a_stall_straddling_the_close_counts_only_the_market_side():
 
 def mm(start_et, end_et) -> float:
     return collector.market_minutes_between(
-        start_et.astimezone(collector.timezone.utc),
-        end_et.astimezone(collector.timezone.utc),
+        start_et.astimezone(UTC),
+        end_et.astimezone(UTC),
     )
 
 

@@ -21,7 +21,8 @@ from pathlib import Path
 # become plain `from spx_analyzer import ...` imports.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import config  # noqa: E402  (import must follow the sys.path shim above)
+# This import must follow the sys.path shim above.
+import config
 
 
 def separator(char="─", width=64):

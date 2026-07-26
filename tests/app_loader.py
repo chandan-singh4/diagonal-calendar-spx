@@ -93,6 +93,6 @@ def load_scanner_functions() -> dict:
 
     module = ast.Module(body=picked, type_ignores=[])
     ast.fix_missing_locations(module)
-    exec(compile(module, filename=str(APP_PATH), mode="exec"), namespace)  # noqa: S102
+    exec(compile(module, filename=str(APP_PATH), mode="exec"), namespace)
 
     return {n: namespace[n] for n in (*_WANTED_FUNCS, *_WANTED_CONSTS)}

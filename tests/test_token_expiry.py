@@ -55,7 +55,7 @@ def _load_token_helpers() -> dict:
     ns: dict = {"__builtins__": __builtins__}
     mod = ast.Module(body=picked, type_ignores=[])
     ast.fix_missing_locations(mod)
-    exec(compile(mod, filename=str(COLLECTOR_PATH), mode="exec"), ns)  # noqa: S102
+    exec(compile(mod, filename=str(COLLECTOR_PATH), mode="exec"), ns)
     return ns
 
 

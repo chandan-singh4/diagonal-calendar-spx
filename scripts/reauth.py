@@ -48,8 +48,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-import config  # noqa: E402
-import schwab_client  # noqa: E402
+import config
+import schwab_client
 
 # Schwab expires refresh tokens 7 days after the interactive login. Not
 # configurable by us — it is their policy.
