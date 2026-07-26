@@ -97,9 +97,10 @@ ignore = [
 # print-free but heavily procedural. These exemptions shrink as M2 progresses.
 "app.py" = ["E402", "T20"]
 "pages/journal.py" = ["E402", "T20"]
-"check_db.py" = ["T20"]          # it's a CLI report; printing is the point
-"scripts/*" = ["T20"]
-"migrations/*" = ["T20"]
+# CLI reports and migrations print by design; the sys.path shim at the top of
+# each forces imports below it (E402), which is intentional and commented.
+"scripts/*" = ["T20", "E402"]
+"migrations/*" = ["T20", "E402"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["config", "db", "iv_engine", "schwab_client", "collector"]

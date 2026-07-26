@@ -67,7 +67,8 @@ Priority: **P0** blocks the current milestone · **P1** next milestone · **P2**
 
 | ID | P | Item |
 |---|---|---|
-| OPS-001 | **P0** | **`register_collector_task.ps1` exists but was NEVER registered** — collection depends on manual start. A missed session is permanently lost data. |
+| ~~OPS-001~~ | ~~P0~~ | ~~`register_collector_task.ps1` was never registered — collection depends on manual start.~~ **CLOSED 2026-07-26 — the audit finding was wrong.** Auto-start has worked since 2026-06-22 via a **Startup folder shortcut** (`shell:startup` → `.venv\Scripts\python.exe collector.py`, working dir = project root). Verified: shortcut intact, all paths resolve, collector running continuously since the 7/16 logon with full 126-snapshot sessions daily. `DEV_JOURNAL.md` 2026-06-22 documents why Task Scheduler was rejected — the `.bat` was blocked by Windows Smart App Control and the PowerShell script failed without admin rights (reproduced 2026-07-26: `Register-ScheduledTask` and `schtasks /sc onlogon` both return Access Denied, because ONLOGON triggers require elevation). The Startup shortcut is the correct solution for this machine; do not replace it. |
+| OPS-001b | P1 | **No crash recovery for the collector.** The Startup shortcut starts it at logon but nothing restarts it if the process dies mid-session — the capability Task Scheduler's `RestartCount` would have provided. This is the *real* residual gap behind the original OPS-001 concern, and it is much smaller: a crash costs part of one session, not every session. Pairs with OPS-003. |
 | OPS-002 | **P0** | Backups now exist (M0.1) but are **manual**. Automate + rotate. |
 | OPS-003 | P1 | No collector liveness alerting — if it dies mid-session, only a staleness dot changes |
 | OPS-004 | P1 | Schwab token re-auth is a manual weekly copy-paste chore; needs a documented runbook |

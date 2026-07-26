@@ -2,7 +2,7 @@
 check_db.py — Quick database health check for the SPX Diagonal Collector.
 
 Run this anytime from a second terminal to see what the collector has gathered:
-    python check_db.py
+    python scripts/check_db.py
 
 Shows:
   - Total snapshots collected today and all-time
@@ -12,7 +12,16 @@ Shows:
 """
 
 import sqlite3
-import config
+import sys
+from pathlib import Path
+
+# This script lives in scripts/ but imports project modules from the repo root.
+# Prepend the root so `import config` resolves no matter where it is invoked
+# from. Removed in M2, when the project becomes an installed package and these
+# become plain `from spx_analyzer import ...` imports.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import config  # noqa: E402  (import must follow the sys.path shim above)
 
 
 def separator(char="─", width=64):

@@ -28,10 +28,18 @@ AFTER:
     (near-instant), exactly as designed.
 """
 
+import sys
 import time
+from pathlib import Path
 
-import config
-import db
+# This migration lives in migrations/ but imports project modules from the repo
+# root. Prepend the root so the imports below resolve regardless of the
+# invoking directory. Removed in M2, when the project becomes an installed
+# package.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import config  # noqa: E402  (imports must follow the sys.path shim above)
+import db      # noqa: E402
 
 
 COMMIT_EVERY = 200  # snapshots per commit — keeps WAL small, gives frequent progress

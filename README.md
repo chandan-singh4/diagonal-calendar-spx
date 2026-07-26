@@ -26,7 +26,7 @@ It answers two questions:
 
 > **On trading signals:** the dashboard deliberately offers **no validated entry signal**.
 > Metrics labelled `HYPOTHESIS` are displayed for observation only and are not wired into
-> any composite score or automatic rule. See [`decisions.md`](decisions.md) ADR-001 for why
+> any composite score or automatic rule. See [`decisions.md`](docs/decisions.md) ADR-001 for why
 > the project's original central claim was retracted rather than inverted.
 
 ---
@@ -73,6 +73,37 @@ lets both run concurrently. Either process can be restarted without affecting th
 | `app.py` | Streamlit dashboard (6 tabs) |
 | `pages/journal.py` | Trade journal: CRUD, lifecycle, P&L |
 | `config.py` | Central configuration from `.env` |
+
+### Project layout
+
+```
+spx-diagonal-dashboard/
+├── app.py                  Streamlit dashboard (6 tabs)
+├── pages/journal.py        Trade journal (Streamlit multipage)
+├── collector.py            Polling daemon — sole database writer
+├── db.py                   All SQL: schema, reads, writes
+├── iv_engine.py            Pure analytics — no I/O, no framework
+├── schwab_client.py        Schwab API wrapper
+├── config.py               Configuration from .env
+│
+├── data/                   Database, OAuth token  (gitignored)
+├── docs/                   Reference docs + project-management files
+├── scripts/                Operational tools (health check, task setup)
+├── migrations/             One-off database migrations
+├── .githooks/              pre-commit secret/large-file guard
+│
+├── pyproject.toml          Dependencies, lint/format/type config
+├── requirements.lock       Exact pinned versions (63 packages)
+└── start_collector.bat     Windows launcher
+```
+
+> **Why the source modules are still flat at the root:** decomposing them into a
+> `spx_analyzer/` package (`core/`, `data/`, `ui/`) is milestone **M2**, and it is
+> deliberately gated behind **M1**, the test suite. Moving modules rewrites every import,
+> and `app.py` cannot even be imported to verify — it executes the whole dashboard on
+> import. Doing that restructure with zero test coverage would be unverifiable in a tool
+> that computes real money. See [`docs/AUDIT_2026-07-25.md`](docs/AUDIT_2026-07-25.md)
+> §3.8 for the target layout.
 
 ---
 
@@ -151,12 +182,33 @@ streamlit run app.py
 **Health check:**
 
 ```bash
-python check_db.py               # snapshot counts, latest data, recorded gaps
+python scripts/check_db.py       # snapshot counts, latest data, recorded gaps
 ```
 
-> ⚠️ **A missed session is permanently lost data.** The collector currently depends on
-> being started manually. `register_collector_task.ps1` exists but has not been
-> registered — see [`backlog.md`](backlog.md) OPS-001.
+### Auto-start
+
+The collector starts automatically at every Windows logon via a **Startup folder
+shortcut** (`shell:startup` → `SPX Diagonal Collector.lnk`), pointing at
+`.venv\Scripts\python.exe` with `collector.py` as its argument and the project root as
+its working directory.
+
+Task Scheduler is deliberately *not* used: `start_collector.bat` is blocked by Windows
+Smart App Control, and registering an `ONLOGON` task requires Administrator rights.
+`register_collector_task.ps1` is retained only for a future machine where elevation is
+available — it is not the active mechanism.
+
+To verify auto-start is healthy:
+
+```powershell
+Get-ChildItem ([Environment]::GetFolderPath('Startup'))
+Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
+    Where-Object { $_.CommandLine -like '*collector.py*' }
+```
+
+> ⚠️ **A missed session is permanently lost data** — Schwab will not sell you Tuesday's
+> chain on Wednesday. Auto-start covers logon, but nothing restarts the collector if it
+> dies mid-session (see [`backlog.md`](docs/backlog.md) OPS-001b). Check `check_db.py`
+> occasionally.
 
 > ℹ️ **On Windows, one collector shows as two `python.exe` processes.** The `.venv`
 > launcher shim spawns the real interpreter as a child. Count pairs, not processes, and
@@ -187,14 +239,14 @@ against the source.
 
 | File | Contents |
 |---|---|
-| [`DOCUMENTATION.md`](DOCUMENTATION.md) | Strategy, metric definitions, dashboard reference, data architecture |
-| [`AUDIT_2026-07-25.md`](AUDIT_2026-07-25.md) | Engineering audit + roadmap |
-| [`plan.md`](plan.md) | Current implementation plan |
-| [`decisions.md`](decisions.md) | Engineering decision log (ADRs) |
-| [`backlog.md`](backlog.md) | Bugs, technical debt, enhancements |
-| [`progress_log.md`](progress_log.md) | Chronological development log |
-| [`handoff.md`](handoff.md) | Latest session handoff |
-| [`DEV_JOURNAL.md`](DEV_JOURNAL.md) | Detailed historical development journal |
+| [`DOCUMENTATION.md`](docs/DOCUMENTATION.md) | Strategy, metric definitions, dashboard reference, data architecture |
+| [`AUDIT_2026-07-25.md`](docs/AUDIT_2026-07-25.md) | Engineering audit + roadmap |
+| [`plan.md`](docs/plan.md) | Current implementation plan |
+| [`decisions.md`](docs/decisions.md) | Engineering decision log (ADRs) |
+| [`backlog.md`](docs/backlog.md) | Bugs, technical debt, enhancements |
+| [`progress_log.md`](docs/progress_log.md) | Chronological development log |
+| [`handoff.md`](docs/handoff.md) | Latest session handoff |
+| [`DEV_JOURNAL.md`](docs/DEV_JOURNAL.md) | Detailed historical development journal |
 
 > **Note:** `DOCUMENTATION.md` is the intended source of truth for strategy and metrics, but
 > has known drift from the code (see `backlog.md` DEBT-010). Reconciliation is scheduled for
@@ -206,7 +258,7 @@ against the source.
 
 Currently in a structured modernization effort. Roadmap: `M0` cleanup → `M1` test
 foundation → `M2` architecture refactor, then data hardening, API, and a dashboard
-decision. See [`plan.md`](plan.md).
+decision. See [`plan.md`](docs/plan.md).
 
 **Known limitations:**
 - No automated test coverage yet (M1)
