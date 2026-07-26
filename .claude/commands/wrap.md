@@ -27,7 +27,13 @@ Do not write from recollection. Check:
 
 - `git log --oneline` for this session, `git status`, current branch, whether merged/pushed
 - `docs/plan.md` — which tasks changed state
-- `docs/backlog.md` — items opened, closed, re-prioritised
+- `docs/backlog.md` — items opened, closed, re-prioritised. **Closing an item means DELETING
+  its row, not marking it fixed** (ADR-017). This file holds open work only; git keeps the
+  history (`git log -S "BUG-011" -- docs/backlog.md`). Never add a "Completed" section.
+  **Before deleting a row, ask: does closing this leave behind a lesson, a constraint, or a
+  ruled-out theory someone would otherwise re-derive months from now?** If yes, write a brief
+  plain-English ADR in `docs/decisions.md` first, and point the deleted row's successor at it.
+  If no, just delete it — most fixes need no memorial.
 - `docs/decisions.md` — decisions recorded
 - Anything left broken, unverified, or blocked on the user
 

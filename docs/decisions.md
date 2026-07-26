@@ -7,6 +7,111 @@ it was recorded here.
 
 ---
 
+## ADR-020 — The scanner "golden" test proves the numbers didn't change, not that they're right
+**Date:** 2026-07-26 · **Status:** ACCEPTED
+
+**In plain terms:** M2 is about to move the scanner's code to a new home. The danger isn't
+that it breaks loudly — you'd spot that. It's that it comes out *slightly* different, and
+you trade off a screen that quietly shifted, with nothing to compare against.
+
+So before touching it, we ran the current scanner over two real days of stored market data
+and saved exactly what it produced. After the move, the test replays the same days and
+demands the same answers.
+
+**What it does NOT say:** that today's answers are *correct*. Nobody has validated that yet
+— that's M6's job, checking the strategy against real logged results. Writing a test that
+claimed correctness would mean inventing an expectation and freezing a guess into the suite,
+which is worse than no test at all: it would *look* like validation while being none.
+
+**The rule that matters:** if that test ever goes red, it is doing its job. Either you meant
+to change the scanner — then re-run `scripts/capture_scanner_golden.py` and review the diff
+as a deliberate change — or you didn't, and it just caught the exact bug it exists to catch.
+**Re-capturing to make a red test go green throws the whole protection away.**
+
+**Known gap:** the saved days don't exercise the "estimate the price from the bid and ask"
+branch, so that part isn't protected yet (DEBT-014).
+
+---
+
+## ADR-019 — When putting tests around money code, pin the bugs; don't fix them in the same pass
+**Date:** 2026-07-26 · **Status:** ACCEPTED
+
+**In plain terms:** while writing tests for the profit-and-loss maths we found five real
+defects. We wrote tests that lock in the *current, wrong* behaviour and cross-referenced each
+to a backlog ID, rather than fixing them there and then.
+
+**Why, when fixing looks obviously better:** if you change the code and write its test in the
+same breath, a passing suite tells you nothing. You can't tell whether the test proved the
+code right or the code was quietly bent until the test went green. Doing it in two steps
+means the fix arrives as a visible, reviewable change to a test that already existed — and
+you can see the exact behaviour that changed.
+
+This matters most precisely where it's most tempting to skip: code that decides what a trade
+made. Applies to any future test-then-fix work on P&L, fills, or fees.
+
+---
+
+## ADR-018 — The collector "running twice" is one collector; stop investigating it
+**Date:** 2026-07-26 · **Status:** ACCEPTED — ruled out, do not re-open
+
+**In plain terms:** Task Manager shows two `python.exe` processes for the collector. It looks
+like it started twice. **It didn't — that's one collector.**
+
+The `python.exe` inside `.venv\Scripts\` isn't really Python. It's a small launcher (241 KB)
+created by the `uv` tool that turns around and starts the *real* Python (91 KB, kept under
+`AppData\Roaming\uv`) as a second process underneath it. Both show the same command line, and
+they appear a second or two apart, which is exactly what a genuine double-start would look
+like.
+
+**How it was confirmed:** the second process's parent is the first, and the two run different
+executables — checked with `Win32_Process` on `ParentProcessId` and `ExecutablePath`. There is
+also only one thing that ever launches it (a Startup-folder shortcut): no scheduled task, no
+registry Run entry.
+
+**Why this is written down:** this cost time twice — Chandan and an earlier session both tried
+to work out how to "stop one of them", and it was a suspected cause of the unexplained July
+issue (BUG-001). It is not. **BUG-001 remains open with no leads, and the duplicate is not a
+lead.** Seeing two entries in Task Manager is normal and healthy.
+
+Separately, a single-instance lock was added to `collector.py` — not to fix this non-problem,
+but because a *real* double-start (double-clicking the launcher while it's already running)
+was genuinely unguarded, and two collectors would poll twice and write overlapping data.
+
+---
+
+## ADR-017 — `backlog.md` holds only open items; git is the archive
+**Date:** 2026-07-26 · **Status:** ACCEPTED
+
+**In plain terms:** the backlog was growing forever. Fixed bugs stayed on the page, and a
+"Recently Completed" list grew at the bottom. Every session then paid attention — and tokens —
+re-reading things that no longer needed any.
+
+**Decision:** when an item is done, **delete its row.** The file's length now tracks work
+*outstanding*, not work *ever done*.
+
+**Why deleting is safe:** git already stores every past version of the file, so a closed
+item's full text is always recoverable:
+
+```
+git log -S "BUG-011" -- docs/backlog.md
+git show <sha>:docs/backlog.md
+```
+
+A separate archive file was considered and rejected — it would be a hand-maintained copy of
+something git already does perfectly, and it would grow forever too, just somewhere else.
+
+**The one real exception.** Git preserves *what* the row said, but not the thinking that made
+the fix make sense. If closing an item leaves a lesson, a constraint, or a ruled-out theory
+that would otherwise be painfully re-derived months later, write a short plain-English ADR
+here **before** deleting the row. ADR-018 is exactly that case: the bug row is gone, but
+without the note someone would spend another afternoon hunting a second collector that was
+never there.
+
+**Not changed:** `progress_log.md` is meant to be an append-only record of what happened, and
+`decisions.md` entries are immutable by design. Both are working as intended.
+
+---
+
 ## ADR-016 — Entry IV context must be decoupled from `option_rows` before any pruning
 **Date:** 2026-07-25 · **Status:** OPEN — blocks M3.2
 **Updated 2026-07-26 — severity downgraded, requirement unchanged.**
