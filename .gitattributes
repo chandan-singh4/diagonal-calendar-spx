@@ -1,0 +1,41 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# .gitattributes — line-ending and diff policy
+#
+# Added 2026-07-25 (M0.2). This repository has already been bitten once by a
+# Windows text-encoding accident: .gitignore was silently corrupted with
+# UTF-16LE bytes by PowerShell, leaving five runtime-state files tracked for
+# weeks. This file removes the remaining line-ending ambiguity.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Default: let Git normalise text in the repo, check out native on Windows.
+* text=auto
+
+# ── MUST be LF ───────────────────────────────────────────────────────────────
+# Shell scripts fail to execute with CRLF ("bad interpreter" / silent no-op).
+# The pre-commit hook is the secret guard — it must never be silently broken.
+.githooks/*     text eol=lf
+*.sh            text eol=lf
+.gitignore      text eol=lf
+.gitattributes  text eol=lf
+
+# ── MUST be CRLF ─────────────────────────────────────────────────────────────
+# Windows batch files can misbehave with LF endings.
+*.bat           text eol=crlf
+*.ps1           text eol=crlf
+
+# ── Python: LF in-repo, native on checkout ───────────────────────────────────
+*.py            text diff=python
+
+# ── Binary — never diff, never normalise ─────────────────────────────────────
+*.db            binary
+*.sqlite        binary
+*.sqlite3       binary
+*.docx          binary
+*.xlsx          binary
+*.png           binary
+*.jpg           binary
+*.ipynb         binary
+
+# ── Generated / vendored — collapse in diffs and language stats ──────────────
+requirements.lock  linguist-generated=true
+*.lock             linguist-generated=true

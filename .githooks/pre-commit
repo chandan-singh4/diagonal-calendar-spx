@@ -1,0 +1,74 @@
+#!/bin/sh
+# ─────────────────────────────────────────────────────────────────────────────
+# pre-commit — secret and large-file guard   (M0.3, 2026-07-25)
+#
+# Install with:   git config core.hooksPath .githooks
+#
+# Why this exists: .gitignore was silently corrupted (UTF-16LE bytes appended
+# by PowerShell) for weeks, during which five runtime-state files were tracked
+# without anyone noticing. .env sits in the working tree with live Schwab
+# credentials. A .gitignore regression must not be the only thing standing
+# between those credentials and a commit.
+# ─────────────────────────────────────────────────────────────────────────────
+
+fail=0
+staged=$(git diff --cached --name-only --diff-filter=ACM)
+[ -z "$staged" ] && exit 0
+
+# ── 1. Never-commit filenames ────────────────────────────────────────────────
+for f in $staged; do
+    case "$f" in
+        .env|.env.*)
+            [ "$f" = ".env.example" ] && continue
+            echo "BLOCKED: $f contains live credentials."; fail=1 ;;
+        *token*.json|data/token.json)
+            echo "BLOCKED: $f is an OAuth token."; fail=1 ;;
+        *.db|*.sqlite|*.sqlite3|*.db-wal|*.db-shm)
+            echo "BLOCKED: $f is a database. Market data is backed up out-of-tree, not versioned."; fail=1 ;;
+        *.log)
+            echo "BLOCKED: $f is a log file (rotates; would churn every commit)."; fail=1 ;;
+        eligible_history.json|entry_locks.json|chart_colors.json|pinned_pairs.json)
+            echo "BLOCKED: $f is machine-generated runtime state."; fail=1 ;;
+    esac
+done
+
+# ── 2. Credential-shaped content ─────────────────────────────────────────────
+# Schwab keys are 32-char alphanumerics. Match assignments to long literals,
+# but allow the placeholders in .env.example.
+for f in $staged; do
+    case "$f" in
+        .env.example|.githooks/*) continue ;;
+    esac
+    [ -f "$f" ] || continue
+    if git show ":$f" 2>/dev/null | grep -qE '(APP_KEY|APP_SECRET|SECRET|PASSWORD|access_token|refresh_token)[[:space:]]*[=:][[:space:]]*["'\'']?[A-Za-z0-9_-]{20,}'; then
+        echo "BLOCKED: $f looks like it contains a hardcoded credential."
+        fail=1
+    fi
+done
+
+# ── 3. Large files ───────────────────────────────────────────────────────────
+for f in $staged; do
+    [ -f "$f" ] || continue
+    size=$(wc -c < "$f" 2>/dev/null || echo 0)
+    if [ "$size" -gt 1048576 ]; then
+        echo "BLOCKED: $f is $((size / 1024)) KB (>1 MB). Generated artifact?"
+        fail=1
+    fi
+done
+
+# ── 4. .gitignore encoding guard (the original defect) ───────────────────────
+case "$staged" in
+    *.gitignore*)
+        if git show ":.gitignore" | od -An -tx1 | grep -q ' 00'; then
+            echo "BLOCKED: .gitignore contains NULL bytes - it was written as UTF-16."
+            echo "         Rewrite as UTF-8. From PowerShell use: -Encoding utf8"
+            fail=1
+        fi ;;
+esac
+
+if [ "$fail" -ne 0 ]; then
+    echo ""
+    echo "Commit rejected. Override only if you are certain:  git commit --no-verify"
+    exit 1
+fi
+exit 0
