@@ -1,20 +1,20 @@
 # plan.md — Current Implementation Plan
 
 **Last updated:** 2026-07-26
-**Current milestone:** M0 — Stabilize & Clean
-**Status:** ✅ COMPLETE (2026-07-26). Next: M1 — Test Foundation.
+**Current milestone:** M1 — Test Foundation
+**Status:** 🔄 IN PROGRESS (started 2026-07-26). M0 ✅ COMPLETE and merged to `main`.
 **Reference:** [`AUDIT_2026-07-25.md`](AUDIT_2026-07-25.md) §10 for the full roadmap
 
 ---
 
 ## Where we are
 
-Phase 1 (audit) is complete and approved. We are executing **M0**, the first of three
-milestones on the critical path:
+Phase 1 (audit) is complete and approved. M0 is done and merged. We are executing **M1**,
+the second of three milestones on the critical path:
 
 ```
 M0 Cleanup ──► M1 Tests ──► M2 Refactor ──┬──► M3 Data Hardening ──► M8 Deployment
-   ▲ YOU ARE HERE                         ├──► M4 API ──► M5 Dashboard (gated at 5.0)
+      done      ▲ YOU ARE HERE             ├──► M4 API ──► M5 Dashboard (gated at 5.0)
                                           └──► M6 Analytics ──► M7 ML (gated on trades)
 ```
 
@@ -48,19 +48,45 @@ migration, no analytics until the foundation exists.
 
 ---
 
+## M1 — Test Foundation
+
+**Goal:** be able to change code and know whether it still works. No behaviour change,
+except where a test uncovers a defect worth fixing immediately.
+**Exit criteria:** ~70% coverage of non-UI code, the money maths covered, scanner output
+frozen before M2 moves it, and checks that run without being remembered.
+
+| # | Task | Status | Notes |
+|---|---|---|---|
+| 1.1 | pytest + pytest-cov installed; `tests/` established | ✅ Done | Config already existed in `pyproject.toml` from M0.5. No fixture touches `data/dashboard.db`. |
+| 1.2 | `iv_engine.py` unit tests | ✅ Done | 73 tests, **100% statement coverage**. Mutation-verified: 3 injected faults produced 6 failures. Also pins 3 decisions — no favorability claim, no framework imports (AST-checked), M0.11 removals stay removed. Found BUG-006, BUG-007. |
+| 1.3 | Journal P&L maths (`resolved_pl`, `ic_expiry_pnl_per_share`, `derive_ic`, `compute_stats`) | ✅ Done | 53 tests. All 5 condor payoff regions + a cent either side of all 4 strikes. Asserts `resolved_pl` and `auto_final_pl` agree. Mutation-verified. Found BUG-009…013; **BUG-011 and BUG-012 fixed** (see ADR-021). |
+| 1.4 | Scanner golden/characterization net before M2 | ✅ Done | 14 tests over 2 real snapshots (2608, 2482) captured read-only. Asserts no correctness — only that M2 changes nothing. Mutation-verified. **Known gap: DEBT-014**, the bid/ask fallback branch is not protected. |
+| 1.5 | `db.py` tests (temporary SQLite DB, `integration` marker) | ⬜ Not started | **Next.** Everything reads through it and it has no tests. Marker already declared in `pyproject.toml`. |
+| 1.6 | `collector.py` tests — session logic, gap classification | ⬜ Not started | Gap classifier is BUG-005; test it *before* fixing so the fix is a visible diff (ADR-019). |
+| 1.7 | `schwab_client.py` tests — chain filtering, strike window | ⬜ Not started | Needs a fake API response fixture; no live calls. |
+| 1.8 | Reach ~70% coverage of non-UI code | 🔄 Partial | `iv_engine` 100%; `db.py`/`collector.py`/`schwab_client.py` at 0%. |
+| 1.9 | Checks that run on every save/commit without being remembered | ⬜ Not started | `.githooks/pre-commit` exists from M0.3 but only blocks secrets — it does not run the tests. |
+
+**Scaffolding with an expiry date:** `tests/journal_loader.py` and `tests/app_loader.py` pull
+functions out of Streamlit scripts via AST so they can be tested without launching a page or
+touching the database. Both are **deleted at M2**, when the extracted modules can simply be
+imported. Both raise rather than guess if a target moves.
+
+---
+
 ## Immediate next actions
 
-1. **Commit the M0 work** — everything is currently staged/unstaged, nothing committed.
-   Decide commit granularity (recommendation: 3 commits — hygiene, tooling/docs,
-   dead-code removal — so `git log` stays readable).
-2. **Tag `v4.2`** once committed (0.14).
-3. **Approve collector scheduled-task registration** (0.13) — modifies the system, so
-   it needs explicit sign-off. This is the highest-consequence operational gap open:
-   a missed session is permanently lost data.
-4. **Decide on BUG-005** (gap misclassification) — fix now or defer to M3. It blocks
-   M3.4 liveness alerting.
-5. Then begin **M1 — Test Foundation**, starting with `iv_engine.py` (pure, already
-   isolated, and now free of dead code).
+1. **M1.5 — test `db.py`.** Highest value remaining: every other module reads through it,
+   and it has no tests at all. Use a temporary SQLite database per test (the `integration`
+   marker is already declared); never the real one.
+2. **M1.9 — make the checks run themselves.** They currently only run when someone
+   remembers to type the command, which is the failure mode M1 exists to remove.
+3. **M1.6 — test `collector.py`**, covering the gap classifier *before* fixing BUG-005, so
+   the fix lands as a visible change to an existing test (ADR-019).
+4. **Close DEBT-014** — capture a scanner fixture whose near-the-money rows have no stored
+   price, so the bid/ask fallback is actually protected before M2 moves it.
+5. **Still blocked on the user: BUG-001.** The duplicate-collector theory is dead (ADR-018).
+   Needs a symptom, a tab, and a screenshot.
 
 ---
 

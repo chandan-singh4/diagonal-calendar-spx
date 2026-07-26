@@ -5,6 +5,73 @@ what broke, and what remains.
 
 ---
 
+## 2026-07-26 — M0 merged; M1 Test Foundation begun (0 → 140 tests)
+
+### Completed
+
+**M0 merged to `main` and pushed.** Fast-forward from `bfc78c0` to `f76d2c2`; `main` now at
+`c0180e3`. Working tree clean.
+
+**M1.1–1.4 — the test foundation exists.** 140 tests, all passing:
+- `iv_engine.py` — 73 tests, 100% statement coverage
+- Journal P&L maths — 53 tests
+- Scanner golden net — 14 tests over 2 real snapshots
+
+Every suite was **mutation-verified** rather than trusted on its pass count: deliberate faults
+were injected and the suites required to catch them. Source files were restored byte-identical
+afterwards (confirmed via `git diff --stat`).
+
+**Single-instance lock added to `collector.py`** — an OS file lock, so it cannot go stale.
+
+**BUG-011 and BUG-012 fixed** (ADR-021), pinned first and fixed second per ADR-019. Both
+verified load-bearing by reverting them and watching the tests fail.
+
+**Documentation policy changed (ADR-017):** `backlog.md` now holds open items only. Closing an
+item deletes its row; git is the archive. `/wrap` enforces it. `progress_log.md` deliberately
+unchanged — append-only is correct here.
+
+### Discovered
+
+**The "two collectors" is one collector** (ADR-018). The `python.exe` inside `.venv\Scripts\`
+is a `uv` trampoline (241 KB) that re-execs the real interpreter (91 KB, under
+`AppData\Roaming\uv\`) as a child process. Confirmed via `Win32_Process` `ParentProcessId` +
+`ExecutablePath`; only one launcher exists. **This was a suspected cause of BUG-001 and is not
+— BUG-001 stays open with no leads.** It had already cost Chandan and an earlier session real
+time; now written down so it costs nobody again.
+
+**Seven defects found by the new tests:** BUG-006, BUG-007 (from `iv_engine`), BUG-009…013
+(from the journal maths). Five remain open; the two material ones are fixed.
+
+**A mutation that did NOT fail** — DEBT-014. Altering the bid/ask midpoint formula in the
+scanner changed nothing, because although 77 of 3,096 rows use that branch, none reach the
+top-50 output. The golden net therefore does not protect it. Recorded rather than glossed over.
+
+### What broke
+
+**Data loss, self-inflicted.** `git checkout main` silently overwrote the live untracked
+`eligible_history.json`, `entry_locks.json` and `chart_colors.json` with their last-committed
+versions (gitignored files are overwritten without warning), and the subsequent merge deleted
+them. Restored from `bfc78c0` — dated **10 July** — so roughly two weeks of accumulated scanner
+history and any entry locks placed since are gone. The M0 backup is database-only, so no better
+copy existed. `data/dashboard.db` was never at risk. `collector.log` was backed up beforehand
+and is intact.
+
+**Lesson:** before any branch switch in this repo, copy the untracked runtime JSON aside. Those
+files are gitignored *and* tracked on older commits, which is the exact combination git handles
+destructively without prompting.
+
+**Collector stopped and restarted** (with permission) to release a file lock on `collector.log`
+that blocked the merge. Markets were closed, so nothing was missed. One restart-gap row was
+logged — an instance of BUG-005, recorded as BUG-008.
+
+### Remains
+
+M1.5 `db.py` tests (next — everything reads through it, no coverage), M1.6 `collector.py`,
+M1.7 `schwab_client.py`, M1.8 the ~70% target, M1.9 checks that run without being remembered.
+DEBT-014. BUG-001 still blocked on the user.
+
+---
+
 ## 2026-07-25 — Phase 1 Audit + M0 Stabilization (in progress)
 
 ### Completed
