@@ -610,6 +610,65 @@ def _run_cycle(client, db_path: str, session: str, poll_interval: int) -> int:
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Schwab token expiry warning
+#
+# Schwab expires the refresh token 7 days after the interactive login, and there
+# is nothing this code can do about that — renewing it needs a browser login and
+# a copy-pasted redirect URL, by design.
+#
+# What this code CAN do is stop the expiry being a surprise. Until 2026-07-26 the
+# collector only noticed after the fact: the token lapsed, calls started failing,
+# and a whole session's prices were lost before anyone looked at the log. These
+# warnings fire while there is still time to act.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_REFRESH_TOKEN_LIFETIME_DAYS = 7.0
+_TOKEN_WARN_AFTER_DAYS       = 6.0    # ~1 day of warning
+_TOKEN_CHECK_INTERVAL_SEC    = 3600   # hourly; the value only moves on a re-login
+
+
+def token_days_remaining(age_days: float | None) -> float | None:
+    """Days left on the refresh token, or None if the age is unknown.
+
+    Split out as a pure function so it is testable without a token file, a
+    clock, or the Schwab API.
+    """
+    if age_days is None:
+        return None
+    return _REFRESH_TOKEN_LIFETIME_DAYS - age_days
+
+
+def _check_token_expiry() -> None:
+    """Log a warning when the Schwab token is close to expiring, or has expired."""
+    try:
+        age = schwab_client.get_token_age_days()
+    except Exception:  # noqa: BLE001 — a broken check must never stop collection
+        return
+
+    remaining = token_days_remaining(age)
+    if remaining is None:
+        logger.warning(
+            "No Schwab token found. Run `python scripts/reauth.py` to log in."
+        )
+        return
+
+    if remaining <= 0:
+        logger.critical(
+            "SCHWAB TOKEN EXPIRED %.1f days ago — data collection will fail until you "
+            "run `python scripts/reauth.py`. This needs a browser login and cannot be "
+            "automated.", abs(remaining),
+        )
+    elif age >= _TOKEN_WARN_AFTER_DAYS:
+        logger.warning(
+            "Schwab token expires in %.1f days (%.1f days old). Run "
+            "`python scripts/reauth.py` before then to avoid losing a session.",
+            remaining, age,
+        )
+    else:
+        logger.info("Schwab token OK — %.1f days remaining.", remaining)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Single-instance guard
 #
 # WHY THIS EXISTS (2026-07-26): two collectors were found running side by side,
@@ -744,9 +803,11 @@ def main() -> None:
     logger.info("=" * 62)
 
     _check_startup_gap(db_path)
+    _check_token_expiry()
 
     client               = None
     consecutive_failures = 0
+    last_token_check     = time.monotonic()
     prev_snapshot_ts: str | None = None
 
     while True:
@@ -766,6 +827,13 @@ def main() -> None:
         poll_interval    = _poll_interval(session)
         cycle_start_mono = time.monotonic()
 
+        # Re-check the token roughly hourly. The value only moves on a re-login,
+        # so this is cheap; the point is that a collector left running for days
+        # keeps warning, rather than warning once at startup and going quiet.
+        if cycle_start_mono - last_token_check >= _TOKEN_CHECK_INTERVAL_SEC:
+            _check_token_expiry()
+            last_token_check = cycle_start_mono
+
         # ── Authenticate (lazy; re-init after auth failures) ─────────────────
         if client is None:
             logger.info("Authenticating with Schwab...")
@@ -775,8 +843,9 @@ def main() -> None:
             except Exception as auth_err:
                 logger.error("Authentication failed: %s", auth_err)
                 logger.info(
-                    "Retrying in %ds. If this persists, delete data/token.json "
-                    "and re-run the OAuth flow.", _AUTH_RETRY_SECONDS
+                    "Retrying in %ds. If this persists the 7-day refresh token has "
+                    "expired: run `python scripts/reauth.py` (an interactive browser "
+                    "login — it cannot be done from here).", _AUTH_RETRY_SECONDS
                 )
                 time.sleep(_AUTH_RETRY_SECONDS)
                 continue

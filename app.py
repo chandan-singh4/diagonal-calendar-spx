@@ -2384,7 +2384,7 @@ if _token_age is not None and _token_age >= 6:
             """<div class="spx-token-emergency">
 🚨 SCHWAB TOKEN EXPIRED — Collector is offline. Re-authenticate now:<br>
 <code style="background:rgba(0,0,0,0.3);padding:2px 6px;border-radius:3px;">
-python -c "import schwab_client; schwab_client.get_client()"
+python scripts/reauth.py
 </code>
 </div>""",
             unsafe_allow_html=True,
@@ -2395,7 +2395,7 @@ python -c "import schwab_client; schwab_client.get_client()"
 ⚠️ Schwab API token expires <strong>tomorrow</strong>.
 Re-authenticate today to avoid collector downtime:<br>
 <code style="background:rgba(0,0,0,0.25);padding:2px 6px;border-radius:3px;">
-python -c "import schwab_client; schwab_client.get_client()"
+python scripts/reauth.py
 </code>
 </div>""",
             unsafe_allow_html=True,
