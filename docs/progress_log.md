@@ -5,6 +5,83 @@ what broke, and what remains.
 
 ---
 
+## 2026-07-26 (session 3) — BUG-005 and BUG-002 closed; M1.6 begun (274 → 329 tests)
+
+### Completed
+
+**BUG-005 closed (ADR-024) — gaps are now classified by market minutes missed.** One
+measurement, `market_minutes_between()`, replaces three heuristics: sum the overlap with the
+09:30–16:00 ET session of every trading day the gap touches. A gap is routine if and only if
+nothing was collectable during it. 38 tests, pinned before the fix (ADR-019), mutation-verified
+on an isolated copy — 23 of 24 caught, the survivor a proven equivalent mutant.
+
+**BUG-002 closed — the Selected-Strike IV chart no longer draws across holidays.** The backlog
+called it a one-line fix; it is two — the call (`cm`) and put (`pm`) frames both needed
+`_break_sessions()`, applied *after* the ratio column so the breaker rows carry NaN there too.
+17 tests, including a guard that the wiring cannot be silently removed again, because the helper
+itself was correct all along and a unit test of it would have stayed green through the bug's
+entire life.
+
+**Historical gap rows reclassified.** `migrations/reclassify_collection_gaps.py`, run after a
+dry run: 19 of 47 rows corrected to MARKET_CLOSED. Idempotent, refuses to write without a
+verified backup, and appends previous values to `notes` rather than overwriting. Integrity
+`ok` afterwards; snapshots and option rows untouched.
+
+### Discovered — the write-up was wrong in three ways
+
+Writing the pinning tests first, and reading the caller rather than trusting the backlog, turned
+up more than the recorded defect.
+
+**1. The recorded number was wrong.** BUG-005 said a Friday-to-Monday weekend is misfiled at
+2,611 minutes. It is 3,931, which trips the crude `> 3,600 minutes` rule and comes out *right by
+accident*. The genuinely misfiled weekend is a restart **during** the weekend — which is exactly
+what `check_db.py` printed at the start of this session.
+
+**2. The same rules hid real data loss — the direction nobody had recorded.** A collector dead
+from Monday lunchtime to Thursday lunchtime loses three trading days and was labelled
+MARKET_CLOSED, then **suppressed**: `_check_startup_gap()` returns early on routine verdicts and
+writes nothing. The worst data-loss event this system can suffer left no trace. The holiday scan
+did the same to any long outage containing a holiday. M3.4 plans liveness alerting on this
+classifier — it was blind to its own primary case. That inverts the severity: BUG-005 was filed
+as "the alarm is noisy"; it was also deaf.
+
+**3. `_classify_gap()` was not even the main culprit.** It is only reached from
+`_check_startup_gap()`, which runs once per collector *start* — and the collector has run
+continuously since 2026-07-16. The detector that fires constantly is the mid-session one in
+`main()`, which **hardcoded `reason="COLLECTOR_OFFLINE"` and never called the classifier**, and
+`prev_snapshot_ts` is not cleared when the market closes. Every trading morning it compared
+against 15:59 the previous day and wrote a false row. **A fix aimed only at `_classify_gap()` —
+which is what the backlog prescribed — would have left the largest source of bad rows untouched
+and looked successful.**
+
+**4. A fourth defect, found only by running the fix against real data.** With the classifier
+fixed, 22 of 47 rows were still faults, all ~5 minutes at 15:25–15:31 ET. At 15:30 the cadence
+changes from 300s to 60s, so an ordinary MIDDAY interval was judged against the new 60s
+threshold (5.0 > 2.5) and recorded as a stall — every trading day, more rows than the overnight
+bug produced. The threshold now uses the slower of the two cadences. General lesson: compare a
+threshold against the cadence that *produced* the data, not the one in force when the comparison
+runs.
+
+**The stored damage figures were nonsense.** `expected_snapshots_lost` totalled **19,759 across
+47 rows — more than the database has ever held (2,605)**, because it was computed from wall
+clock rather than market time. The truthful total is 145.
+
+**Streamlit binds 0.0.0.0 (OPS-006).** Noticed while smoke-testing the dashboard after the
+BUG-002 edit: startup advertises a Network URL and an External URL. It is reachable from the LAN
+today, before any Tailscale work. OPS-006 updated from "confirm" to "confirmed, and it does not".
+
+### Notes
+
+- Full suite: **329 passing** (274 before, +55). Suite runs on every commit via the M1.9 hook.
+- BUG-002 verified against real data, not only by unit test: the 2026-07-07 7355C contract
+  jumps IV 0.1109 → 0.2036 across the 3 July holiday, which was being drawn as a smooth line.
+  The dashboard was also started headless to confirm the edited page still loads.
+- Open bugs: 11 → 8. BUG-008 was deleted alongside BUG-005 — it was explicitly an instance of
+  it ("startup gap logged on every restart") and is fixed by the same change.
+- **Not pushed.** `origin/main` is still at `eac2461`.
+
+---
+
 ## 2026-07-26 (session 2) — M1.5 + M1.9: `db.py` tested, checks now automatic, 3 bugs fixed (151 → 274 tests)
 
 ### Completed

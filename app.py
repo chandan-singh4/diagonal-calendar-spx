@@ -4044,6 +4044,12 @@ if st.session_state["active_tab"] == "strike":
                         on="timestamp", how="inner",
                     )
                     cm["call_ratio"] = cm["f_call"] / cm["b_call"]
+                    # BUG-002: without this the three call traces draw a
+                    # straight connector across holidays, weekends and collector
+                    # outages, inventing IV movement that never happened. Must
+                    # come AFTER call_ratio is computed so the inserted breaker
+                    # rows carry NaN in the ratio column too. (ADR-006)
+                    cm = _break_sessions(cm)
                     fig_str.add_trace(go.Scatter(
                         x=cm["timestamp"], y=cm["f_call"],
                         name=f"Front {call_strike:.0f}C",
@@ -4063,6 +4069,7 @@ if st.session_state["active_tab"] == "strike":
                         on="timestamp", how="inner",
                     )
                     pm["put_ratio"] = pm["f_put"] / pm["b_put"]
+                    pm = _break_sessions(pm)      # BUG-002, as above
                     fig_str.add_trace(go.Scatter(
                         x=pm["timestamp"], y=pm["f_put"],
                         name=f"Front {put_strike:.0f}P",

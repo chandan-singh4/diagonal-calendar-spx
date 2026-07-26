@@ -30,7 +30,7 @@ APP_PATH = Path(__file__).resolve().parent.parent / "app.py"
 # Decorators that are safe to strip because they cannot change a return value.
 _PURE_MEMOISERS = ("st.cache_data", "st.cache_resource")
 
-_WANTED_FUNCS = ("_compute_transform_scanner", "_scan_all_offsets")
+_WANTED_FUNCS = ("_compute_transform_scanner", "_scan_all_offsets", "_break_sessions")
 
 # Module-level constants the scanner reads (e.g. _SWEEP_OFFSETS default).
 _WANTED_CONSTS = ("_SWEEP_OFFSETS",)

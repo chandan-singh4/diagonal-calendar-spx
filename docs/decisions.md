@@ -7,6 +7,85 @@ it was recorded here.
 
 ---
 
+## ADR-024 — Measure the market minutes missed; stop guessing from the clock
+**Date:** 2026-07-26 · **Status:** ACCEPTED · **Closes:** BUG-005
+
+**In plain terms:** the collector only works when the market is open, so every night and
+weekend there is a quiet period. Something has to decide whether a quiet period was normal or
+whether the collector actually broke. It was deciding by looking at the clock and guessing. Now
+it counts how many minutes of *open market* fall inside the gap. If the answer is zero, nothing
+could have been collected and nothing was lost.
+
+**Decision:** one function, `market_minutes_between()`, replaces three heuristics. It sums the
+overlap of the gap with the 09:30–16:00 ET session of every trading day it touches; weekends
+and holidays contribute nothing because they are not trading days. A gap is routine if and only
+if it cost fewer than 3 market minutes.
+
+**Why a 3-minute tolerance rather than zero.** It absorbs the collector's own cadence at the
+session edges, and nothing else: the last write of the day lands at 15:59:xx (up to ~1.0 min
+before the close) and the first of the morning at 09:30–09:31 (up to ~1.0 min after the open).
+Worst case ~2.0 minutes that no configuration could have collected. 3.0 leaves margin without
+masking anything meaningful — a genuine outage costing under 3 market minutes is less than one
+MIDDAY poll cycle. Pinned by a boundary test so the constant cannot drift unnoticed.
+
+### What was actually wrong — three defects, two of them unrecorded
+
+The backlog described BUG-005 as "cries wolf": every routine gap reported as a fault. True, and
+the least of it.
+
+**1. False positives (recorded).** `start.time() >= 16:00 and end.time() < 09:30` never passed,
+because the collector writes at 15:59 and restarts at 09:30–09:31. Every ordinary night was a
+"fault".
+
+**2. False negatives (NOT recorded — the dangerous direction).** `gap_minutes > 3600 →
+MARKET_CLOSED` assumed any gap over 60 hours was a weekend. A collector dead from Monday
+lunchtime to Thursday lunchtime loses three full trading days and was labelled routine — then
+**suppressed**, because `_check_startup_gap()` returns early on routine verdicts and writes
+nothing. The worst data-loss event this system can suffer left no trace at all. The holiday scan
+did the same: any holiday anywhere inside a long gap labelled the whole outage HOLIDAY.
+
+This inverts the severity. M3.4 plans liveness alerting on this classifier; the alarm was blind
+to its own primary case. A noisy alarm is annoying, a blind one is worse than none.
+
+**3. The classifier was not even the main culprit (NOT recorded).** `_classify_gap()` is only
+reached from `_check_startup_gap()`, which runs once per collector *start* — and the collector
+has run continuously since 2026-07-16. The detector that fires constantly is the mid-session one
+in `main()`, which **hardcoded `reason="COLLECTOR_OFFLINE"` and never called the classifier at
+all**. Since `prev_snapshot_ts` is not cleared when the market closes, the first cycle of every
+trading morning compared against 15:59 the previous day and wrote a false row. Extracted to
+`_midsession_gap_reason()` and routed through the classifier.
+
+**Method note worth keeping:** defects 2 and 3 were found by writing the pinning tests *before*
+the fix (ADR-019) and by reading the caller rather than trusting the write-up. Defect 3 in
+particular means a fix aimed only at `_classify_gap()` — which is what the backlog prescribed —
+would have left the largest source of bad rows untouched and looked successful.
+
+### A fourth defect, found by running the fix against real data
+
+Running the fixed classifier over the actual `collection_gaps` rows showed 22 of 47 still
+labelled faults, all ~5 minutes at 15:25–15:31 ET. At 15:30 MIDDAY becomes CLOSE and the cadence
+changes from 300s to 60s — so an ordinary 5-minute MIDDAY interval was judged against the new
+60-second threshold (5.0 > 2.5) and recorded as a stall. Every trading day. That is more rows
+than the overnight misclassification produced. The threshold now uses the **slower of the two
+cadences**.
+
+**Generalisation:** a threshold must be compared against the cadence that produced the data, not
+the cadence in force when the comparison happens.
+
+### Historical rows
+
+`migrations/reclassify_collection_gaps.py` re-ran the fixed classifier over the existing rows:
+19 of 47 reclassified to MARKET_CLOSED. The stored "snapshots lost" figures totalled **19,759 —
+more than the database has ever held (2,605)**; the truthful total is 145. Previous values are
+appended to `notes` rather than overwritten, so the migration is self-documenting and
+reversible. It is idempotent and refuses to write without a verified backup.
+
+**Not done, deliberately:** the ~22 session-change artefact rows are left in place. They record
+non-events and arguably should be deleted, but removing rows from an audit log is a judgement
+call, not a migration's business. Logged as OPS-008 for a deliberate decision.
+
+---
+
 ## ADR-023 — Trade IDs are never reused, and a valuation is withheld rather than guessed
 **Date:** 2026-07-26 · **Status:** ACCEPTED
 
