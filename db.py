@@ -394,7 +394,32 @@ def finalize_snapshot(db_path: str,
 def insert_option_rows(db_path: str, rows: list[dict]) -> int:
     """
     Bulk-insert option rows for a snapshot in a single transaction.
-    Either all rows commit or none do. Returns the number of rows inserted.
+    Returns the number of rows ACTUALLY STORED, which may be fewer than were
+    offered — see the warning below.
+
+    ON THE `OR IGNORE` (ADR-004, revised by ADR-022 — DEBT-008)
+      `INSERT OR IGNORE` was chosen to absorb duplicate contracts. It is NOT
+      scoped to uniqueness: SQLite applies the conflict clause to every
+      constraint on the statement, so a CHECK or NOT NULL violation ALSO skips
+      the row instead of raising.
+
+      This function used to return len(rows), computed before the statement
+      ran. A row silently discarded by the database was therefore reported to
+      the caller as stored. If Schwab ever changed its `right` convention from
+      'C' to 'CALL', every row would be dropped, this would return 3,096, and
+      the log would record a healthy cycle indefinitely — while the prices, of
+      course, would be gone for good.
+
+      So: compare cursor.rowcount against what was offered and log any
+      shortfall as a WARNING. This does not change what gets stored. It only
+      makes a loss that was previously silent and permanent visible in
+      collector.log. Deciding per-constraint behaviour (keep OR IGNORE for
+      genuine duplicates, raise on everything else) remains M3.6 work.
+
+      NOTE: the collector currently discards this return value and records
+      `strikes_fetched = len(option_rows)` — the offered count, not the stored
+      one. That reporting path is still optimistic; the warning logged here is
+      what actually surfaces the problem today.
     """
     if not rows:
         return 0
@@ -413,8 +438,17 @@ def insert_option_rows(db_path: str, rows: list[dict]) -> int:
         )
     """
     with managed_conn(db_path) as conn:
-        conn.executemany(sql, rows)
-    return len(rows)
+        inserted = conn.executemany(sql, rows).rowcount
+
+    if inserted < len(rows):
+        logger.warning(
+            "insert_option_rows: %d of %d rows were DISCARDED by the database "
+            "(snapshot_id=%s). A duplicate contract is benign; anything else is "
+            "silent data loss — see DEBT-008 / ADR-022.",
+            len(rows) - inserted, len(rows), rows[0].get("snapshot_id"),
+        )
+
+    return inserted
 
 
 def insert_atm_iv_records(db_path: str, records: list[dict]) -> None:

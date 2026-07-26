@@ -173,3 +173,40 @@ def journal():
     from journal_loader import load_journal_functions
 
     return load_journal_functions()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Temporary database fixtures (db.py — M1.5)
+#
+# The module docstring above states the rule: no fixture may touch
+# data/dashboard.db. db.py is the one module that cannot be tested purely in
+# memory, so it gets a throwaway file under pytest's tmp_path instead — a fresh
+# directory per test, deleted by pytest afterwards.
+#
+# The guard in temp_db() is not ceremony. Several db.py functions default to
+# config.DB_PATH when db_path is None (get_conn, init_db), so a single missing
+# argument in a future test would silently point the suite at 1.4 GB of
+# irreplaceable production history. The assert makes that a loud failure.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def temp_db(tmp_path) -> str:
+    """An initialised, empty database at a throwaway path. Returns the path."""
+    import config
+    import db
+
+    path = tmp_path / "test_dashboard.db"
+    assert path.resolve() != Path(config.DB_PATH).resolve(), (
+        "temp_db resolved to the PRODUCTION database path — refusing to run"
+    )
+    db.init_db(str(path))
+    return str(path)
+
+
+@pytest.fixture
+def trades_db(temp_db) -> str:
+    """temp_db with the trades table created as well (journal.py's schema)."""
+    import db
+
+    db.init_trades_table(temp_db)
+    return temp_db
