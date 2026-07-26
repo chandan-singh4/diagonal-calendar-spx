@@ -337,22 +337,59 @@ def test_compute_stats_all_winners_gives_no_profit_factor(journal):
     assert s["Average Loser"] is None
 
 
-def test_compute_stats_counts_a_breakeven_trade_as_a_loss(journal):
-    """FINDING (M1.3, 2026-07-26): P&L of exactly 0 is classified as a loser.
+def test_compute_stats_excludes_a_breakeven_trade_from_the_loss_average(journal):
+    """BUG-011 fixed 2026-07-26: a scratch trade is no longer counted as a loss.
 
-    compute_stats splits on `p > 0` for wins and `p <= 0` for losses, so a
-    scratch trade drags the win rate down AND enters Average Loser as a zero,
-    diluting the average loss toward zero — which flatters Profit Factor and
-    Expectancy at the same time.
+    A P&L of exactly 0 is neither a win nor a loss. It used to enter the loss
+    list as a zero and pull Average Loser toward zero, understating the typical
+    loss. It still counts in the win-rate denominator — it is a completed trade
+    that was not won.
 
     Reachable in practice: a Transformed trade whose locked credit exactly
-    offsets its assignment cost. Pinned; see backlog BUG-011.
+    offsets its assignment cost.
     """
     scratch = make_trade(trade_id=1, status="Closed", profit_locked_in=None, final_pl=0.0)
-    winner = make_trade(trade_id=2, spx_at_expiry=6000.0)
-    s = journal["compute_stats"]([scratch, winner])
-    assert s["Win Rate"] == pytest.approx(50.0)      # not 100%
-    assert s["Average Loser"] == pytest.approx(0.0)  # the scratch, counted as a loss
+    winner = make_trade(trade_id=2, spx_at_expiry=6000.0)      # +1200
+    loser = make_trade(trade_id=3, spx_at_expiry=5925.0)       # -3800
+    s = journal["compute_stats"]([scratch, winner, loser])
+
+    # 1 win out of 3 completed trades — the scratch stays in the denominator.
+    assert s["Win Rate"] == pytest.approx(100.0 / 3.0)
+    # The real loss only. Previously (0 + -3800)/2 = -1900, which understated it.
+    assert s["Average Loser"] == pytest.approx(-3800.0)
+    assert s["Largest Loser"] == pytest.approx(-3800.0)
+
+
+def test_compute_stats_expectancy_is_the_mean_outcome(journal):
+    """Expectancy must stay the per-trade mean once scratches exist (BUG-011).
+
+    The old weighted form swept scratches in at the average LOSS via the
+    (1 - win_rate) term, overstating losses.
+    """
+    rows = [
+        make_trade(trade_id=1, status="Closed", profit_locked_in=None, final_pl=0.0),
+        make_trade(trade_id=2, spx_at_expiry=6000.0),   # +1200
+        make_trade(trade_id=3, spx_at_expiry=5925.0),   # -3800
+    ]
+    s = journal["compute_stats"](rows)
+    assert s["Expectancy"] == pytest.approx((0.0 + 1200.0 - 3800.0) / 3.0)
+
+
+def test_compute_stats_expectancy_unchanged_when_there_are_no_scratches(journal):
+    """The expectancy rewrite must be a no-op for data without scratches.
+
+    win_rate x avg_win + (1 - win_rate) x avg_loss is algebraically identical to
+    the plain mean when every trade is strictly a win or a loss. Asserting the
+    old formula explicitly proves the fix moved no existing number.
+    """
+    rows = [
+        make_trade(trade_id=1, spx_at_expiry=6000.0),   # +1200
+        make_trade(trade_id=2, spx_at_expiry=5925.0),   # -3800
+        make_trade(trade_id=3, spx_at_expiry=6000.0),   # +1200
+    ]
+    s = journal["compute_stats"](rows)
+    wr, aw, al = s["Win Rate"] / 100, s["Average Winner"], s["Average Loser"]
+    assert s["Expectancy"] == pytest.approx(wr * aw + (1 - wr) * al)
 
 
 def test_compute_stats_averages_holding_days_and_transform_time(journal):
@@ -378,21 +415,30 @@ def test_compute_stats_averages_entry_debit_and_close_credit(journal):
     assert s["Avg Close Credit"] == pytest.approx(10.0)
 
 
-def test_compute_stats_crashes_on_a_null_total_debit(journal):
-    """FINDING (M1.3, 2026-07-26): a NULL total_debit takes down the whole panel.
+def test_compute_stats_survives_a_null_total_debit(journal):
+    """BUG-012 fixed 2026-07-26: a NULL total_debit no longer kills the panel.
 
-    `debits = [float(r["total_debit"]) for r in rows]` has no None guard, unlike
-    the credit_received comprehension immediately below it. One row with a NULL
-    total_debit raises TypeError out of compute_stats and the entire statistics
-    panel fails to render — not just the one average.
-
-    total_debit is required at entry today, so this needs a legacy or
-    hand-edited row to trigger. Pinned as current behaviour; see backlog
-    BUG-012.
+    Previously one legacy or hand-edited row raised TypeError out of
+    compute_stats, so the ENTIRE statistics panel failed to render rather than
+    just that one average. The NULL row is now skipped for the debit average,
+    exactly as credit_received already did, and every other statistic still
+    computes.
     """
-    rows = [make_trade(trade_id=1), make_trade(trade_id=2, total_debit=None)]
-    with pytest.raises(TypeError):
-        journal["compute_stats"](rows)
+    rows = [make_trade(trade_id=1, total_debit=4.0),
+            make_trade(trade_id=2, total_debit=None)]
+    s = journal["compute_stats"](rows)
+
+    assert s["Avg Entry Debit"] == pytest.approx(4.0)  # the NULL is skipped, not zero
+    assert s["Total Trades"] == 2                      # the row still counts as a trade
+    assert s["Win Rate"] == pytest.approx(100.0)       # unrelated stats unaffected
+
+
+def test_compute_stats_avg_entry_debit_is_none_when_every_debit_is_null(journal):
+    rows = [make_trade(trade_id=1, total_debit=None),
+            make_trade(trade_id=2, total_debit=None)]
+    s = journal["compute_stats"](rows)
+    assert s["Avg Entry Debit"] is None
+    assert s["Total Trades"] == 2
 
 
 # ─────────────────────────────────────────────────────────────────────────────

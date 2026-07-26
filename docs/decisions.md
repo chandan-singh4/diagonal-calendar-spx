@@ -7,6 +7,41 @@ it was recorded here.
 
 ---
 
+## ADR-021 — A break-even trade is neither a win nor a loss
+**Date:** 2026-07-26 · **Status:** ACCEPTED
+
+**In plain terms:** a trade that comes out at exactly £0 — a "scratch" — used to be filed as a
+loss. That made the *average loss* look smaller than it really is, because a zero was being
+averaged in with the real losses. It happens for real: a transformed trade whose locked-in
+credit exactly cancels its assignment cost.
+
+**Decision, and where a scratch now counts:**
+
+| Statistic | Scratch counts? |
+|---|---|
+| Win Rate | **In the denominator only** — it's a completed trade that wasn't won |
+| Average Loser | **No** — averaging in a zero understates the typical loss |
+| Profit Factor | No (it never actually affected this — adding zero changes no sum) |
+| Expectancy | Yes, as a zero, via the plain mean |
+
+**On Expectancy specifically.** It used to be computed as
+`win_rate × avg_win + (1 − win_rate) × avg_loss`. That formula only works when every trade is
+either a win or a loss — with scratches present, the `(1 − win_rate)` part sweeps them in *at
+the average loss*, making the strategy look worse than it is. It's now just the plain average
+outcome per trade, which is what expectancy means. **This changed no existing number:** the two
+are algebraically identical when there are no scratches, and a test asserts exactly that.
+
+**Why this is written down rather than left as a fixed bug:** M6 judges the strategy against
+these numbers, so "what counts as a win" is a definition the results depend on, not an
+implementation detail. If the win-rate convention is ever revisited, this is the decision being
+revisited.
+
+*(Correction to the original bug note: it claimed the scratch also inflated Profit Factor. It
+did not — adding a zero leaves the sum of losses unchanged. Average Loser and Expectancy were
+the only figures actually affected.)*
+
+---
+
 ## ADR-020 — The scanner "golden" test proves the numbers didn't change, not that they're right
 **Date:** 2026-07-26 · **Status:** ACCEPTED
 

@@ -538,21 +538,35 @@ def compute_stats(rows: list) -> dict:
     # Completed = Expired (IC reached expiry) OR Closed (manually closed, with or without IC)
     completed = [r for r in rows if r["status"] in ("Expired","Closed") and resolved_pl(r) is not None]
     pls   = [resolved_pl(r) for r in completed]
-    wins  = [p for p in pls if p > 0]
-    loss  = [p for p in pls if p <= 0]
+    # Three-way split, not two (BUG-011). A scratch trade (P&L exactly 0) is
+    # neither a winner nor a loser: counting it as a loss put a 0 into the loss
+    # list and pulled Average Loser toward zero, understating the typical loss.
+    # It still belongs in the win-rate denominator — it is a completed trade
+    # that was not won.
+    wins    = [p for p in pls if p > 0]
+    loss    = [p for p in pls if p < 0]
+    scratch = [p for p in pls if p == 0]
     transformed = [r for r in rows if r["transform_minutes"] is not None]
     win_rate  = len(wins)/len(pls)*100 if pls else None
     avg_win   = sum(wins)/len(wins)   if wins else None
     avg_loss  = sum(loss)/len(loss)   if loss else None
     pf        = sum(wins)/abs(sum(loss)) if sum(loss)!=0 else None
-    exp_val   = None
-    if win_rate is not None and avg_win is not None and avg_loss is not None:
-        exp_val = (win_rate/100 * avg_win) + ((1-win_rate/100) * avg_loss)
+    # Expectancy is the mean outcome per completed trade. The old form,
+    # win_rate x avg_win + (1 - win_rate) x avg_loss, is algebraically identical
+    # to this whenever every trade is a win or a loss — but with scratches in the
+    # mix, (1 - win_rate) sweeps them in at the average LOSS, overstating losses.
+    # Taking the mean directly is both correct and simpler, and changes nothing
+    # for any set without scratches.
+    exp_val   = (sum(pls)/len(pls)) if pls else None
     hold_list  = [holding_days(r) for r in completed if holding_days(r) is not None]
     avg_hold   = sum(hold_list)/len(hold_list) if hold_list else None
     t_mins     = [r["transform_minutes"] for r in transformed if r["transform_minutes"]]
     avg_t_min  = sum(t_mins)/len(t_mins) if t_mins else None
-    debits     = [float(r["total_debit"]) for r in rows]
+    # Guard against NULL, exactly as credit_received does below (BUG-012).
+    # Without it one legacy or hand-edited row raised TypeError out of this
+    # function and the ENTIRE statistics panel failed to render — not just this
+    # one average.
+    debits     = [float(r["total_debit"]) for r in rows if r["total_debit"] is not None]
     credits    = [float(r["credit_received"]) for r in rows if r["credit_received"] is not None]
     # Total fees: entry commissions + transform/close commissions across all trades
     fees_total = sum(total_fees(r) for r in rows)
