@@ -1,0 +1,149 @@
+[project]
+name = "spx-diagonal-analyzer"
+version = "4.2.0"
+description = "Local options analytics platform for SPX diagonal calendar spreads and their transformation into iron condors."
+readme = "README.md"
+requires-python = ">=3.13,<3.15"
+authors = [{ name = "Chandan Singh" }]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Runtime dependencies
+#
+# All bounds are UPPER-bounded deliberately. The previous requirements.txt used
+# bare `>=` floors, and the environment had silently drifted a full major
+# version past them on two packages (pandas 2.2 -> 3.0, plotly 5.20 -> 6.8)
+# with no signal that anything had changed.
+# ─────────────────────────────────────────────────────────────────────────────
+dependencies = [
+    # Schwab market-data API. UNOFFICIAL community wrapper — a breaking change
+    # here means no data collection at all, so this is pinned tightest.
+    "schwab-py>=1.5.1,<1.6.0",
+
+    # Data / numerics
+    "pandas>=3.0.3,<4.0.0",
+    "numpy>=2.4.6,<3.0.0",
+    "scipy>=1.18.0,<2.0.0",
+
+    # Dashboard. NOTE: ui/theme CSS targets Streamlit-INTERNAL DOM classes
+    # (e.g. div[class*="st-key-chartcard_"]), which carry no stability
+    # guarantee. A minor bump can silently break the entire visual design with
+    # no code change here. Bound to the current minor on purpose: upgrade
+    # deliberately, and visually verify every tab afterwards.
+    "streamlit>=1.58.0,<1.59.0",
+    "streamlit-autorefresh>=1.0.1,<2.0.0",
+
+    # Charting. Plotly rangebreak behaviour caused the v4.1.1 multi-day
+    # rendering corruption (see DEV_JOURNAL 2026-07-07); treat upgrades as
+    # requiring chart verification.
+    "plotly>=6.8.0,<7.0.0",
+
+    # Config
+    "python-dotenv>=1.2.2,<2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0,<9.0",
+    "pytest-cov>=5.0,<7.0",
+    "ruff>=0.6,<1.0",
+    "black>=24.0,<26.0",
+    "mypy>=1.11,<2.0",
+    "pandas-stubs",
+    "types-requests",
+    "pip-audit>=2.7,<3.0",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+# Flat layout during M0. This becomes a proper package list at M2, when the
+# spx_analyzer/ tree replaces the current root-level modules.
+py-modules = ["app", "config", "db", "collector", "iv_engine", "schwab_client"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ruff — linting
+# ─────────────────────────────────────────────────────────────────────────────
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+extend-exclude = ["migrations", "docs"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "W",    # pycodestyle warnings
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "C4",   # comprehensions
+    "SIM",  # simplify
+    "RUF",  # ruff-specific
+    "T20",  # flake8-print (no stray print() in library code)
+    "PL",   # pylint subset
+]
+ignore = [
+    "E501",     # line length — handled by the formatter
+    "PLR0913",  # too many arguments — pervasive and intentional in db.py readers
+    "PLR2004",  # magic values — will be genuinely fixed by M2.2 (constants extraction)
+    "PLR0912",  # too many branches — app.py is being decomposed in M2
+    "PLR0915",  # too many statements — same
+]
+
+[tool.ruff.lint.per-file-ignores]
+# app.py and journal.py are Streamlit scripts: module-level execution and
+# print-free but heavily procedural. These exemptions shrink as M2 progresses.
+"app.py" = ["E402", "T20"]
+"pages/journal.py" = ["E402", "T20"]
+"check_db.py" = ["T20"]          # it's a CLI report; printing is the point
+"scripts/*" = ["T20"]
+"migrations/*" = ["T20"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["config", "db", "iv_engine", "schwab_client", "collector"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Black — formatting
+# ─────────────────────────────────────────────────────────────────────────────
+[tool.black]
+line-length = 100
+target-version = ["py313"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Mypy — type checking
+#
+# Deliberately lenient at M0. The strict settings are switched on module by
+# module as M2 extracts core/ — tightening them repo-wide today would produce
+# thousands of errors in app.py and teach everyone to ignore the tool.
+# ─────────────────────────────────────────────────────────────────────────────
+[tool.mypy]
+python_version = "3.13"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+check_untyped_defs = false
+exclude = ["^app\\.py$", "^pages/", "^migrations/"]
+
+[[tool.mypy.overrides]]
+# iv_engine is pure, typed, and the first M1 test target — hold it to a
+# higher standard than the rest of the codebase from day one.
+module = "iv_engine"
+disallow_untyped_defs = true
+check_untyped_defs = true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pytest
+# ─────────────────────────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-ra --strict-markers"
+markers = [
+    "slow: tests that hit the full database",
+    "integration: tests requiring a temporary SQLite database",
+]
+
+[tool.coverage.run]
+omit = ["app.py", "pages/*", "tests/*", "migrations/*", "scripts/*"]
