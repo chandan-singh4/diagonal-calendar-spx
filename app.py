@@ -33,6 +33,7 @@ IV SCALE NOTE
 
 import json
 import logging
+import sys
 import uuid
 from datetime import date, datetime, timezone, time as dt_time
 from pathlib import Path
@@ -1995,6 +1996,17 @@ def _run_mission_control(chain_df: pd.DataFrame, spx_price: float,
 # Sidebar
 # ─────────────────────────────────────────────────────────────────────────────
 
+# The command is built from the RUNNING interpreter and this file's own location
+# rather than hardcoded, so it stays correct if the project moves or the venv is
+# rebuilt — the same reasoning as the %~dp0 paths in start_collector.bat (M0.13).
+# It is rendered with st.code(), which gives a one-click copy button for free;
+# the previous <code> block inside raw HTML could not be copied, which is the
+# whole reason you end up retyping it.
+def _reauth_command() -> str:
+    project_dir = Path(__file__).resolve().parent
+    return f'cd "{project_dir}"\n"{sys.executable}" scripts\\reauth.py'
+
+
 st.sidebar.title("Settings")
 event_mode = st.sidebar.toggle(
     "⚡ Event Mode (60s refresh)",
@@ -2096,6 +2108,38 @@ with st.sidebar.expander("Line colors", expanded=False):
         for _key in DEFAULT_CHART_COLORS:
             st.session_state.pop(f"color_{_key}", None)
         st.rerun()
+
+# ── Schwab connection ─────────────────────────────────────────────────────────
+# Always available, not only once the token is nearly dead. The red banner at the
+# top of the page still fires from day 6; this is here so the command can be
+# copied at any time, and so "how long have I got?" has an answer that does not
+# require opening a terminal to ask.
+st.sidebar.divider()
+st.sidebar.markdown("**🔑 Schwab Connection**")
+
+_sb_age = schwab_client.get_token_age_days()
+if _sb_age is None:
+    st.sidebar.error("No token — not authenticated.")
+else:
+    _sb_left = 7 - _sb_age
+    if _sb_left <= 0:
+        st.sidebar.error(f"Token EXPIRED {abs(_sb_left):.1f} days ago — collector is blind.")
+    elif _sb_left < 1:
+        st.sidebar.warning(f"Token expires in {_sb_left * 24:.0f} hours.")
+    elif _sb_left < 2:
+        st.sidebar.warning(f"Token expires in {_sb_left:.1f} days.")
+    else:
+        st.sidebar.success(f"Token valid — {_sb_left:.1f} days left.")
+
+with st.sidebar.expander("Re-authenticate (every 7 days)", expanded=False):
+    st.caption("Copy, then paste into a terminal:")
+    st.code(_reauth_command(), language="powershell")
+    st.caption(
+        "Opens the Schwab login in your browser, then asks you to paste the "
+        "redirected URL back — it will look like an error page, which is expected. "
+        "Cannot be automated: Schwab requires the interactive login. Your current "
+        "token is restored automatically if you cancel partway through."
+    )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Database init + latest complete snapshot
@@ -2377,29 +2421,31 @@ else:
 st.markdown(_attn_html, unsafe_allow_html=True)
 
 # ── Token expiry warning banner ───────────────────────────────────────────────
+
 _token_age = schwab_client.get_token_age_days()
 if _token_age is not None and _token_age >= 6:
     if _token_age >= 7:
         st.markdown(
-            """<div class="spx-token-emergency">
-🚨 SCHWAB TOKEN EXPIRED — Collector is offline. Re-authenticate now:<br>
-<code style="background:rgba(0,0,0,0.3);padding:2px 6px;border-radius:3px;">
-python scripts/reauth.py
-</code>
+            f"""<div class="spx-token-emergency">
+🚨 SCHWAB TOKEN EXPIRED {_token_age - 7:.1f} days ago — no new prices are being
+collected. Paste this into a terminal to re-authenticate:
 </div>""",
             unsafe_allow_html=True,
         )
     else:
         st.markdown(
-            """<div class="spx-token-warning">
-⚠️ Schwab API token expires <strong>tomorrow</strong>.
-Re-authenticate today to avoid collector downtime:<br>
-<code style="background:rgba(0,0,0,0.25);padding:2px 6px;border-radius:3px;">
-python scripts/reauth.py
-</code>
+            f"""<div class="spx-token-warning">
+⚠️ Schwab API token expires in <strong>{7 - _token_age:.1f} days</strong>.
+Re-authenticate before then to avoid losing a session. Paste this into a terminal:
 </div>""",
             unsafe_allow_html=True,
         )
+    st.code(_reauth_command(), language="powershell")
+    st.caption(
+        "Opens a Schwab login in your browser, then asks you to paste the redirected "
+        "URL back. The page will look like an error — that is expected. Your current "
+        "token is restored automatically if you cancel partway through."
+    )
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PERSISTENT CONTROLS BAR — front/back expiry + put/call strike
