@@ -68,7 +68,7 @@ migration, no analytics until the foundation exists.
 
 | Decision | Blocks | Detail |
 |---|---|---|
-| **Entry-IV-context snapshotting vs. prune carve-out** | M3.2 | Pruning `option_rows` by expiry would break `get_entry_iv_context()`, which reconstructs entry-time term structure retroactively from historical snapshots — destroying the Regime Analysis validation mechanism (M6.2) for exactly the completed trades it exists to study. Must be resolved **before** pruning runs once; pruning is irreversible. See ADR-016. |
+| **Entry-IV-context snapshotting** | M3.2 | ~~Blocker~~ **downgraded 2026-07-26**: the 6 existing trades are being discarded, so no backfill is needed and pruning can proceed freely. The design fix still stands for *future* trades — `get_entry_iv_context()` reads historical `option_rows`, so any trade logged from now on loses its entry context once its expiries are pruned. Implement entry-IV snapshotting into `trades` **alongside** the pruner in M3, before the journal accumulates trades that matter. See ADR-016. |
 | **M5.0 re-evaluation** | M5 | Whether Streamlit still hurts enough to migrate, decided with evidence after M2. Not pre-committed. |
 | **Formatter run timing** | 0.6 | See ADR-015. |
 

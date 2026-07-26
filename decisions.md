@@ -9,6 +9,21 @@ it was recorded here.
 
 ## ADR-016 — Entry IV context must be decoupled from `option_rows` before any pruning
 **Date:** 2026-07-25 · **Status:** OPEN — blocks M3.2
+**Updated 2026-07-26 — severity downgraded, requirement unchanged.**
+
+> **Update:** the user intends to discard the 6 existing trades and start the journal
+> clean. That removes the *urgency* — there is no historical entry-context to preserve,
+> so pruning can proceed without a backfill and without racing a closing window.
+>
+> **The design requirement stands, though, and the trap is now a future one:** any trade
+> logged from here on has the same dependency. Log a trade today, let its expiries pass,
+> run the pruner, and its entry-time IV context is gone — silently, and exactly for the
+> completed trades M6.2 needs. So the fix must land **before the journal starts
+> accumulating trades that matter**, not before the first prune.
+>
+> Revised sequencing: implement option (b) — snapshot entry IV context into `trades` at
+> logging time — as part of M3, alongside the pruner rather than ahead of it. No backfill
+> required.
 
 **Decision:** Do not implement retention pruning (ADR-014) until entry-time IV context is
 either (a) carved out of the pruner, or (b) snapshotted into the `trades` table at logging
