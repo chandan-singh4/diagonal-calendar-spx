@@ -77,3 +77,99 @@ def chain_df() -> pd.DataFrame:
 def spot() -> float:
     """Underlying price sitting exactly on the 6000 strike."""
     return 6000.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Trade-row fixtures (journal P&L)
+#
+# The journal reads sqlite3.Row objects, which are NOT dicts: they raise
+# IndexError on a missing key instead of returning None, and expose .keys().
+# The row_get() helper in journal.py exists precisely because of that. Faking
+# rows with a plain dict would make row_get() look unnecessary and would hide
+# the legacy-schema bugs it guards against, so FakeRow reproduces the real
+# behaviour instead.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class FakeRow:
+    """Minimal stand-in for sqlite3.Row."""
+
+    def __init__(self, data: dict):
+        self._data = dict(data)
+
+    def __getitem__(self, key):
+        try:
+            return self._data[key]
+        except KeyError:
+            # sqlite3.Row raises IndexError, not KeyError, for an unknown column.
+            raise IndexError(f"No item with that key: {key}") from None
+
+    def keys(self):
+        return list(self._data)
+
+    def __contains__(self, key):
+        return key in self._data
+
+
+def make_trade(**overrides) -> FakeRow:
+    """A Transformed-then-Expired trade with complete IC data.
+
+    Baseline numbers, chosen so every derived figure is checkable by hand:
+      profit_locked_in = 6.00 points, 2 contracts
+      IC: long put 5900 / short put 5950 / short call 6050 / long call 6100
+      spx_at_expiry = 6000 → between the shorts → no assignment
+      => resolved_pl = (6.00 + 0.00) x 100 x 2 = $1,200.00
+    """
+    base = {
+        "trade_id": 1,
+        "status": "Expired",
+        "contracts": 2,
+        "profit_locked_in": 6.00,
+        "final_pl": None,
+        "spx_at_expiry": 6000.0,
+        "ic_long_put": 5900.0,
+        "ic_short_put": 5950.0,
+        "ic_short_call": 6050.0,
+        "ic_long_call": 6100.0,
+        "entry_date": "2026-07-01",
+        "result_date": "2026-07-15",
+        "transform_minutes": 120,
+        "total_debit": 4.00,
+        "credit_received": 10.00,
+        "commissions": 2.60,
+        "transform_commissions": 2.60,
+        "close_type": "transform",
+    }
+    base.update(overrides)
+    return FakeRow(base)
+
+
+def make_legacy_trade(**overrides) -> FakeRow:
+    """A pre-IC-schema row: no ic_* columns, no transform_commissions, no close_type.
+
+    These exist in the real database and are the reason for row_get() and the
+    `"x" in t.keys()` guards. Any code path that assumes the modern schema will
+    raise IndexError on this fixture.
+    """
+    base = {
+        "trade_id": 99,
+        "status": "Closed",
+        "contracts": 1,
+        "profit_locked_in": None,
+        "final_pl": 250.0,
+        "entry_date": "2026-06-01",
+        "result_date": "2026-06-10",
+        "transform_minutes": None,
+        "total_debit": 3.00,
+        "credit_received": None,
+        "commissions": 1.30,
+    }
+    base.update(overrides)
+    return FakeRow(base)
+
+
+@pytest.fixture
+def journal():
+    """The pure P&L functions, loaded from pages/journal.py without Streamlit."""
+    from journal_loader import load_journal_functions
+
+    return load_journal_functions()

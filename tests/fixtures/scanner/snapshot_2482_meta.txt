@@ -1,0 +1,6 @@
+snapshot_id      = 2482
+snapshot_time    = 2026-07-23 19:59:32
+underlying_price = 7409.61
+chain_rows       = 3058
+scanner_rows     = 50
+captured_from    = data/dashboard.db (read-only)
