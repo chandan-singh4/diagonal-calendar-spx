@@ -1,101 +1,100 @@
 # PROJECT STATUS
 
-**Updated:** 2026-07-26 · **Branch:** `main` · everything merged, committed and saved online (`c0180e3`)
-**State:** Foundation cleanup done. Automatic checking started — **140 checks, all passing.**
-**Not re-checked by eye this session:** the screen was never opened. See "What to do next", item 1.
+**Updated:** 2026-07-26 · **Branch:** `main` · 9 saved points added today, all saved online.
+**State:** Checking grew 151 → **329 checks**, all passing, now **run automatically** on every
+save. Five faults fixed. The price record is untouched and healthy.
 
-> Self-contained: read this file alone to start a session. No need to open other files unless doing deep work.
-> Replaced entirely by `/wrap` each session. Keep under 100 lines.
+> Self-contained: read this file alone to start a session. Replaced entirely by `/wrap`.
 
 ## What this project is
 
-Chandan trades **options** on the S&P 500 index (SPX). An option is a contract to buy or sell at a set
-price before a set date. His strategy: sell options expiring soon, buy similar ones expiring later, pay the
-small difference. Options expiring soon lose value faster — that gap is the profit. Once it's worth enough,
-he restructures into a safer shape that locks the gain and caps the loss. **It's all about timing.**
+Chandan trades **options** on the S&P 500 index (SPX). An option is a contract to buy or sell at a
+set price before a set date. His strategy: sell options expiring soon, buy similar ones expiring
+later, pay the small difference. Options expiring soon lose value faster — that gap is the profit.
+Once it's worth enough, he restructures into a safer shape that locks the gain and caps the loss.
+**It's all about timing.**
 
-Brokers show today's prices then discard them. Judging the moment needs weeks of history on the exact
-contracts he'd trade, and nobody keeps that for you. **So the historical record IS the product** — the
-screen is just a window onto it.
+Brokers show today's prices then discard them. Judging the moment needs weeks of history on the
+exact contracts he'd trade, and nobody keeps that for you. **So the historical record IS the
+product** — the screen is just a window onto it.
 
 | Part | What it does |
 |---|---|
 | **Collector** | Background program. Every 1–5 min while markets are open, records all option prices. Starts automatically when Windows starts. |
-| **Database** | One file, 1.42 GB of prices since 23 June. Irreplaceable — the broker won't sell you last Tuesday's prices. |
+| **Database** | One file, ~1.3 GB of prices since 23 June. Irreplaceable — the broker won't sell you last Tuesday's prices. |
 | **Dashboard** | Web page, 6 tabs, charts built from that history. Reads only, never writes. |
 | **Journal** | Diary of actual trades, to later check results against predictions. |
 
-**Condition:** the trading logic and the collector are genuinely good. What was missing was everything
-around them. The biggest gap — nothing checked the software after a change — is now half closed.
+**Condition:** trading logic and collector are good; the checking net is now real and
+self-running. The screen's code is still one huge file.
 
 ## The 9-stage plan
 
-`0 clean up` **done** → `1 automatic checking` **← we are here, about half done** → `2 break up big files`
-→ `3 stop database growing` → `4 data service` → `5 decide on rebuilding the screen` → `6 answer trading
-questions with real results` → `7 machine learning` → `8 run reliably unattended`
+`0 clean up` **done** → `1 automatic checking` **← here, mostly done** → `2 break up big files` →
+`3 stop database growing` → `4 data service` → `5 decide on rebuilding the screen` → `6 answer
+trading questions with real results` → `7 machine learning` → `8 run reliably unattended`
 
-Order is fixed: **you can't safely rearrange code you can't check automatically.** Stages 0→1→2 are a chain.
+Order is fixed: **you can't safely rearrange code you can't check automatically.**
 
 ## This session (26 July)
 
-1. **Cleanup work merged into the main line** and saved online. It had been parked on a side branch.
-2. **Built the checking system from nothing to 140 automatic checks.** Covers the calculation engine
-   completely, the profit-and-loss maths, and the opportunity scanner.
-3. **Proved the checks actually work.** Broke the code ten different ways on purpose, confirmed the checks
-   caught each one, then put everything back. A check that never fails gives false confidence.
-4. **Found seven faults; fixed the two that mattered.** One counted a break-even trade as a loss, making
-   average losses look smaller. The other crashed the statistics panel if one trade lacked an entry cost.
-5. **Solved the "two collectors" mystery — there was only ever one.** The thing that looks like a second
-   copy in Task Manager is a small launcher that starts the real one. Seeing two is normal and healthy.
-6. **Stopped the backlog file growing forever.** Fixed items are deleted; the history is kept elsewhere.
-
-**Three honest notes:**
-**(a) I destroyed about two weeks of data, and it is not recoverable.** Switching branches silently
-overwrote three small working files. Restored from a 10 July copy, so the scanner's record of which
-opportunities appeared when, and any entry locks set since, are gone. **The 1.42 GB price database is
-intact and was never at risk.**
-**(b) The "two collectors" was thought to be the cause of the July problem. It wasn't** — that problem is
-still unexplained, with no leads.
-**(c) The checks have a known hole:** one part of the scanner isn't protected — found by a deliberate
-break the checks failed to notice.
+1. **The checks now run on their own** whenever work is saved — the exact weakness stage 1
+   exists to remove. It proved its worth the same day, catching a change that broke 34 checks.
+2. **The database go-between is fully checked** (111 checks, every line) — the piece every
+   other part reads through, which had none.
+3. **Five faults fixed**, each recorded first and fixed second, so the fix shows as a visible change.
+   - Deleting a trade made the *next* trade fail to save — this blocked discarding the 6
+     practice trades. Now safe.
+   - A missing price was shown as £0.00 in profit figures.
+   - Asking for one past day of prices returned that day *and every day after it*.
+   - The collector called every ordinary night and weekend a breakdown.
+   - A chart drew a straight line across the 3 July holiday, inventing price movement.
+4. **Two corrections to things previously believed true.** The "collector cries wolf" fault was
+   **also deaf**: a collector dead for three trading days was filed as routine and discarded,
+   leaving no trace — the worst loss possible here, and invisible. It had also been blamed on the
+   wrong code; fixing only that would have left the real source untouched and looked successful.
+5. **The old damage figures were nonsense**: records claimed 19,759 lost readings, more than the
+   database has ever held. True figure is 145. Corrected in place, old values kept.
+6. **Code proofreading tool installed** and run for the first time. Found no faults, but produced
+   an exact list of the "silently ignore all errors" spots in the profit-and-loss screen.
 
 ## What to do next
 
-1. **Open the dashboard and look at the Journal statistics panel.** The fix changes what it shows. The
-   automatic checks pass, but **nobody has looked at the screen**. Do this before trusting a number on it.
-2. **Add checks for `db.py`** — the part every other piece reads through, and it currently has none.
-   Use a temporary throwaway database for this, never the real one.
-3. **Make the checks run by themselves.** Right now they only run when someone remembers to ask.
-   That's the exact weakness this stage exists to remove.
-4. Then the collector's own checks, and closing the scanner hole above.
+1. **Finish checking the collector.** Its gap logic is done; the actual price-fetching cycle,
+   retries and login handling are still unchecked. Largest unchecked area left.
+2. **Discard the 6 practice trades** — now safe. Note the standing commitment below.
+3. **Fix the "silently ignore all errors" spots** in the profit screen (DEBT-007; line numbers
+   in `docs/backlog.md`). A failed calculation currently shows a blank with no reason.
+4. **One question for Chandan:** the statistics code works out a "break-even trades" figure and
+   never shows it — display intended and forgotten, or just leftover?
+5. Then stage 2 — breaking up the 4,230-line screen file.
 
 ## Open problems, priority order
 
 | Problem | Meaning | Stage |
 |---|---|---|
-| **Unexplained July issue — BLOCKED ON CHANDAN** | "Still having some issue." The two-collector theory is dead. **Needs: what looked wrong, which tab, screenshot.** | — |
-| Most of the code still unchecked | Database, collector and broker-connection parts have no checks | 1 |
-| Checks don't run themselves | Only run when remembered | 1 |
+| **Unexplained July issue — BLOCKED ON CHANDAN** | "Still having some issue." No leads. **Needs: what looked wrong, which tab, screenshot.** | — |
+| **Dashboard is reachable from other devices on the network** | Confirmed today, not just suspected. Should be locked to this machine before any remote access work. | — |
+| Errors silently ignored in the profit screen | ~30 places; a failure shows as a blank | 2 |
 | 4,230-line dashboard file | Appearance, calculations and data all mixed together | 2 |
-| Overnight pauses labelled as failures | All routine pauses recorded as breakdowns; blocks alerting | 3 |
+| Backups manual; database growing without limit | Backups work but nobody runs them on a schedule; ~82 MB per trading day | 3 |
 
 ## Settled — don't reopen
 
-- **Screen stays as-is for now.** Real case to rebuild it, but not before checks exist. Revisit at stage 5.
-- **Old detailed price data gets trimmed eventually**, summary history kept forever.
-- **The 6 practice trades will be discarded**, diary restarts clean. **Consequence:** the app must save
-  market conditions *with each trade* before serious trading resumes.
-- **Fixed items are deleted from the backlog**, not marked done. Lessons worth keeping go in `decisions.md`.
-- **When testing money-handling code, record the fault first and fix it separately** — otherwise you can't
-  tell whether the check proved the code right or the code was bent to fit the check.
-- **Single user, one machine**, viewable from phone later.
+- **Screen stays as-is for now.** Revisit at stage 5.
+- **Trade numbers are never reused** — a deleted trade leaves a permanent gap. The diary is
+  evidence, so a number must never change meaning.
+- **When a price is missing, show nothing rather than zero.**
+- **The 6 practice trades will be discarded**, diary restarts clean. **Consequence:** the app must
+  save market conditions *with each trade* before serious trading resumes.
+- **Record a fault first, fix it second** — otherwise you can't tell whether the check proved the
+  code right or the code was bent to fit the check.
 
 ## How to work here
 
-Plan before coding · **copy the small working files aside before switching branches** (this caused this
-session's data loss) · rehearse destructive changes on a copy · challenge assumptions with evidence rather
-than agreeing · say plainly when something is unverified or wrong · **ask before** deleting, changing the
-database, saving work, or changing system settings · finish with `/wrap`.
-
-**Deeper detail:** `docs/plan.md` (tasks) · `docs/backlog.md` (open bugs) · `docs/decisions.md` (why —
-see ADR-017…021) · `docs/progress_log.md` · `docs/DOCUMENTATION.md` (strategy/maths) · `DEV_JOURNAL.md`.
+Plan before coding · rehearse risky changes on a copy · **prove checks work by deliberately
+breaking the code** · challenge assumptions with evidence · say plainly when something is
+unverified · **ask before** deleting, changing the database, saving work, or changing system
+settings · finish with `/wrap`.
+**Deeper detail:** `docs/` — `plan.md` (tasks) · `backlog.md` (open problems) · `decisions.md`
+(why; ADR-022…024) · `progress_log.md` · `DOCUMENTATION.md` (strategy/maths).
