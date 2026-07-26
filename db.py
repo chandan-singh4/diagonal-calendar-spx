@@ -948,7 +948,12 @@ def get_prior_session_close(db_path: str, session_date: str) -> float | None:
             """,
             (session_date,)
         ).fetchone()
-        return float(row["underlying_price"]) if row and row["underlying_price"] else None
+        # `is not None`, not truthiness (BUG-014, fixed 2026-07-26): a stored
+        # 0.0 is a real price, not a missing one. Immaterial for SPX, but the
+        # same pattern is a live trap wherever 0.0 is a legitimate value.
+        if row is None or row["underlying_price"] is None:
+            return None
+        return float(row["underlying_price"])
 
 
 
@@ -966,6 +971,14 @@ def get_spx_intraday_today(db_path: str, session_date: str | None = None) -> lis
     calendar day (which would return 0 rows when called after-hours or pre-open).
 
     Returns rows with: snapshot_timestamp (TEXT), underlying_price (REAL).
+
+    BOUNDED AT BOTH ENDS (BUG-015, fixed 2026-07-26). This query used to have
+    only a `>=` lower bound, so asking for an older session returned that
+    session AND every session after it, concatenated into what the caller plots
+    as a single intraday line. app.py was safe only by accident — it always
+    passes the date derived from the LATEST snapshot, which made the open range
+    coincidentally correct. Any caller asking for a historical session (a
+    backtest replay, a per-day chart) got silently wrong data with no error.
     """
     bound = session_date if session_date else datetime.now(timezone.utc).strftime("%Y-%m-%d")
     with get_conn(db_path) as conn:
@@ -975,9 +988,10 @@ def get_spx_intraday_today(db_path: str, session_date: str | None = None) -> lis
             FROM snapshots
             WHERE status              = 'COMPLETE'
               AND snapshot_timestamp >= ?
+              AND snapshot_timestamp <  date(?, '+1 day')
             ORDER BY snapshot_timestamp
             """,
-            (bound,)
+            (bound, bound)
         ).fetchall()
 
 
@@ -1072,10 +1086,32 @@ def init_trades_table(db_path: str) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def get_next_trade_id(db_path: str) -> str:
-    """Return the next sequential trade ID string, e.g. 'T-004'."""
+    """
+    Return the next sequential trade ID string, e.g. 'T-004'.
+
+    Derived from the HIGHEST existing ID, not from COUNT(*) (BUG-016, fixed
+    2026-07-26). COUNT(*) + 1 is not a sequence: delete any trade that is not
+    the newest and the next value collides with a surviving `trade_id`, which
+    is the PRIMARY KEY — so insert_trade() raises IntegrityError and the trade
+    being recorded is lost, showing a raw sqlite error where a saved trade
+    should be. Deleting T-002 of six and then adding a trade was enough.
+
+    IDs are never reused. A deleted T-003 leaves a permanent gap, which is the
+    correct behaviour for a trading record: the journal is evidence, and an ID
+    that once meant one trade must never later mean a different one.
+
+    Only 'T-'-prefixed IDs are considered, and the numeric part is compared as
+    an INTEGER rather than as text — 'T-010' must outrank 'T-009', which a
+    string MAX() would get right only by luck of zero-padding, and not at all
+    past 'T-999'.
+    """
     with managed_conn(db_path) as conn:
-        row = conn.execute("SELECT COUNT(*) AS n FROM trades").fetchone()
-        return f"T-{row['n'] + 1:03d}"
+        row = conn.execute(
+            "SELECT MAX(CAST(SUBSTR(trade_id, 3) AS INTEGER)) AS hi "
+            "FROM trades WHERE trade_id LIKE 'T-_%'"
+        ).fetchone()
+        highest = row["hi"] if row and row["hi"] is not None else 0
+        return f"T-{highest + 1:03d}"
 
 
 def insert_trade(db_path: str, trade: dict) -> None:
@@ -1161,7 +1197,10 @@ def get_eod_spx(db_path: str, date_str: str) -> "float | None":
             ORDER BY snapshot_timestamp DESC
             LIMIT 1
         """, (date_str + " 23:59:59",)).fetchone()
-        return float(row["underlying_price"]) if row and row["underlying_price"] else None
+        # See get_prior_session_close — same BUG-014 fix, same reasoning.
+        if row is None or row["underlying_price"] is None:
+            return None
+        return float(row["underlying_price"])
 
 
 def get_ic_marks(
@@ -1222,7 +1261,8 @@ def get_ic_marks(
             return None
 
         rows = conn.execute("""
-            SELECT strike, right, bid, ask, mark
+            SELECT strike, right, bid, ask,
+                   COALESCE(mark, (bid + ask) / 2.0) AS mark_value
             FROM option_rows
             WHERE snapshot_id = ?
               AND expiry_date  = ?
@@ -1238,12 +1278,24 @@ def get_ic_marks(
         if not rows:
             return None
 
+        # BUG-014 (fixed 2026-07-26): this used to do `r["mark"] or 0.0`, which
+        # turned a NULL mark into a real-looking 0.0. That number then flowed
+        # straight into cost_to_close and out to the unrealized-P&L figure, so
+        # a missing quote understated the cost of buying back a short — a wrong
+        # money number presented as a right one.
+        #
+        # Two changes. First, fall back to the bid/ask midpoint in SQL, as every
+        # history query in this module already does (DEBT-012 records that this
+        # was the one place missing it). Second, if a leg has no computable mark
+        # even then, treat the leg as absent rather than as zero: this function
+        # is already all-four-or-nothing, and a partial IC valuation would be
+        # quietly wrong instead of obviously unavailable.
         leg_map = {}
         for r in rows:
             leg_map[(float(r["strike"]), r["right"])] = {
-                "bid":  r["bid"]  or 0.0,
-                "ask":  r["ask"]  or 0.0,
-                "mark": r["mark"] or 0.0,
+                "bid":  r["bid"] if r["bid"] is not None else 0.0,
+                "ask":  r["ask"] if r["ask"] is not None else 0.0,
+                "mark": r["mark_value"],
             }
 
         sc = leg_map.get((float(short_call), "C"))
@@ -1251,7 +1303,8 @@ def get_ic_marks(
         sp = leg_map.get((float(short_put),  "P"))
         lp = leg_map.get((float(long_put),   "P"))
 
-        if not all([sc, lc, sp, lp]):
+        legs = [sc, lc, sp, lp]
+        if not all(legs) or any(leg["mark"] is None for leg in legs):
             return None
 
         cost = sc["mark"] + sp["mark"] - lc["mark"] - lp["mark"]

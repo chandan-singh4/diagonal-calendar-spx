@@ -749,18 +749,33 @@ def test_prior_session_close_ignores_incomplete_snapshots(temp_db):
     assert db.get_prior_session_close(temp_db, "2026-07-21") is None
 
 
-def test_prior_session_close_reports_a_zero_price_as_missing(temp_db):
-    """PINNED — BUG-014 (new, P3). Same shape as BUG-007.
+def test_prior_session_close_reports_a_zero_price_as_zero(temp_db):
+    """FIXED — BUG-014. Was pinned as "returns None for a stored 0.0".
 
-    `float(row[...]) if row and row["underlying_price"] else None` is a
-    truthiness test on a float, so a stored 0.0 is indistinguishable from no
-    data. Harmless today — SPX is never 0, and a 0 here would be a data fault
-    rather than a market state — but this is the same latent trap already
-    logged against iv_engine, and it appears twice in db.py (here and in
-    get_eod_spx). Fix by comparing `is not None`.
+    A truthiness test on a float cannot tell a real 0.0 from missing data.
+    Immaterial for SPX, which is never 0 — but the same pattern is a live trap
+    anywhere 0.0 is legitimate, and it was already logged once against
+    iv_engine as BUG-007. Now compares `is not None`.
     """
     add_snapshot(temp_db, "2026-07-20 19:59:00", spx=0.0)
+    assert db.get_prior_session_close(temp_db, "2026-07-21") == 0.0
+
+
+def test_prior_session_close_still_reports_a_null_price_as_missing(temp_db):
+    """The other half of the fix: NULL is genuinely absent and must stay None."""
+    add_snapshot(temp_db, "2026-07-20 19:59:00", spx=None)
     assert db.get_prior_session_close(temp_db, "2026-07-21") is None
+
+
+def test_eod_spx_reports_a_zero_price_as_zero(temp_db):
+    """FIXED — BUG-014, second site."""
+    add_snapshot(temp_db, "2026-07-21 19:59:00", spx=0.0)
+    assert db.get_eod_spx(temp_db, "2026-07-21") == 0.0
+
+
+def test_eod_spx_still_reports_a_null_price_as_missing(temp_db):
+    add_snapshot(temp_db, "2026-07-21 19:59:00", spx=None)
+    assert db.get_eod_spx(temp_db, "2026-07-21") is None
 
 
 def test_spx_intraday_returns_the_session_in_chronological_order(temp_db):
@@ -783,16 +798,12 @@ def test_spx_intraday_excludes_incomplete_snapshots(temp_db):
     assert db.get_spx_intraday_today(temp_db, "2026-07-21") == []
 
 
-def test_spx_intraday_has_no_upper_bound_on_the_session(temp_db):
-    """PINNED — BUG-015 (new, P2). The name says "today"; the query says ">=".
+def test_spx_intraday_is_bounded_to_the_requested_session(temp_db):
+    """FIXED — BUG-015. Was pinned as "returns three sessions as one series".
 
-    There is no upper bound, so asking for an older session returns that session
-    AND every session after it, concatenated into what the caller plots as one
-    intraday line. app.py is safe today only because it always passes the date
-    derived from the LATEST snapshot, making the open range accidentally
-    correct. Any future caller asking for a historical session — a backtest
-    replay (ENH-007), or a per-day chart — gets silently wrong data with no
-    error. Fix: add `AND snapshot_timestamp < date(?, '+1 day')`.
+    The query had only a `>=` lower bound, so an older session came back
+    concatenated with every session after it. app.py was safe by accident,
+    always passing the latest snapshot's date. Now bounded at both ends.
     """
     add_snapshot(temp_db, "2026-07-21 13:30:00", spx=6000.0)
     add_snapshot(temp_db, "2026-07-22 13:30:00", spx=6100.0)
@@ -800,9 +811,21 @@ def test_spx_intraday_has_no_upper_bound_on_the_session(temp_db):
 
     rows = db.get_spx_intraday_today(temp_db, "2026-07-21")
 
-    assert [r["underlying_price"] for r in rows] == [6000.0, 6100.0, 6200.0], (
-        "three separate sessions returned as one 'intraday' series"
-    )
+    assert [r["underlying_price"] for r in rows] == [6000.0], "one session only"
+
+
+def test_spx_intraday_includes_the_whole_requested_day(temp_db):
+    """The upper bound must not clip the session it was asked for. The last
+    write of a trading day lands at 15:59 ET — 19:59 UTC — and a naive
+    `< session_date` or a `<= session_date` bound would drop the entire day."""
+    add_snapshot(temp_db, "2026-07-21 00:00:00", spx=5990.0)
+    add_snapshot(temp_db, "2026-07-21 19:59:33", spx=6050.0)
+    add_snapshot(temp_db, "2026-07-21 23:59:59", spx=6060.0)
+    add_snapshot(temp_db, "2026-07-22 00:00:00", spx=9999.0)
+
+    rows = db.get_spx_intraday_today(temp_db, "2026-07-21")
+
+    assert [r["underlying_price"] for r in rows] == [5990.0, 6050.0, 6060.0]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1242,18 +1265,16 @@ def test_next_trade_id_starts_at_001_and_is_zero_padded(trades_db):
     assert db.get_next_trade_id(trades_db) == "T-002"
 
 
-def test_next_trade_id_reuses_an_id_after_a_deletion(trades_db):
-    """PINNED — BUG-016 (new, P1). COUNT(*) + 1 is not a sequence.
+def test_next_trade_id_never_reuses_an_id_after_a_deletion(trades_db):
+    """FIXED — BUG-016. Was pinned as "returns T-002, which then raises".
 
-    Delete any trade that is not the newest and the next generated ID collides
-    with one already in use. trade_id is the PRIMARY KEY, so the subsequent
-    insert_trade() raises IntegrityError and the user loses the trade they were
-    recording, with a raw sqlite error where a saved trade should be.
+    COUNT(*) + 1 is not a sequence. Deleting any non-newest trade made the next
+    generated ID collide with a surviving PRIMARY KEY, so insert_trade() raised
+    and the trade being recorded was lost. Now derived from MAX(id), so the
+    deleted number is retired permanently.
 
-    This is reachable today: delete_trade() is wired to a confirmed delete
-    button in pages/journal.py, and STATUS.md commits to discarding the 6
-    practice trades before serious trading resumes — which is exactly this
-    sequence. Fix: derive from MAX(trade_id) or use a dedicated counter.
+    This test previously asserted the collision AND the IntegrityError.
+    Rewriting it was the point of the fix.
     """
     for tid in ("T-001", "T-002"):
         db.insert_trade(trades_db, {
@@ -1263,14 +1284,62 @@ def test_next_trade_id_reuses_an_id_after_a_deletion(trades_db):
         })
     db.delete_trade(trades_db, "T-001")
 
-    assert db.get_next_trade_id(trades_db) == "T-002", "collides with the survivor"
+    assert db.get_next_trade_id(trades_db) == "T-003", "T-002 survives; skip past it"
 
-    with pytest.raises(sqlite3.IntegrityError):
+    db.insert_trade(trades_db, {
+        "trade_id": "T-003", "entry_date": "2026-07-02", "entry_time": "09:34",
+        "status": "Open", "contracts": 1, "initial_legs": "[]", "total_debit": 4.0,
+    })
+    assert {t["trade_id"] for t in db.get_all_trades(trades_db)} == {"T-002", "T-003"}
+
+
+def test_next_trade_id_survives_discarding_every_practice_trade(trades_db):
+    """The exact sequence STATUS.md commits to: wipe the 6 practice trades,
+    then start recording real ones. Under the old code the first real trade
+    after the wipe raised. The gap is intentional — a real T-001 must not be
+    able to mean the same thing a discarded practice T-001 meant."""
+    for i in range(1, 7):
         db.insert_trade(trades_db, {
-            "trade_id": "T-002", "entry_date": "2026-07-02", "entry_time": "09:34",
+            "trade_id": f"T-{i:03d}", "entry_date": "2026-07-01",
+            "entry_time": "09:34", "status": "Open", "contracts": 1,
+            "initial_legs": "[]", "total_debit": 4.0,
+        })
+    for i in range(1, 7):
+        db.delete_trade(trades_db, f"T-{i:03d}")
+
+    assert db.get_all_trades(trades_db) == []
+    assert db.get_next_trade_id(trades_db) == "T-001", "empty table restarts at 1"
+
+
+def test_next_trade_id_orders_numerically_not_as_text(trades_db):
+    """'T-010' must outrank 'T-009'. A text MAX() gets that right only by luck
+    of zero-padding, and stops working entirely past 'T-999'."""
+    for tid in ("T-002", "T-010", "T-009"):
+        db.insert_trade(trades_db, {
+            "trade_id": tid, "entry_date": "2026-07-01", "entry_time": "09:34",
             "status": "Open", "contracts": 1, "initial_legs": "[]",
             "total_debit": 4.0,
         })
+    assert db.get_next_trade_id(trades_db) == "T-011"
+
+
+def test_next_trade_id_ignores_ids_that_are_not_trade_ids(trades_db):
+    """Only 'T-' IDs count toward the sequence.
+
+    `SEED` and `x` are harmless on their own — SQLite casts their tails to 0,
+    so they lose the MAX() either way. `TX999` is the case that actually needs
+    the `LIKE 'T-_%'` filter: `SUBSTR('TX999', 3)` is `'999'`, which casts to
+    999 and would jump the sequence to T-1000 without it. Without this ID in
+    the fixture the filter is unobservable and the test only appears to
+    protect it (found by mutation-testing this very test).
+    """
+    for tid in ("T-004", "SEED", "x", "TX999"):
+        db.insert_trade(trades_db, {
+            "trade_id": tid, "entry_date": "2026-07-01", "entry_time": "09:34",
+            "status": "Open", "contracts": 1, "initial_legs": "[]",
+            "total_debit": 4.0,
+        })
+    assert db.get_next_trade_id(trades_db) == "T-005"
 
 
 def test_seed_t001_inserts_the_first_live_trade(trades_db):
@@ -1397,18 +1466,14 @@ def test_ic_marks_is_none_for_the_wrong_expiry(temp_db):
     assert db.get_ic_marks(temp_db, BACK, SC, LC, SP, LP) is None
 
 
-def test_ic_marks_treats_a_null_mark_as_zero(temp_db):
-    """PINNED — `r["mark"] or 0.0`. A NULL mark becomes 0.0 rather than
-    excluding the leg, so cost_to_close silently understates the cost of
-    closing a short (or overstates it for a long) instead of returning None.
+def test_ic_marks_falls_back_to_the_midpoint_for_a_null_mark(temp_db):
+    """FIXED — BUG-014, third site. Was pinned as "NULL becomes 0.0".
 
-    Distinct from BUG-014: here the substitution is deliberate defensive code,
-    but it produces a number indistinguishable from a real zero mark, and that
-    number is subtracted from profit_locked_in to show unrealized P&L. Unlike
-    the history queries, this function does NOT fall back to the bid/ask
-    midpoint — DEBT-012 already records that the midpoint helper is duplicated
-    four times and missing here is the fifth site. Low frequency (~2.5% of rows
-    carry a NULL mark, and IC legs are near the money where quotes are dense).
+    `r["mark"] or 0.0` turned a missing quote into a real-looking 0.0, which
+    flowed into cost_to_close and out to the unrealized-P&L figure — a wrong
+    money number presented as a right one. It now falls back to the bid/ask
+    midpoint in SQL, as every history query in the module already did
+    (DEBT-012's fifth site).
     """
     sid = add_snapshot(temp_db, ts_ago(minutes=5))
     db.insert_option_rows(temp_db, [
@@ -1419,5 +1484,36 @@ def test_ic_marks_treats_a_null_mark_as_zero(temp_db):
     ])
     marks = db.get_ic_marks(temp_db, FRONT, SC, LC, SP, LP)
     assert marks is not None
-    assert marks["short_call_mark"] == 0.0, "NULL became 0.0, not the 3.0 midpoint"
-    assert marks["cost_to_close"] == pytest.approx(1.5), "understated by 3.0"
+    assert marks["short_call_mark"] == pytest.approx(3.0), "the midpoint, not 0.0"
+    assert marks["cost_to_close"] == pytest.approx(4.5)
+
+
+def test_ic_marks_is_none_when_a_leg_has_no_computable_mark(temp_db):
+    """The other half of the fix: with no mark AND no bid/ask there is nothing
+    honest to report, so the whole valuation is withheld rather than filled in
+    with a zero. This function is already all-four-or-nothing."""
+    sid = add_snapshot(temp_db, ts_ago(minutes=5))
+    db.insert_option_rows(temp_db, [
+        opt(sid, FRONT, SC, "C", mark=None, bid=None, ask=None),
+        opt(sid, FRONT, LC, "C", mark=1.0),
+        opt(sid, FRONT, SP, "P", mark=4.0),
+        opt(sid, FRONT, LP, "P", mark=1.5),
+    ])
+    assert db.get_ic_marks(temp_db, FRONT, SC, LC, SP, LP) is None
+
+
+def test_ic_marks_keeps_a_genuine_zero_mark(temp_db):
+    """A far-OTM leg really can mark at 0.00. That is a fact about the market,
+    not missing data, and must survive — which is precisely the distinction the
+    old truthiness check could not make."""
+    sid = add_snapshot(temp_db, ts_ago(minutes=5))
+    db.insert_option_rows(temp_db, [
+        opt(sid, FRONT, SC, "C", mark=3.0),
+        opt(sid, FRONT, LC, "C", mark=0.0, bid=0.0, ask=0.0),
+        opt(sid, FRONT, SP, "P", mark=4.0),
+        opt(sid, FRONT, LP, "P", mark=1.5),
+    ])
+    marks = db.get_ic_marks(temp_db, FRONT, SC, LC, SP, LP)
+    assert marks is not None
+    assert marks["long_call_mark"] == 0.0
+    assert marks["cost_to_close"] == pytest.approx(5.5)
