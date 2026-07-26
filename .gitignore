@@ -30,6 +30,9 @@ entry_locks.json
 chart_colors.json
 pinned_pairs.json
 
+# Single-instance lock held by the running collector (see collector.py).
+.collector.lock
+
 # ── Logs ─────────────────────────────────────────────────────────────────────
 *.log
 logs/

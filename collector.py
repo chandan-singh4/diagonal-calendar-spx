@@ -35,7 +35,9 @@ REQUIREMENTS
 from __future__ import annotations
 
 import argparse
+import atexit
 import logging
+import os
 import sys
 import time
 from datetime import date, datetime, time as dtime, timedelta, timezone
@@ -607,6 +609,105 @@ def _run_cycle(client, db_path: str, session: str, poll_interval: int) -> int:
 # Main Loop
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Single-instance guard
+#
+# WHY THIS EXISTS (2026-07-26): two collectors were found running side by side,
+# both started at logon two seconds apart. There is only ONE launcher — the
+# Startup-folder shortcut — but Windows 11's "automatically restart my apps
+# when I sign back in" is enabled by default, so Windows relaunched the
+# collector left running from the previous session while the shortcut launched
+# it again. Two instances poll Schwab twice and write interleaved rows for the
+# same snapshot.
+#
+# Guarding here rather than in start_collector.bat is deliberate: the guard must
+# hold however the process is launched — shortcut, Windows app-restart, VS Code
+# terminal, or Task Scheduler.
+#
+# The lock is an OS file lock, not a PID file, so it cannot go stale: if the
+# collector is killed or the machine loses power, the kernel drops the lock.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_LOCK_PATH = Path(__file__).resolve().parent / ".collector.lock"
+
+# Module-level so the handle stays open — and the lock held — for the process
+# lifetime. A local variable would be garbage-collected and release the lock.
+_lock_handle = None
+
+
+def _acquire_single_instance_lock() -> None:
+    """Take an exclusive lock, or exit(0) if another collector already holds it.
+
+    Exit code 0, not 1: a second copy declining to start is correct behaviour,
+    not a failure. A non-zero code would make Task Scheduler and any future
+    supervisor treat the normal case as an error worth retrying.
+    """
+    global _lock_handle
+
+    _lock_handle = open(_LOCK_PATH, "a+")  # noqa: SIM115 — held for process lifetime
+
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            _lock_handle.seek(0)
+            msvcrt.locking(_lock_handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(_lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        # Held by another process. Report to the console as well as the log —
+        # a user who double-clicked the launcher only sees the console, and
+        # needs to know why the window closed without collecting anything.
+        msg = (
+            f"Another collector is already running (lock: {_LOCK_PATH}). "
+            f"This instance is exiting so the two do not both poll Schwab "
+            f"and write duplicate snapshot rows."
+        )
+        print(msg)  # noqa: T201 — pre-logging, user-facing
+        logger.warning(msg)
+        _lock_handle.close()
+        _lock_handle = None
+        sys.exit(0)
+
+    # Record who holds it. Purely diagnostic — the lock itself is what enforces
+    # exclusivity, so a truncate/write failure here must not stop the collector.
+    try:
+        _lock_handle.seek(1)
+        _lock_handle.truncate()
+        _lock_handle.write(
+            f" pid={os.getpid()} started={datetime.now(_ET).isoformat(timespec='seconds')}\n"
+        )
+        _lock_handle.flush()
+    except OSError:
+        pass
+
+    atexit.register(_release_single_instance_lock)
+
+
+def _release_single_instance_lock() -> None:
+    """Release the lock on clean exit. The OS also releases it on a hard kill."""
+    global _lock_handle
+    if _lock_handle is None:
+        return
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            _lock_handle.seek(0)
+            msvcrt.locking(_lock_handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(_lock_handle.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
+    finally:
+        _lock_handle.close()
+        _lock_handle = None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="SPX Diagonal Dashboard — background data collector"
@@ -622,6 +723,10 @@ def main() -> None:
     args = parser.parse_args()
 
     _setup_logging()
+
+    # Before any API call or database write: refuse to be a second instance.
+    _acquire_single_instance_lock()
+
     config.validate()
 
     db_path = args.db or config.DB_PATH
