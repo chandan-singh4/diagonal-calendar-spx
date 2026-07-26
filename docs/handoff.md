@@ -1,6 +1,6 @@
 # Session Handoff
 
-## Session: 2026-07-25 — Phase 1 Audit + M0 Stabilization
+## Session: 2026-07-25/26 — Phase 1 Audit + M0 Stabilization (complete)
 
 ### Completed today
 
@@ -21,8 +21,10 @@
 | 0.10 | Index/table drops + VACUUM | ✅ **1.810 → 1.423 GB (387 MB, 21.4%)**, zero data loss, no query regression |
 | 0.11 | Dead-code removal | ✅ 9 functions + 2 dataclasses + `demo_data.py` + `DEMO_MODE` + artifact |
 | 0.12 | Log rotation | 🔄 Collector done (1 MB × 5); dashboard logging → M2.13 |
-| 0.13 | Collector `.bat` + task | 🔄 `.bat` rewritten; **task registration needs approval** |
-| 0.14 | `CHANGELOG.md` + tag | 🔄 Changelog done back to v0.1; tag pending first commit |
+| 0.13 | Collector auto-start | ✅ **Audit finding corrected** — auto-start already worked via a Startup folder shortcut since 2026-06-22. Task Scheduler rejected (Smart App Control + ONLOGON needs elevation, both reproduced). `.bat` and `.ps1` hardened anyway. |
+| 0.14 | `CHANGELOG.md` + tag | ✅ Changelog back to v0.1; **`v4.2` tagged** |
+| — | Repo organisation | ✅ `docs/`, `scripts/`, `migrations/` created; source modules deliberately left flat until M2 |
+| — | Commits | ✅ 5 commits on branch `m0-stabilize-and-clean`; `main` untouched |
 
 ### Files modified
 
