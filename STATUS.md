@@ -1,211 +1,97 @@
 # PROJECT STATUS
 
-**Last updated:** 2026-07-26 (end of the M0 session)
-**Current state:** Foundation cleanup finished. Ready to start writing automated tests.
-**Branch:** `m0-stabilize-and-clean` — 6 commits, tagged `v4.2`, not yet merged.
-**Dashboard:** Opened and checked after the changes. All six tabs render. No issues.
+**Updated:** 2026-07-26 · **Branch:** `m0-stabilize-and-clean` (9 commits, tagged `v4.2`, **not merged to main**)
+**State:** Foundation cleanup (M0) complete. Dashboard opened and verified — all 6 tabs render, no issues.
 
-> **Written for someone brand new**, with no background in software or trading assumed.
-> The detailed technical versions live in `docs/`. Regenerated at the end of each session
-> by the `/wrap` command.
+> Self-contained: read this file alone to start a session. No need to open other files unless doing deep work.
+> Replaced entirely by `/wrap` each session. Keep under 100 lines.
 
----
+## What this project is
 
-## Part 1 — The background story
+Chandan trades **options** on the S&P 500 index (SPX). An option is a contract to buy or sell at a set
+price before a set date. His strategy: sell options expiring soon, buy similar ones expiring later, pay the
+small difference. Options expiring soon lose value faster — that gap is the profit. Once it's worth enough,
+he restructures into a safer shape that locks the gain and caps the loss. **It's all about timing.**
 
-### What is this thing?
+Brokers show today's prices then discard them. To judge if today is a good moment you need weeks of history
+on the exact contracts he'd trade. Nobody keeps that for you. **So the historical record IS the product** —
+the screen is just a window onto it.
 
-Chandan trades **options** on the S&P 500 stock index. An option is a contract that gives
-you the right to buy or sell something at a set price before a set date. Options have
-expiry dates, and their prices move constantly.
+| Part | What it does |
+|---|---|
+| **Collector** | Background program. Every 1–5 min while markets are open, records all option prices. Auto-starts at Windows logon via a Startup-folder shortcut. |
+| **Database** | One file, 7.8M price records since 23 June, 1.42 GB. Irreplaceable — the broker won't sell you last Tuesday's prices. |
+| **Dashboard** | Web page, 6 tabs, charts built from that history. Reads only, never writes. |
+| **Journal** | Diary of actual trades, to later check results against predictions. |
 
-He uses one particular strategy. In plain terms:
+**Condition:** trading logic and the collector are genuinely good. Everything around them was missing —
+no automated checks, no backup, one 4,230-line dashboard file, broken housekeeping. Like a well-equipped
+kitchen with no fire extinguisher and out-of-date recipes on the wall.
 
-1. **Open the position.** He sells options that expire soon, and buys similar options that
-   expire a bit later. Selling brings money in; buying costs money. He pays the small
-   difference to set it up.
-2. **Wait.** Options that expire soon lose value faster than ones expiring later. That gap,
-   working in his favour, is where the profit comes from.
-3. **Convert it.** Once the position is worth enough, he restructures it into a safer shape
-   that locks in the gain and caps how much he could still lose.
+## The 9-stage plan
 
-The whole game is **timing** — knowing when step 1 is worth doing, and when step 3 has
-become worthwhile.
+`M0 clean up` **✅ done** → `M1 automated checks` **← next** → `M2 break up big files` → `M3 stop database
+growing` → `M4 data service` → `M5 decide on rebuilding the screen` → `M6 answer trading questions with real
+results` → `M7 machine learning` → `M8 run reliably unattended`
 
-### Why build software for it?
+Order is fixed: **you can't safely rearrange code you can't check automatically.** M0→M1→M2 is a chain.
 
-Because brokers show you today's prices and then throw them away.
+## This session (25–26 July)
 
-To judge whether today is a good moment, you need to know what "normal" looks like — and
-that means having **weeks of history** on the exact contracts he'd actually trade. No
-broker keeps that for you.
+Read the whole project, measured the database directly, wrote an audit + 9-stage plan, got approval, then:
 
-So that's the real insight here: **the historical record is the product.** The screen is
-just a window onto it.
+1. **Backup made and restore proven** — a month of irreplaceable data had existed in one place only. Biggest risk closed.
+2. **Fixed corrupted settings file** — a Windows encoding accident had been silently saving private/temp files into version history for weeks.
+3. **Database 21% smaller** (1.81→1.42 GB) — two internal shortcut lists were exact duplicates. Rehearsed on a copy first to prove nothing broke. Saves are faster too.
+4. **Deleted unused code** — ~a dozen functions plus an orphaned file.
+5. **Locked software versions** — project claimed one set, was running versions two major releases newer, with no warning.
+6. **Rewrote setup docs, organised folders** into `docs/`, `scripts/`, `migrations/`.
+7. **Added safety guard** blocking passwords/databases/logs from version history.
+8. **Started written memory** — plan, progress log, decision log, backlog, handoff.
 
-### The moving parts
+**Three honest notes:** (a) our own audit was wrong that the collector needed manual starting — it's
+auto-started since June; corrected. (b) We introduced a bug deleting code and caught it with a purpose-built
+check — exactly what M1 automates. (c) Found a pre-existing bug: every overnight/weekend pause is labelled
+"collector broke" — all 46 of them. Harmless now, must fix before building alerts.
 
-| Piece | What it does | Think of it as |
+## What to do next
+
+1. **Merge to main.** Work is parked on a branch, dashboard verified. Optionally run one live trading day on
+   the branch first — Monday would exercise the collector, log rotation, and smaller database for real.
+2. **Start M1 — automated checks.** Set up the test framework, then cover the calculation engine
+   (`iv_engine.py` — small, self-contained, no dependencies) first, then profit-and-loss maths in
+   `pages/journal.py` (`resolved_pl`, `ic_expiry_pnl_per_share`, `derive_ic`, `compute_stats`) — that one
+   handles real money. Then a safety net capturing current scanner output before M2 changes it. Target ~70%
+   coverage, plus automated checks on every save.
+
+## Open problems, priority order
+
+| Problem | Meaning | Stage |
 |---|---|---|
-| **The collector** | Runs quietly in the background all day. Every 1–5 minutes while markets are open it asks the broker "what do all these option prices look like right now?" and writes the answer down. | A diligent clerk taking inventory every few minutes |
-| **The database** | One large file holding every reading ever taken — currently **7.8 million** price records, going back to 23 June. | A filing cabinet that only ever gets fuller |
-| **The dashboard** | A web page with six tabs, showing charts and numbers built from that history. | The window onto the filing cabinet |
-| **The journal** | Where he records trades he actually made, so results can later be checked against what the tool predicted. | A trading diary |
+| No automated checks | Nothing verifies software after a change | M1 |
+| 4,230-line dashboard file | Appearance + calculations + data all mixed together | M2 |
+| Database grows forever | ~82 MB/trading day (~20 GB/yr), no cleanup | M3 |
+| Overnight pauses mislabelled as failures | All 46 records wrong; blocks alerting | M3 |
+| Manual drifted from reality | Describes 2 unused features, omits 1 used one | M2 |
+| Nothing restarts a crashed collector | Starts fine daily; mid-day crash goes unnoticed | M3 |
+| **Unexplained July issue — BLOCKED ON CHANDAN** | He reported "still having some issue", session ended before details. **Needs: what looked wrong, which tab, screenshot.** | — |
 
-The collector and the dashboard are kept deliberately **separate**. The collector only
-*writes*; the dashboard only *reads*. Either can crash without harming the other. That
-separation was designed well from the very start and is one of the project's real
-strengths.
+## Settled — don't reopen
 
-### What condition was it in?
+- **Screen stays as-is for now.** Real case to rebuild it, but not before checks exist — otherwise no way to
+  prove a rebuilt screen shows the same numbers. Revisit at M5.
+- **Old detailed price data gets trimmed eventually**, summary history kept forever.
+- **The 6 practice trades will be discarded**, diary restarts clean. **Consequence:** before serious trading
+  resumes, the app must save market conditions *with each trade* — otherwise trimming old data later erases
+  what's needed to judge if the strategy works.
+- **Single user, one machine**, viewable from phone later.
 
-Genuinely good where it counts, and neglected everywhere else.
+## How to work here
 
-**The strong parts.** The trading calculations are careful. The collector is robust — it
-survives the broker's connection dropping, recovers by itself, and records when it missed
-anything. And most importantly: when an earlier review found the project's *central trading
-assumption was probably wrong*, that assumption was publicly retracted and marked
-"unproven" rather than quietly patched. That kind of honesty is rare, and it's the most
-valuable thing in the project.
+Plan before coding · rehearse destructive changes on a copy · challenge assumptions with evidence, don't
+just agree · report honestly when something is unverified or wrong · **ask before** deleting, changing the
+database, committing/pushing, or changing system settings · finish with `/wrap`.
 
-**The weak parts.** Almost all the ordinary engineering discipline was missing:
-
-- **No automated checks at all.** Nothing verified the software still worked after a
-  change — every check meant a human clicking through the screen. One bug in July cost
-  *days* of hunting that an automated check would have caught in seconds.
-- **No backup.** A month of price history that genuinely cannot be re-obtained (the broker
-  will not sell you last Tuesday's prices) sat on one hard drive, in one file.
-- **One enormous file.** The dashboard lives in a single file of 4,230 lines, mixing
-  appearance, calculations, and data handling together.
-- **Housekeeping problems.** A corrupted settings file meant private and temporary files
-  were being saved into the project's version history. The setup instructions described a
-  version of the app that hadn't existed for months.
-
-A fair analogy: **a well-equipped professional kitchen with no fire extinguisher, no
-inventory system, and recipes taped to the wall that no longer match what's being cooked.**
-The cooking is good. Everything *around* the cooking was missing.
-
-### The plan
-
-Nine stages. We have just finished the first.
-
-```
-  M0  Clean up the foundations   ← DONE
-  M1  Write automated checks     ← NEXT
-  M2  Break up the huge files
-  M3  Stop the database growing forever
-  M4  Build a proper data service
-  M5  Decide whether to rebuild the screen
-  M6  Answer the trading questions using real results
-  M7  Machine learning (only with enough trade history)
-  M8  Make it run reliably without babysitting
-```
-
-The order is not negotiable: **you cannot safely rearrange code you can't check
-automatically, and you shouldn't start changing anything you can't undo.** M0 → M1 → M2 is
-a chain.
-
----
-
-## Part 2 — What we completed
-
-### First, an inspection
-
-Before touching anything, the entire project was read end to end — every code file, both
-long history documents, and the database measured directly rather than estimated. That
-produced a written report (`docs/AUDIT_2026-07-25.md`) covering what exists, what's wrong,
-how serious each problem is, and the nine-stage plan. It was reviewed and approved before
-any change was made.
-
-### Then the cleanup
-
-| # | What we did | Why it mattered |
-|---|---|---|
-| 1 | **Made a proper backup** and proved it could actually be restored | A month of irreplaceable data existed in exactly one place. This was the single biggest risk in the project. |
-| 2 | **Fixed a corrupted settings file** | A Windows text-encoding accident had silently broken the rule that keeps private and temporary files out of version history. They'd been saved for weeks. |
-| 3 | **Made the database 21% smaller** — 1.81 GB → 1.42 GB | Two internal "shortcut lists" were exact duplicates of others. Removing them freed 387 MB *and* made every save faster. Rehearsed on a copy first to prove nothing would break. |
-| 4 | **Deleted unused code** | Around a dozen functions nobody called, plus an entire orphaned file. |
-| 5 | **Locked down software versions** | The project claimed to use certain versions of its building blocks; it was actually running versions two major releases newer, with no warning of the drift. Now pinned exactly. |
-| 6 | **Rewrote the setup instructions and added proper documentation** | The old README described the app as an early prototype and told users to copy a file that didn't exist. |
-| 7 | **Added an automatic safety guard** | Refuses to save passwords, databases, or logs into version history. Tested in both directions. |
-| 8 | **Organised the folders** | Everything had been dumped into one directory. Now grouped into `docs/`, `scripts/`, `migrations/`. |
-| 9 | **Started a written memory** | Five living documents — plan, progress log, decision log, backlog, handoff — so knowledge survives between sessions instead of living in one person's head. |
-
-### Three things worth knowing
-
-**We found a mistake in our own report.** The audit claimed the collector had to be started
-by hand each day. That was wrong — it has started automatically since June via a Windows
-startup shortcut, and the project's own journal explained why the alternative had been
-rejected. The finding was corrected rather than quietly dropped.
-
-**We introduced a bug and caught it.** While deleting unused code, a needed line was
-removed alongside it. The software still appeared fine and would only have failed later,
-during trade logging. A purpose-built check found it. This is exactly the kind of thing the
-automated checks in M1 exist to catch, and it took deliberate effort to catch by hand.
-
-**We found a real bug nobody knew about.** The system labels *every* overnight and weekend
-pause as "the collector broke." All 46 recorded pauses say this; not one has ever been
-correctly labelled "market was closed." Harmless today, but it must be fixed before any
-alerting is built on top — an alarm that fires every single night is one people learn to
-ignore.
-
-### Does it still work?
-
-Yes. After all changes, the dashboard was opened and checked: all six tabs render
-correctly, no issues reported.
-
----
-
-## Part 3 — What's still open
-
-### Do next
-
-| What | Why it matters |
-|---|---|
-| **Merge the finished work into the main line** | It's parked on a side branch. The dashboard has been verified, so it's ready to go in. |
-| **M1 — Write the automated checks** | **The most important thing left.** Nothing currently verifies that a change hasn't broken something. Every later stage depends on this. Start with the calculation engine (small and self-contained), then the profit-and-loss maths — that one handles real money, so it matters most. |
-
-### Known problems, in priority order
-
-| Problem | What it means |
-|---|---|
-| **No automated checks** | Nothing verifies the software after a change. Being fixed in M1. |
-| **The 4,230-line file** | The dashboard is one giant file mixing appearance, calculations, and data handling. Slow to navigate, risky to change. M2. |
-| **The database grows forever** | About 82 MB every trading day — roughly 20 GB a year — with no cleanup. Fine now, a problem within a year. M3. |
-| **Overnight pauses mislabelled as failures** | The bug described above. Must be fixed before alerting is built. M3. |
-| **The manual has drifted from reality** | The main reference document describes two features the software doesn't actually use, and completely omits one it does. M2. |
-| **Nothing restarts a crashed collector** | It starts reliably each morning, but if it dies mid-day nothing notices. Costs part of one day at worst. M3. |
-| **An unexplained issue from July** | In an earlier session Chandan reported "still having some issue" but the session ended before details were captured. **Needs from him: what exactly looked wrong, on which tab, and ideally a screenshot.** Cannot be investigated without that. |
-
-### Decisions already settled — don't reopen
-
-- **The screen stays as it is for now.** There's a genuine case for rebuilding it in
-  different technology, but not before the checks and cleanup exist — with no automated
-  checks there'd be no way to prove a rebuilt screen shows the same numbers. Revisit at M5.
-- **Old detailed price data will eventually be trimmed**, keeping the summary history
-  forever.
-- **The six existing practice trades will be discarded** and the diary restarted clean.
-  **One important consequence:** before serious trading resumes, the app must start saving a
-  snapshot of market conditions *alongside each trade*. Otherwise trimming old data later
-  will erase the very information needed to judge whether the strategy actually works.
-- **Single user, one machine** — but viewable from a phone later on.
-
----
-
-## Part 4 — Where to look for more
-
-| Question | File |
-|---|---|
-| Full technical assessment and the nine-stage plan | `docs/AUDIT_2026-07-25.md` |
-| What we're working on right now | `docs/plan.md` |
-| Every bug, debt item, and idea | `docs/backlog.md` |
-| Why each decision was made | `docs/decisions.md` |
-| What happened in each session | `docs/progress_log.md` |
-| Last session's sign-off | `docs/handoff.md` |
-| The trading strategy and the maths | `docs/DOCUMENTATION.md` |
-| Long-form development history | `docs/DEV_JOURNAL.md` |
-
----
-
-*Regenerated by `/wrap` at the end of each session. Read by `/STARTUP` at the beginning of
-the next one.*
+**Deeper detail if needed:** `docs/plan.md` (task states) · `docs/backlog.md` (all bugs/debt) ·
+`docs/decisions.md` (why) · `docs/AUDIT_2026-07-25.md` (full assessment) · `docs/DOCUMENTATION.md` (strategy
+and maths) · `docs/progress_log.md` · `docs/DEV_JOURNAL.md`.

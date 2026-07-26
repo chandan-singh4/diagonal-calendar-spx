@@ -1,8 +1,8 @@
 # plan.md — Current Implementation Plan
 
-**Last updated:** 2026-07-25
+**Last updated:** 2026-07-26
 **Current milestone:** M0 — Stabilize & Clean
-**Status:** In progress
+**Status:** ✅ COMPLETE (2026-07-26). Next: M1 — Test Foundation.
 **Reference:** [`AUDIT_2026-07-25.md`](AUDIT_2026-07-25.md) §10 for the full roadmap
 
 ---

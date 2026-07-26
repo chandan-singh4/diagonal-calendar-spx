@@ -165,6 +165,22 @@ BUG-005, but it was an unintended write.
 - **Deferred by decision:** repo-wide formatter run until the M1 suite exists (ADR-015);
   dashboard logging until M2.13.
 
+### Session close (2026-07-26)
+
+- **M0 complete.** 9 commits on `m0-stabilize-and-clean`, tagged `v4.2`. Dashboard opened
+  and verified by the user after all changes — all six tabs render, no issues.
+- **Collector auto-start finding corrected.** The audit's OPS-001 ("depends on manual
+  start") was wrong: a Startup-folder shortcut has run it since 2026-06-22. Task Scheduler
+  registration was attempted and failed with Access Denied (ONLOGON triggers require
+  elevation) — which is exactly what `DEV_JOURNAL.md` 2026-06-22 documented. OPS-001 closed,
+  OPS-001b opened for the real residual gap (no crash recovery).
+- **Repo organised** into `docs/`, `scripts/`, `migrations/` via `git mv`. Source modules
+  deliberately left flat until M2, gated behind M1.
+- **Session commands added.** `STATUS.md` (repo root, max 100 lines, plain language,
+  self-contained) plus `/STARTUP` and `/wrap` in `.claude/commands/`. Purpose is token
+  efficiency: a new session reads `STATUS.md` alone and can begin work without opening any
+  other file.
+
 ### Notes
 - All changes are **staged/unstaged, not committed** — awaiting instruction on commit
   granularity.

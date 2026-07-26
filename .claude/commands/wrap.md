@@ -1,86 +1,73 @@
 ---
-description: End the session — regenerate STATUS.md in plain language and commit it
+description: End the session — rewrite STATUS.md (max 100 lines, self-contained), commit
 ---
 
 # /wrap — End-of-session wrap-up
 
-Close out this working session by rewriting `STATUS.md` so the next session starts from
-truth rather than from memory, then commit it.
+Rewrite `STATUS.md` so the next session can start from that file **alone**, then commit.
 
-## Step 1 — Gather the real state
+## The hard constraints
 
-Do not write from recollection. Check the following first:
+1. **Maximum 100 lines.** This is a budget, not a target. If it doesn't fit, cut detail —
+   never raise the limit. Detail belongs in `docs/`.
+2. **Completely replaced every time.** `STATUS.md` is a snapshot of *now*. Never append;
+   never keep stale content because it was there before. `docs/progress_log.md` is the log.
+3. **Self-contained.** The next session must be able to read this one file and begin work
+   immediately — knowing what the project is, what state it's in, and what to do next —
+   **without opening any other `.md` or `.py` file.** This is the whole point: it exists to
+   keep token usage low. If a fact is needed to start work, it goes in. If it's only needed
+   once work is underway, it goes in `docs/` and gets a pointer.
+4. **Plain language.** Written for someone with no software or trading background. Explain
+   every term on first use. No unexplained jargon — not "refactor", "schema", "index",
+   "API", "commit", "regression". Say what things *mean*, not what they're called.
 
-- `git log --oneline` since the session started, and `git status`
-- `docs/plan.md` — which milestone tasks changed state this session
-- `docs/backlog.md` — items opened, closed, or re-prioritised
-- `docs/decisions.md` — decisions recorded this session
-- Anything left broken, unverified, or blocked
+## Step 1 — Establish the real state
 
-If `docs/plan.md`, `docs/progress_log.md`, `docs/backlog.md`, `docs/decisions.md` or
-`docs/handoff.md` are out of date with what actually happened, **update those first** —
-`STATUS.md` is a plain-language summary of them, not a replacement for them.
+Do not write from recollection. Check:
 
-## Step 2 — Rewrite STATUS.md completely
+- `git log --oneline` for this session, `git status`, current branch, whether merged/pushed
+- `docs/plan.md` — which tasks changed state
+- `docs/backlog.md` — items opened, closed, re-prioritised
+- `docs/decisions.md` — decisions recorded
+- Anything left broken, unverified, or blocked on the user
 
-Replace the entire contents of `STATUS.md` (repo root). Do not append — it is a snapshot
-of *now*, not a log. `docs/progress_log.md` is the log.
+If those `docs/` files are out of date with what actually happened, **update them first**.
+`STATUS.md` is a plain-language summary of them, so they must be right before it is written.
 
-### Who it is written for
+## Step 2 — Rewrite STATUS.md
 
-**Someone who has just joined and knows nothing** — not about this project, and not about
-software or trading generally. Assume intelligence, assume zero background.
+Cover, in roughly this order and this weighting:
 
-- Explain every term the first time it appears, in ordinary words
-- Prefer a concrete analogy over a precise definition when the two compete
-- No unexplained jargon: not "refactor", "schema", "index", "API", "commit", "regression"
-- Say what things *mean for the project*, not what they are technically called
-- Short paragraphs. Tables where they genuinely help. No wall of text.
+| Section | Budget | Contents |
+|---|---|---|
+| Header | ~4 lines | Date, branch, commit/merge/push state, whether the dashboard is verified working |
+| What this project is | ~15 lines | The tool, the trading strategy in plain steps, why software was needed, the moving parts, honest condition |
+| The plan | ~6 lines | The stages, which is done, which is next, why the order is fixed |
+| This session | ~15 lines | What was done and **why it mattered** — not what was touched. Include mistakes found in our own earlier work, bugs introduced and caught, and bugs discovered. |
+| What to do next | ~10 lines | Specific and actionable — enough that work can start without further reading |
+| Open problems | ~10 lines | Priority order, plain descriptions, flag anything **blocked on the user** and exactly what's needed |
+| Settled decisions | ~8 lines | What not to reopen, and any consequence that must be honoured |
+| How to work here | ~5 lines | Working rules and what needs permission |
+| Deeper detail | ~3 lines | Pointers to `docs/` for when depth is genuinely needed |
 
-### Required sections
+Adjust the weighting to the session — a heavy code session earns more "what to do next",
+a planning session more "settled decisions". The 100-line ceiling is fixed regardless.
 
-1. **Header** — date, one-line current state, branch, whether the dashboard is verified working.
+## Step 3 — Tone
 
-2. **Part 1 — The background story**
-   - What this project is, in two or three sentences
-   - The trading strategy in plain language: what he does, why, and what "good timing" means
-   - Why software was needed at all (brokers discard yesterday's prices; the history *is*
-     the product)
-   - The moving parts (collector / database / dashboard / journal) with an everyday analogy each
-   - What condition the project was in — honest about both the genuinely strong parts and
-     the missing parts
-   - The nine-stage plan, and why its order cannot be shuffled
+Factual and calm. Don't oversell. If something is unverified, say so. **If an earlier
+conclusion turned out to be wrong, say that plainly** — a status file that hides its own
+corrections is worse than none, because it gets trusted.
 
-3. **Part 2 — What we completed** (this session and prior ones)
-   - Plainly, what was done and *why it mattered* — never just what was touched
-   - Include mistakes found in our own earlier work, and bugs discovered along the way
-   - End with whether everything still works and how that was verified
+## Step 4 — Commit
 
-4. **Part 3 — What's still open**
-   - The immediate next actions
-   - Known problems in priority order, each described in plain language
-   - Decisions already settled that should not be reopened
-   - Anything blocked on the user, and exactly what is needed from them
+Verify the line count (`wc -l STATUS.md`) is at or under 100. Stage `STATUS.md` plus any
+`docs/` files updated in Step 1. Commit with a message summarising the session's outcome,
+not "update status". Repo style: short subject, then a body explaining *why*.
 
-5. **Part 4 — Where to look for more** — a table mapping questions to files
+**Push only if the user asked.**
 
-6. **Maintenance note** — that this file is regenerated by `/wrap` each session
+## Step 5 — Report back
 
-### Tone
-
-Factual and calm. Do not oversell the work. If something is unverified, say so. If a
-previous conclusion turned out to be wrong, say that plainly — a status document that
-hides its own corrections is worse than useless, because it will be trusted.
-
-## Step 3 — Commit
-
-Stage `STATUS.md` plus any `docs/` files updated in Step 1, and commit with a message
-summarising the session's outcome (not just "update status"). Follow the existing commit
-style in this repo: a short subject line, then a body explaining *why*.
-
-Do not push unless explicitly asked.
-
-## Step 4 — Report back
-
-In two or three sentences: what changed in `STATUS.md`, what the commit was, and the single
-most important thing for the next session to pick up.
+Two or three sentences: what changed, the commit, and the single most important thing for
+the next session to pick up.

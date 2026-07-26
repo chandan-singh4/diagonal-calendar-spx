@@ -1,77 +1,67 @@
 ---
-description: Start a session — read STATUS.md, recap the project, propose a plan, request permissions
+description: Start a session — read STATUS.md, recap, propose a plan, request permissions
 ---
 
 # /STARTUP — Begin a working session
 
-Orient yourself before doing anything. **Do not write, edit, or run anything that changes
-state during this command** — reading and reporting only.
+## Step 1 — Read STATUS.md, and stop there
 
-## Step 1 — Read
+Read **`STATUS.md`** (repo root). That is the whole briefing. It is written to be
+self-contained, so **do not open `docs/` files, source files, or go exploring the codebase.**
+Doing so burns tokens re-deriving what that file already tells you — avoiding exactly that
+is why it exists.
 
-1. **`STATUS.md`** (repo root) — the plain-language snapshot from the last session. This is
-   the primary source.
-2. **`docs/plan.md`** — the current milestone and exact task states.
-3. **`docs/backlog.md`** — open bugs, technical debt, priorities.
-4. **`docs/handoff.md`** — the last session's sign-off and recommended next step.
+Then run these two cheap checks, because `STATUS.md` is a snapshot and may be stale:
 
-Then check reality against those documents, because they may be stale:
+```
+git log --oneline -5 && git status --short && git branch -vv
+python scripts/check_db.py
+```
 
-- `git log --oneline -10`, current branch, and `git status`
-- Whether the collector is running and how fresh the data is
-  (`python scripts/check_db.py`)
+That confirms the branch/commit state and whether the collector is healthy and the data
+current. **If reality disagrees with `STATUS.md`, say so explicitly and trust reality.**
 
-**If the documents and reality disagree, say so explicitly and trust reality.**
+Only read further files if the user's request genuinely needs depth `STATUS.md` doesn't
+carry — and say which file you're opening and why.
 
-## Step 2 — Report back
+## Step 2 — Brief the user
 
-Give the user a briefing in this shape. Keep it tight — this is a recap, not a re-read.
+Keep it tight. This is a recap, not a re-read.
 
-### 1. Background
-Three or four sentences: what this project is and what it's for, in plain language.
-Enough that someone returning after two weeks is re-oriented, no more.
+**1. Background** — 3–4 sentences in plain language: what this project is and what it's for.
+Enough to re-orient someone returning after a break.
 
-### 2. Where things stand
-- Current milestone and how far through it we are
-- What the last session completed
-- Branch state, and whether anything is uncommitted or unmerged
-- Whether the collector is healthy and the data current
+**2. Where things stand** — current stage, what the last session finished, branch state
+(committed? merged? pushed?), collector health and data freshness.
 
-### 3. What's open
-The open items in priority order, plainly described. Flag anything that is:
-- **blocked on the user** (and exactly what's needed from them)
-- **time-sensitive** (a window that closes, data that degrades)
+**3. What's open** — priority order, plainly described. Flag anything that is:
+- **blocked on the user** — and exactly what you need from them
+- **time-sensitive** — a window closing, data degrading
 - **a correction** to something previously believed true
 
-### 4. What I propose to work on
-A specific, ordered plan for *this* session — not the whole roadmap. Say what you'd do
-first, what it depends on, and roughly how far you expect to get. If the obvious next step
-is blocked, say what you'd do instead.
+**4. What I propose for this session** — a specific ordered plan for *today*, not the whole
+roadmap. What you'd do first, what it depends on, how far you expect to get. If the obvious
+next step is blocked, say what you'd do instead.
 
-### 5. Permissions I need from you
-List explicitly, and only what this session's plan actually requires. For each: what it is,
-why it's needed, and how reversible it is. Cover anything that:
+**5. Permissions I need** — only what this session's plan actually requires. For each: what
+it is, why it's needed, how reversible it is. Anything that:
+- deletes or overwrites files, database rows, or indexes
+- modifies the database (confirm a current backup exists first)
+- commits, tags, merges, or pushes
+- changes system settings — scheduled tasks, startup items, installed packages
+- stops or starts the collector
+- sends anything off this machine
 
-- **deletes or overwrites** files, database rows, or indexes
-- **modifies the database** in any way (always confirm a current backup exists first)
-- **commits, tags, merges, or pushes** to git
-- **changes the system** — scheduled tasks, startup items, installed packages
-- **stops or starts** the collector
-- **sends anything outside this machine**
-
-Then **stop and wait for approval.** Do not begin work in the same turn as the briefing.
+Then **stop and wait for approval.** Never brief and begin work in the same turn.
 
 ## Rules for the session that follows
 
-- **Plan before coding.** Understand, inspect, explain reasoning, then implement.
-- **Ask rather than guess** when requirements are genuinely ambiguous — but make ordinary
-  judgement calls yourself and say what you assumed.
-- **Rehearse destructive changes** on a copy where that's possible (the database work in M0
-  was proven on a backup clone before touching the real file).
-- **Challenge the user's assumptions** where you have evidence. Technical excellence, not
-  agreement. Say so plainly and give the reasoning.
-- **Report honestly.** If something is unverified, broken, or you got it wrong earlier,
-  state it directly.
-- **Keep the written memory current** — `docs/plan.md`, `docs/progress_log.md`,
-  `docs/decisions.md`, `docs/backlog.md` — as you go, not at the end.
-- **Finish with `/wrap`** to regenerate `STATUS.md` and commit.
+- **Plan before coding** — understand, inspect, explain reasoning, then implement.
+- **Rehearse destructive changes on a copy** where possible.
+- **Challenge assumptions with evidence** — technical excellence, not agreement.
+- **Report honestly** — say when something is unverified, broken, or when you got it wrong.
+- **Make ordinary judgement calls yourself**; ask only when genuinely ambiguous, and state
+  what you assumed.
+- **Keep `docs/plan.md`, `docs/progress_log.md`, `docs/decisions.md`, `docs/backlog.md`
+  current as you go**, not at the end.
+- **Finish with `/wrap`.**
