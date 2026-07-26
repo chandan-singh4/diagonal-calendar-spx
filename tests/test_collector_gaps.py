@@ -90,63 +90,48 @@ def test_a_weekday_holiday_is_not_a_trading_day():
 # These are the ~19 rows in collection_gaps that should never have been there.
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_pinned_ordinary_overnight_is_called_collector_offline(collector_offline_note=None):
-    """PINNED — BUG-005, the headline case. This is a normal Tuesday night.
+def test_ordinary_overnight_is_routine():
+    """FIXED — BUG-005, the headline case. Was pinned as COLLECTOR_OFFLINE.
 
-    The collector wrote its last snapshot at 15:59 (its cadence puts the final
-    write one minute before the 16:00 cutoff, not on it) and restarted at 09:30
-    the next morning. Nothing was collectable in between and nothing was lost.
-
-    Two off-by-ones against the collector's own window make it a fault:
-      after_close = start.time() >= 16:00  →  15:59 is not, so False
-      before_open = end.time()   <  09:30  →  09:30 is not, so False
-    Both False, so it falls through to COLLECTOR_OFFLINE.
+    A normal Tuesday night: last snapshot at 15:59 (the collector's cadence
+    puts the final write a minute before the 16:00 cutoff, not on it), restart
+    at 09:30. One minute of session time falls inside the window, which is
+    inside the tolerance, so nothing collectable was missed.
     """
-    assert classify(et(2026, 7, TUE, 15, 59), et(2026, 7, WED, 9, 30)) == "COLLECTOR_OFFLINE"
+    assert classify(et(2026, 7, TUE, 15, 59), et(2026, 7, WED, 9, 30)) == "MARKET_CLOSED"
 
 
-def test_pinned_a_full_weekend_is_right_but_for_the_wrong_reason():
-    """PINNED — Friday 15:59 to Monday 09:30 is 3,931 minutes, which trips the
-    crude `> 3,600 minutes must be a weekend` heuristic and lands on the right
-    answer by accident.
+def test_a_full_weekend_is_routine_for_the_right_reason_now():
+    """Friday 15:59 to Monday 09:30 — 3,931 minutes.
 
-    The backlog claimed this case was misfiled; it is not. Writing the test
-    first is what established that — the number in the write-up (2,611) was
-    wrong. The verdict is right, the reasoning is not: the same rule hides a
-    genuine three-day outage (see below), which is the same defect wearing the
-    opposite sign.
+    The old code got this right by accident, via `> 3,600 minutes must be a
+    weekend`. It is now right because the weekend contains no trading day and
+    therefore no collectable minutes. Same verdict, sound reasoning — and the
+    rule that produced it no longer hides three-day outages.
     """
     assert classify(et(2026, 7, FRI, 15, 59), et(2026, 7, MON + 7, 9, 30)) == "MARKET_CLOSED"
 
 
-def test_pinned_a_weekend_restart_is_called_collector_offline():
-    """PINNED — BUG-005. THE REAL OBSERVED CASE.
+def test_a_weekend_restart_is_routine():
+    """FIXED — BUG-005. THE REAL OBSERVED CASE, and the one that started this.
 
-    This is the gap `scripts/check_db.py` printed on 2026-07-26: last snapshot
-    Friday 15:59 ET, collector restarted on the Sunday. 2,432 minutes — under
-    the 3,600 heuristic, so it falls through to the two off-by-ones and is
-    reported as a fault. Nothing was collectable the entire time.
+    The gap `scripts/check_db.py` printed on 2026-07-26: last snapshot Friday
+    15:59 ET, collector restarted on the Sunday. 2,432 minutes, none of it
+    open market. Reported as a fault before; routine now.
     """
-    assert classify(et(2026, 7, FRI, 15, 59), et(2026, 7, 26, 8, 31)) == "COLLECTOR_OFFLINE"
+    assert classify(et(2026, 7, FRI, 15, 59), et(2026, 7, 26, 8, 31)) == "MARKET_CLOSED"
 
 
-def test_pinned_restart_a_minute_after_the_open_is_called_collector_offline():
-    """PINNED — BUG-005. The collector restarts at 09:30–09:31, so the `<09:30`
-    test fails even when the overnight period itself was entirely routine."""
-    assert classify(et(2026, 7, TUE, 15, 59), et(2026, 7, WED, 9, 31)) == "COLLECTOR_OFFLINE"
+def test_restart_a_minute_after_the_open_is_still_routine():
+    """FIXED — BUG-005. The collector restarts at 09:30–09:31, so up to a
+    minute of session time is unavoidably inside the gap. That is cadence, not
+    data loss, and the tolerance absorbs it."""
+    assert classify(et(2026, 7, TUE, 15, 59), et(2026, 7, WED, 9, 31)) == "MARKET_CLOSED"
 
 
-def test_pinned_every_overnight_gap_the_collector_produces_is_misfiled():
-    """PINNED — BUG-005, stated as the property that actually matters.
-
-    Every ordinary overnight gap is reported as a fault. The endpoints the rule
-    needs for MARKET_CLOSED (start at or after 16:00, end strictly before
-    09:30) are not the endpoints the collector generates — it writes its last
-    snapshot at 15:59 and restarts at 09:30–09:31.
-
-    Weekends are excluded here: they are long enough to trip the 3,600-minute
-    heuristic and come out right by accident (tested above).
-    """
+def test_every_overnight_gap_the_collector_produces_is_now_routine():
+    """FIXED — BUG-005, the property that actually matters. Was: all four
+    COLLECTOR_OFFLINE, "not one is recognised as routine"."""
     overnight_gaps = [
         (et(2026, 7, MON, 15, 59), et(2026, 7, TUE, 9, 30)),
         (et(2026, 7, TUE, 15, 59), et(2026, 7, WED, 9, 30)),
@@ -154,7 +139,34 @@ def test_pinned_every_overnight_gap_the_collector_produces_is_misfiled():
         (et(2026, 7, THU, 15, 59), et(2026, 7, FRI, 9, 30)),
     ]
     verdicts = {classify(s, e) for s, e in overnight_gaps}
-    assert verdicts == {"COLLECTOR_OFFLINE"}, "not one is recognised as routine"
+    assert verdicts == {"MARKET_CLOSED"}, "every routine night is recognised"
+
+
+def test_the_tolerance_does_not_swallow_a_real_outage():
+    """The tolerance absorbs cadence slop, not data loss. Four minutes late on
+    the open is past it — during the OPEN session that is four missed
+    snapshots, at the most volatile time of day."""
+    assert classify(et(2026, 7, TUE, 15, 59), et(2026, 7, WED, 9, 35)) == "COLLECTOR_OFFLINE"
+
+
+@pytest.mark.parametrize("minutes_late, missed, expected", [
+    (1, 2.0, "MARKET_CLOSED"),        # 09:31 — cadence at both ends
+    (2, 3.0, "MARKET_CLOSED"),        # 09:32 — exactly at the boundary, inclusive
+    (3, 4.0, "COLLECTOR_OFFLINE"),    # 09:33 — past it
+    (4, 5.0, "COLLECTOR_OFFLINE"),
+])
+def test_the_tolerance_boundary_is_where_it_is_documented_to_be(
+        minutes_late, missed, expected):
+    """3.0 market minutes, inclusive — pinned so the constant cannot drift.
+
+    Note the budget is spent at BOTH ends: a 15:59 last write already consumes
+    1.0 minute before the morning is considered, so the collector can be at
+    most 2 minutes late on the open, not 3. My first version of this test got
+    that wrong and the code caught it, which is the right way round.
+    """
+    end = et(2026, 7, WED, 9, 30) + timedelta(minutes=minutes_late)
+    assert mm(et(2026, 7, TUE, 15, 59), end) == missed
+    assert classify(et(2026, 7, TUE, 15, 59), end) == expected
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -166,41 +178,42 @@ def test_pinned_every_overnight_gap_the_collector_produces_is_misfiled():
 # never writes the row at all.
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_pinned_a_three_day_outage_during_trading_days_is_hidden_as_market_closed():
-    """PINNED — BUG-005, false-negative direction. Found 2026-07-26 (M1.6).
+def test_a_three_day_outage_during_trading_days_is_a_fault():
+    """FIXED — BUG-005, false-negative direction. Was pinned as MARKET_CLOSED.
 
-    The collector dies Monday lunchtime and is not noticed until Thursday
-    lunchtime. Three full trading days are gone — the single worst data-loss
-    event this system can suffer short of losing the file.
-
-    `if gap_minutes > 3600: return "MARKET_CLOSED"` assumes any gap longer than
-    60 hours must be a weekend. This one is 72 hours of mostly *open* market, so
-    it is reported as routine, and _check_startup_gap() then discards it without
-    recording anything. The outage leaves no trace whatsoever.
-
-    This is the exact scenario the M3.4 liveness alert exists to catch, so the
-    bug is worse than "the alarm is noisy" — the alarm is blind to its own
-    primary case.
+    The collector dies Monday lunchtime, unnoticed until Thursday lunchtime.
+    Three trading days gone — the worst data-loss event this system can suffer
+    short of losing the file, and it was reported as routine and then silently
+    discarded by _check_startup_gap(). This is the exact scenario the M3.4
+    liveness alert exists to catch; the alarm was blind to its own primary case.
     """
-    assert classify(et(2026, 7, MON, 12), et(2026, 7, THU, 12)) == "MARKET_CLOSED"
+    assert classify(et(2026, 7, MON, 12), et(2026, 7, THU, 12)) == "COLLECTOR_OFFLINE"
 
 
-def test_pinned_any_holiday_anywhere_in_a_long_outage_hides_it_as_holiday():
-    """PINNED — BUG-005, false-negative direction. Found 2026-07-26 (M1.6).
+def test_a_long_outage_containing_a_holiday_is_still_a_fault():
+    """FIXED — BUG-005, false-negative direction. Was pinned as HOLIDAY.
 
-    The holiday scan returns HOLIDAY if *any* calendar day inside the gap is a
-    holiday, regardless of how much open market the gap also covers. A collector
-    dead from 30 June to 8 July loses five trading days, but 3 July is in the
-    range, so the whole outage is filed as "holiday" and suppressed.
+    The old holiday scan returned HOLIDAY if ANY day inside the gap was a
+    holiday, however much open market the gap also covered. Dead from 30 June
+    to 8 July is five lost trading days; 3 July being a holiday no longer
+    excuses the other five.
     """
-    assert classify(et(2026, 6, 30, 12), et(2026, 7, 8, 12)) == "HOLIDAY"
+    assert classify(et(2026, 6, 30, 12), et(2026, 7, 8, 12)) == "COLLECTOR_OFFLINE"
 
 
-def test_pinned_a_single_holiday_day_is_reported_the_same_way_as_a_week_long_outage():
-    """PINNED — the consequence: the label carries no information about size."""
-    genuine = classify(et(2026, 7, PRE_HOLIDAY_THU, 15, 59), et(2026, 7, 6, 9, 30))
-    masked = classify(et(2026, 6, 30, 12), et(2026, 7, 8, 12))
-    assert genuine == masked == "HOLIDAY"
+def test_a_genuine_holiday_closure_is_still_reported_as_holiday():
+    """The specific label survives where it is actually true: Thursday's close
+    through Monday's open, spanning the Friday 3 July holiday. Nothing was
+    collectable, and the holiday is the reason worth recording."""
+    assert classify(et(2026, 7, PRE_HOLIDAY_THU, 15, 59),
+                    et(2026, 7, 6, 9, 30)) == "HOLIDAY"
+
+
+def test_holiday_outranks_market_closed_only_when_a_weekday_is_lost():
+    """A plain weekend is MARKET_CLOSED, not HOLIDAY — there is no holiday in
+    it. The distinction matters because it is the difference between 'the
+    market was shut as usual' and 'the market was shut unusually'."""
+    assert classify(et(2026, 7, FRI, 15, 59), et(2026, 7, MON + 7, 9, 30)) == "MARKET_CLOSED"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -224,41 +237,177 @@ def test_pinned_a_single_holiday_day_is_reported_the_same_way_as_a_week_long_out
 # left the actual generator untouched.
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_pinned_midsession_detector_exists_and_bypasses_the_classifier():
-    """PINNED — the decision is inline in main() and hardcoded.
+def midsession(start_et, end_et, poll_interval=300):
+    return collector._midsession_gap_reason(
+        start_et.astimezone(collector.timezone.utc),
+        end_et.astimezone(collector.timezone.utc),
+        poll_interval,
+    )
 
-    Asserted against the source because the logic is not extracted into
-    anything callable yet. Part of the fix is to extract it so it can be
-    tested properly rather than read.
+
+def test_the_first_cycle_of_the_morning_no_longer_records_a_false_gap():
+    """FIXED — BUG-005, and this is the one that produced most of the 46 rows.
+
+    Previously: `prev_snapshot_ts` is not cleared when the market closes, so at
+    09:30 the first cycle compares against 15:59 the previous day — ~1,051
+    minutes against a 2.5-minute threshold — and wrote a hardcoded
+    COLLECTOR_OFFLINE row. Every trading morning.
+
+    Now the decision routes through the classifier, which sees no missed market
+    time and returns None: do not record.
+
+    Was pinned by asserting against main()'s source, because the logic was
+    inline and untestable. Extracting it into _midsession_gap_reason() was part
+    of the fix, so this now tests behaviour instead of reading code.
     """
-    import inspect
-
-    src = inspect.getsource(collector.main)
-    assert 'reason                  = "COLLECTOR_OFFLINE"' in src, (
-        "the mid-session gap reason is hardcoded"
-    )
-    assert "_classify_gap" not in src, (
-        "and main() never consults the classifier"
-    )
+    assert midsession(et(2026, 7, TUE, 15, 59), et(2026, 7, WED, 9, 30)) is None
 
 
-def test_pinned_prev_snapshot_timestamp_is_not_reset_when_the_market_closes():
-    """PINNED — the reason the mid-session detector fires every morning.
+def test_a_genuine_midsession_stall_is_still_recorded():
+    """The detector must keep doing its actual job: a 40-minute hole in the
+    middle of a trading session is a real stall and must be reported."""
+    assert midsession(et(2026, 7, TUE, 11, 0), et(2026, 7, TUE, 11, 40)) == "COLLECTOR_OFFLINE"
 
-    The market-closed branch sleeps and continues without clearing
-    `prev_snapshot_ts`, so the comparison straddles the overnight break.
+
+def test_a_normal_gap_between_snapshots_is_not_recorded():
+    """One poll interval apart is not a gap at all."""
+    assert midsession(et(2026, 7, TUE, 11, 0), et(2026, 7, TUE, 11, 5)) is None
+
+
+def test_the_midsession_threshold_still_scales_with_the_poll_interval():
+    """2.5x the interval, and the cadence is a property of the TIME, not of the
+    argument. A 4-minute hole inside OPEN (09:30-10:00, 60s cadence) is a
+    stall; the same 4 minutes inside MIDDAY (300s cadence) is one ordinary
+    interval.
+
+    Originally written as 11:00-11:04 with poll_interval=60, which asserted the
+    wrong thing: 11:00 is MIDDAY, so the previous snapshot was taken at the
+    300s cadence whatever the caller passes. The slower-of-the-two rule exposed
+    that, so the test now picks times that genuinely sit in each session.
     """
-    import inspect
+    assert midsession(et(2026, 7, TUE, 9, 40), et(2026, 7, TUE, 9, 44),
+                      poll_interval=60) == "COLLECTOR_OFFLINE"
+    assert midsession(et(2026, 7, TUE, 11, 0), et(2026, 7, TUE, 11, 4),
+                      poll_interval=300) is None
 
-    src = inspect.getsource(collector.main)
-    closed_branch = src.split("if session is None:")[1].split("continue")[0]
-    assert "prev_snapshot_ts" not in closed_branch, (
-        "the market-closed branch does not clear prev_snapshot_ts"
-    )
+
+def test_the_1530_session_change_no_longer_looks_like_a_stall():
+    """FIXED — BUG-005, third defect. Found 2026-07-26 by running the fixed
+    classifier over the real collection_gaps rows.
+
+    At 15:30 MIDDAY becomes CLOSE and the cadence changes from 300s to 60s.
+    A perfectly ordinary 5-minute MIDDAY interval was then judged against the
+    new 60s threshold — 5.0 > 2.5 — so a gap was recorded at the session change
+    EVERY trading day. That is 22 of the 47 rows in the table, more than the
+    overnight misclassification produced.
+
+    These are the real timestamps of row 43: 15:26:37 to 15:31:37 ET.
+    """
+    assert midsession(et(2026, 7, THU, 15, 26, 37),
+                      et(2026, 7, THU, 15, 31, 37),
+                      poll_interval=60) is None
+
+
+def test_the_1000_session_change_is_also_safe():
+    """The reverse transition — OPEN (60s) to MIDDAY (300s). Harmless before,
+    but covered by the same rule now."""
+    assert midsession(et(2026, 7, THU, 9, 59), et(2026, 7, THU, 10, 1),
+                      poll_interval=300) is None
+
+
+def test_a_real_stall_across_the_session_change_is_still_caught():
+    """The slower-cadence rule must not become a blanket excuse: 20 minutes of
+    silence across 15:30 is well past even the MIDDAY threshold."""
+    assert midsession(et(2026, 7, THU, 15, 20), et(2026, 7, THU, 15, 40),
+                      poll_interval=60) == "COLLECTOR_OFFLINE"
+
+
+def test_a_stall_straddling_the_close_counts_only_the_market_side():
+    """A stall from 15:00 to 09:45 next morning is real — an hour of the CLOSE
+    session was missed, plus a quarter-hour of the open — but it must be
+    reported as a fault on those minutes, not on the 18 hours of wall clock."""
+    assert midsession(et(2026, 7, TUE, 15, 0),
+                      et(2026, 7, WED, 9, 45)) == "COLLECTOR_OFFLINE"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Cases the current classifier already gets right — these must NOT regress
+# market_minutes_between — the single measurement the whole fix rests on
+#
+# Every classification is now a consequence of this number, so it is tested
+# directly rather than only through its verdicts.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def mm(start_et, end_et) -> float:
+    return collector.market_minutes_between(
+        start_et.astimezone(collector.timezone.utc),
+        end_et.astimezone(collector.timezone.utc),
+    )
+
+
+def test_a_full_trading_day_is_390_minutes():
+    """09:30 to 16:00 — six and a half hours."""
+    assert mm(et(2026, 7, TUE, 9, 30), et(2026, 7, TUE, 16, 0)) == 390.0
+
+
+def test_a_window_wider_than_the_session_still_counts_only_the_session():
+    """Midnight to midnight on a trading day is still 390 collectable minutes."""
+    assert mm(et(2026, 7, TUE, 0, 0), et(2026, 7, WED, 0, 0)) == 390.0
+
+
+def test_an_overnight_window_costs_nothing():
+    assert mm(et(2026, 7, TUE, 16, 0), et(2026, 7, WED, 9, 30)) == 0.0
+
+
+def test_a_weekend_costs_nothing_however_long():
+    assert mm(et(2026, 7, FRI, 16, 0), et(2026, 7, MON + 7, 9, 30)) == 0.0
+
+
+def test_a_holiday_costs_nothing():
+    """3 July 2026 is a weekday, but the market is shut."""
+    assert mm(et(2026, 7, HOLIDAY_FRI, 9, 30), et(2026, 7, HOLIDAY_FRI, 16, 0)) == 0.0
+
+
+def test_a_multi_day_outage_sums_each_trading_day():
+    """Monday noon to Thursday noon: half of Monday, all of Tue and Wed, half
+    of Thursday. 240 + 390 + 390 + 150 = 1,170."""
+    assert mm(et(2026, 7, MON, 12, 0), et(2026, 7, THU, 12, 0)) == 1170.0
+
+
+def test_a_week_long_outage_skips_the_holiday_and_the_weekend():
+    """30 June (Tue) noon to 8 July (Wed) noon. Trading days inside: Tue 30
+    (240), Wed 1 (390), Thu 2 (390), Mon 6 (390), Tue 7 (390), Wed 8 (150).
+    Friday 3 is the holiday, 4-5 the weekend. Total 1,950."""
+    assert mm(et(2026, 6, 30, 12, 0), et(2026, 7, 8, 12, 0)) == 1950.0
+
+
+def test_the_boundary_minute_at_the_close_is_counted():
+    """15:59 to 16:00 is the one minute the old off-by-one tripped over."""
+    assert mm(et(2026, 7, TUE, 15, 59), et(2026, 7, TUE, 16, 0)) == 1.0
+
+
+def test_a_backwards_or_empty_window_is_zero_not_negative():
+    """MUTATION NOTE — deleting the `if end_utc <= start_utc` guard leaves the
+    suite green, and no test can distinguish it.
+
+    The guard is genuinely redundant: for a backwards window the day loop
+    either never runs (the start date is after the end date) or the
+    `overlap_end > overlap_start` check rejects the only day it visits.
+    Verified by running an unguarded copy side by side across same-day,
+    multi-day and zero-length windows — identical results.
+
+    Kept anyway. It states the function's contract at the top rather than
+    leaving a reader to derive it from two subtler conditions, and a clock
+    adjustment producing end < start is exactly the sort of input that should
+    fail obviously rather than subtly. Recorded here as a known equivalent
+    mutant so a later audit does not read it as an untested branch.
+    """
+    assert mm(et(2026, 7, TUE, 12, 0), et(2026, 7, TUE, 12, 0)) == 0.0
+    assert mm(et(2026, 7, TUE, 14, 0), et(2026, 7, TUE, 11, 0)) == 0.0
+    assert mm(et(2026, 7, THU, 12, 0), et(2026, 7, MON, 12, 0)) == 0.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cases the classifier already got right — these must NOT regress
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_a_gap_inside_one_trading_session_is_a_fault():

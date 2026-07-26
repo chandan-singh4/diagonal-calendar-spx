@@ -168,45 +168,136 @@ def _poll_interval(session: str) -> int:
     return config.POLL_INTERVAL_NORMAL
 
 
+def market_minutes_between(start_utc: datetime, end_utc: datetime) -> float:
+    """
+    Minutes of ACTUAL open market inside [start_utc, end_utc).
+
+    This is the single measurement the gap classifier needs, and it replaces
+    three separate heuristics that each guessed at it (BUG-005). Sums the
+    overlap of the window with the 09:30–16:00 ET session of every trading day
+    it touches; weekends and holidays contribute nothing because they are not
+    trading days.
+
+    Returns 0.0 for a window that is entirely outside market hours, however
+    long it is — an overnight break and a three-day weekend both cost zero
+    collectable minutes, which is the whole point.
+    """
+    if end_utc <= start_utc:
+        return 0.0
+
+    start_et = start_utc.astimezone(_ET)
+    end_et   = end_utc.astimezone(_ET)
+
+    total = 0.0
+    day = start_et.date()
+    while day <= end_et.date():
+        if _is_trading_day(day):
+            session_open  = datetime.combine(day, _OPEN_START, tzinfo=_ET)
+            session_close = datetime.combine(day, _CLOSE_END, tzinfo=_ET)
+            overlap_start = max(start_et, session_open)
+            overlap_end   = min(end_et, session_close)
+            if overlap_end > overlap_start:
+                total += (overlap_end - overlap_start).total_seconds() / 60
+        day += timedelta(days=1)
+
+    return total
+
+
+# How much missed market time still counts as "routine". Not a fudge factor —
+# it absorbs the collector's own cadence at the session boundaries:
+#   - the last write of the day lands at 15:59:xx, up to ~1.0 min before 16:00
+#   - the first write of the morning lands at 09:30:00–09:31:00, up to ~1.0 min
+# Worst case ~2.0 minutes of session time that no configuration could have
+# collected. 3.0 gives margin without masking anything meaningful: a genuine
+# outage costing under 3 minutes of market time is under one MIDDAY poll cycle.
+_ROUTINE_GAP_TOLERANCE_MINUTES = 3.0
+
+
 def _classify_gap(gap_start_utc: datetime, gap_end_utc: datetime) -> str:
     """
-    Heuristic classification of why a collection gap occurred.
+    Classify why a collection gap occurred, by measuring how much open market
+    it actually covers.
 
     Returns one of:
-      'HOLIDAY'           — gap aligns with a known market holiday
-      'MARKET_CLOSED'     — entire gap falls outside market hours (overnight / weekend)
-      'COLLECTOR_OFFLINE' — gap occurred during expected market hours
+      'HOLIDAY'           — nothing was collectable, and a market holiday is why
+      'MARKET_CLOSED'     — nothing was collectable (overnight / weekend)
+      'COLLECTOR_OFFLINE' — open market was missed; this is a real fault
 
-    This is used by the analytics layer to distinguish expected gaps (which should
-    be excluded from data quality warnings) from unexpected ones.
+    REWRITTEN 2026-07-26 (BUG-005). The previous version stacked three
+    heuristics and got the answer wrong in both directions:
+
+      - `start.time() >= 16:00 and end.time() < 09:30` — the collector writes
+        its last snapshot at 15:59 and restarts at 09:30–09:31, so neither test
+        ever passed and EVERY ordinary night was reported as a fault.
+      - `gap_minutes > 3600 → MARKET_CLOSED` — assumed any gap over 60 hours
+        was a weekend, so a collector dead from Monday to Thursday, losing
+        three full trading days, was reported as routine and then suppressed.
+      - the holiday scan returned HOLIDAY if ANY day in the range was a
+        holiday, so a week-long outage containing 3 July was filed as a
+        holiday.
+
+    The last two are the dangerous ones: they hid real data loss, which is the
+    exact case the M3.4 liveness alert is meant to catch.
+
+    Measuring market minutes replaces all three. A gap is routine if and only
+    if there was nothing to collect during it, which is the actual question.
     """
-    gap_minutes = (gap_end_utc - gap_start_utc).total_seconds() / 60
+    missed = market_minutes_between(gap_start_utc, gap_end_utc)
 
-    # Check each calendar day in the gap for a known holiday
-    start_date = gap_start_utc.date()
-    for offset in range(int(gap_minutes // (60 * 24)) + 2):
-        check = start_date + timedelta(days=offset)
-        if check > gap_end_utc.date():
-            break
-        if _is_holiday(check):
+    if missed > _ROUTINE_GAP_TOLERANCE_MINUTES:
+        return "COLLECTOR_OFFLINE"
+
+    # Nothing collectable was missed. Say WHY, preferring the more specific
+    # answer: a weekday that would have been a trading day but for a holiday.
+    day = gap_start_utc.astimezone(_ET).date()
+    last = gap_end_utc.astimezone(_ET).date()
+    while day <= last:
+        if day.weekday() < 5 and _is_holiday(day):
             return "HOLIDAY"
+        day += timedelta(days=1)
 
-    # Large gaps (> 60 hours) almost certainly span a weekend
-    if gap_minutes > 3600:
-        return "MARKET_CLOSED"
+    return "MARKET_CLOSED"
 
-    # If both endpoints are outside market hours on their respective days,
-    # the gap is overnight / market-closed
-    gap_start_et = gap_start_utc.astimezone(_ET)
-    gap_end_et   = gap_end_utc.astimezone(_ET)
 
-    after_close  = gap_start_et.time() >= _CLOSE_END
-    before_open  = gap_end_et.time()   <  _OPEN_START
+def _midsession_gap_reason(prev_utc: datetime, now_utc: datetime,
+                            poll_interval: int) -> str | None:
+    """
+    Decide whether a mid-session gap is worth recording, and why.
+    Returns the reason string, or None if the gap is routine and should not be
+    recorded at all.
 
-    if after_close and before_open:
-        return "MARKET_CLOSED"
+    EXTRACTED AND FIXED 2026-07-26 (BUG-005). This decision used to be inline
+    in main(), where it hardcoded reason='COLLECTOR_OFFLINE' and never
+    consulted the classifier. Since `prev_snapshot_ts` is not cleared when the
+    market closes, the first cycle of every trading morning compared against
+    15:59 the previous day — ~1,051 minutes against a 2.5-minute threshold —
+    and wrote a false fault row. Once per trading day, which is a far larger
+    source of the bad rows than the startup path the backlog blamed.
+    """
+    gap_min = (now_utc - prev_utc).total_seconds() / 60
 
-    return "COLLECTOR_OFFLINE"
+    # Judge the gap against the SLOWER of the two cadences (BUG-005, third
+    # defect — found 2026-07-26 by running the fixed classifier over the real
+    # collection_gaps rows).
+    #
+    # The interval changes from 300s to 60s at 15:30 when MIDDAY becomes CLOSE.
+    # Comparing a gap PRODUCED at the 300s cadence against the new 60s
+    # threshold makes an ordinary 5-minute MIDDAY interval look like a stall:
+    # 5.0 > 2.5. That fired at the session change every single trading day and
+    # accounts for 22 of the 47 recorded rows — more than the overnight
+    # misclassification did. The reverse transition at 10:00 (OPEN → MIDDAY) is
+    # harmless but is covered by the same rule.
+    prev_session   = get_session(prev_utc.astimezone(_ET))
+    prev_interval  = _poll_interval(prev_session) if prev_session else poll_interval
+    slowest        = max(poll_interval, prev_interval)
+
+    if gap_min <= (slowest / 60) * 2.5:
+        return None
+
+    reason = _classify_gap(prev_utc, now_utc)
+    if reason in ("MARKET_CLOSED", "HOLIDAY"):
+        return None
+    return reason
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -425,8 +516,12 @@ def _check_startup_gap(db_path: str) -> None:
         )
         return
 
-    # Unexpected gap: record it
-    expected_lost = int(gap_minutes / (config.POLL_INTERVAL_NORMAL / 60))
+    # Unexpected gap: record it. Snapshots lost is counted from MARKET minutes,
+    # not wall clock (BUG-005) — a restart at 09:40 after a Friday close used to
+    # be billed for the whole weekend, reporting ~486 snapshots lost when the
+    # real figure was 2.
+    missed_market_min = market_minutes_between(last_dt, now_utc)
+    expected_lost = int(missed_market_min / (config.POLL_INTERVAL_NORMAL / 60))
     now_str       = now_utc.strftime("%Y-%m-%d %H:%M:%S")
 
     db.record_gap(
@@ -863,20 +958,27 @@ def main() -> None:
                     datetime.fromisoformat(prev_snapshot_ts)
                     .replace(tzinfo=timezone.utc)
                 )
-                gap_min   = (datetime.now(timezone.utc) - prev_dt).total_seconds() / 60
-                threshold = (poll_interval / 60) * 2.5   # 2.5× expected interval
-                if gap_min > threshold:
+                now_dt    = datetime.now(timezone.utc)
+                gap_min   = (now_dt - prev_dt).total_seconds() / 60
+                reason    = _midsession_gap_reason(prev_dt, now_dt, poll_interval)
+                if reason is not None:
+                    # Count what was actually lost — market minutes, not wall
+                    # clock. A gap straddling the close used to be billed for
+                    # the overnight hours as well (BUG-005).
+                    missed_market_min = market_minutes_between(prev_dt, now_dt)
                     db.record_gap(
                         db_path                 = db_path,
                         gap_start               = prev_snapshot_ts,
                         gap_end                 = current_ts,
                         gap_minutes             = gap_min,
-                        expected_snapshots_lost = int(gap_min / (poll_interval / 60)),
-                        reason                  = "COLLECTOR_OFFLINE",
+                        expected_snapshots_lost = int(
+                            missed_market_min / (poll_interval / 60)),
+                        reason                  = reason,
                         notes = "Detected mid-session: gap exceeded 2.5× expected interval",
                     )
                     logger.warning(
-                        "Mid-session gap recorded: %.0f min between snapshots.", gap_min
+                        "Mid-session gap recorded: %.0f min between snapshots "
+                        "(%.0f min of open market missed).", gap_min, missed_market_min
                     )
             prev_snapshot_ts = current_ts
 
