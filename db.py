@@ -16,8 +16,18 @@ WRITER / READER SPLIT
   app.py       — pure reader; calls get_latest_complete_snapshot,
                  get_latest_atm_iv_snapshots, get_option_chain,
                  get_atm_iv_history, get_contract_iv_history,
-                 get_iv_spread_history, get_spx_intraday_today,
-                 get_all_expiry_atm_iv_today, update_snapshot_notes
+                 get_spx_intraday_today, get_diagonal_history,
+                 get_transform_mark_history, get_prior_session_close
+  journal.py   — trades reader/writer; plus get_entry_iv_context, get_ic_marks
+
+  The read path is enforced, not merely conventional: get_conn() opens with
+  PRAGMA query_only = ON, so a reader physically cannot take a write lock.
+
+REMOVED 2026-07-25 (M0.11) — all were unreachable; see decisions.md:
+  get_term_structure, get_iv_spread_history, get_snapshots,
+  get_all_expiry_atm_iv_today (orphaned when the Pair Scanner was removed in
+  v3.3), update_snapshot_notes. get_gaps() is deliberately RETAINED despite
+  being uncalled — backlog OPS-005 surfaces collection_gaps in the UI.
 
 SCHEMA
   schema_version    — version tracking; enables future migrations
@@ -33,6 +43,7 @@ IV SCALE
 """
 from __future__ import annotations   # allows X | Y type hints on Python 3.7+
 
+import json
 import logging
 import sqlite3
 from contextlib import contextmanager
@@ -116,12 +127,26 @@ CREATE TABLE IF NOT EXISTS option_rows (
     time_value       REAL
 );
 
-CREATE INDEX IF NOT EXISTS idx_option_rows_snapshot_id
-    ON option_rows(snapshot_id);
-
-CREATE INDEX IF NOT EXISTS idx_option_rows_contract
-    ON option_rows(expiry_date, strike, right);
-
+-- Index policy for option_rows (revised 2026-07-25, M0.10).
+--
+-- Two indexes were dropped because each was a strict LEFT PREFIX of another
+-- and therefore served no query the surviving index could not:
+--
+--   idx_option_rows_snapshot_id (snapshot_id)
+--       prefix of uq_option_rows_contract(snapshot_id, expiry_date, strike, right)
+--       -- 100 MB
+--   idx_option_rows_contract    (expiry_date, strike, right)
+--       prefix of idx_option_rows_contract_snap(expiry_date, strike, right, snapshot_id)
+--       -- 218 MB
+--
+-- Verified before dropping by rehearsing on a backup clone: EXPLAIN QUERY PLAN
+-- confirmed every hot query still resolves via an index (snapshot lookups fall
+-- through to uq_option_rows_contract, whose leading column is snapshot_id), and
+-- measured timings were unchanged. Net effect: 1.810 GB -> 1.423 GB, and ~3,000
+-- fewer index writes per collection cycle.
+--
+-- DO NOT re-add either index without measuring first. They are not free: at
+-- current volume each costs 100-220 MB and is maintained on every insert.
 CREATE INDEX IF NOT EXISTS idx_option_rows_contract_snap
     ON option_rows(expiry_date, strike, right, snapshot_id);
 
@@ -495,21 +520,6 @@ def get_last_snapshot_timestamp(db_path: str) -> str | None:
         return row["ts"] if row and row["ts"] else None
 
 
-def get_snapshots(db_path: str, start: str, end: str,
-                   status: str = "COMPLETE") -> list:
-    """Snapshots between start and end (UTC ISO8601) with given status."""
-    with get_conn(db_path) as conn:
-        return conn.execute(
-            """
-            SELECT * FROM snapshots
-            WHERE snapshot_timestamp BETWEEN ? AND ?
-              AND status = ?
-            ORDER BY snapshot_timestamp
-            """,
-            (start, end, status)
-        ).fetchall()
-
-
 def get_option_chain(db_path: str, snapshot_id: int) -> list:
     """
     Full option chain for a specific snapshot.
@@ -684,54 +694,6 @@ def get_entry_iv_context(db_path: str, entry_ts_utc: str,
         "atm_ratio": _ratio(atm_front, atm_back),
         "atm_level": _level(atm_front, atm_back),
     }
-
-
-def get_term_structure(db_path: str, snapshot_id: int) -> list:
-    """All expiries for a given snapshot, ordered by DTE ascending."""
-    with get_conn(db_path) as conn:
-        return conn.execute(
-            """
-            SELECT * FROM atm_iv_by_expiry
-            WHERE snapshot_id = ?
-            ORDER BY dte
-            """,
-            (snapshot_id,)
-        ).fetchall()
-
-
-def get_iv_spread_history(db_path: str, front_expiry: str, back_expiry: str,
-                           days: int = 180) -> list:
-    """
-    Front-vs-back IV spread history for the IV percentile engine.
-    Returns one row per COMPLETE snapshot where both expiries are present.
-    Used for 'current IV spread is at the Nth percentile of last 180 days'.
-    """
-    with get_conn(db_path) as conn:
-        return conn.execute(
-            """
-            SELECT
-                s.snapshot_timestamp,
-                s.underlying_price,
-                s.vix_value,
-                f.atm_avg_iv                                   AS front_iv,
-                b.atm_avg_iv                                   AS back_iv,
-                b.atm_avg_iv - f.atm_avg_iv                   AS iv_spread,
-                CASE WHEN f.atm_avg_iv > 0
-                     THEN b.atm_avg_iv / f.atm_avg_iv
-                     ELSE NULL END                             AS iv_ratio
-            FROM snapshots s
-            JOIN atm_iv_by_expiry f
-                ON f.snapshot_id = s.snapshot_id
-               AND f.expiry_date = ?
-            JOIN atm_iv_by_expiry b
-                ON b.snapshot_id = s.snapshot_id
-               AND b.expiry_date = ?
-            WHERE s.status = 'COMPLETE'
-              AND s.snapshot_timestamp >= datetime('now', ?, 'utc')
-            ORDER BY s.snapshot_timestamp
-            """,
-            (front_expiry, back_expiry, f"-{days} days")
-        ).fetchall()
 
 
 def get_diagonal_history(
@@ -983,68 +945,6 @@ def get_spx_intraday_today(db_path: str, session_date: str | None = None) -> lis
             """,
             (bound,)
         ).fetchall()
-
-
-def get_all_expiry_atm_iv_today(db_path: str, session_date: str | None = None) -> list:
-    """
-    ATM IV for every expiry at every COMPLETE snapshot on the given session date.
-
-    Used by app.py's Pair Scanner to compute intraday IV ratios for all
-    possible (front, back) expiry combinations.
-
-    session_date: 'YYYY-MM-DD' string in UTC. App derives this from the latest
-    snapshot's own timestamp so the scanner always shows the most recent session's
-    data rather than 0 rows when called after-hours or pre-open (when no snapshots
-    exist for the current UTC calendar day yet).
-
-    Returns rows with:
-      snapshot_timestamp  TEXT  — UTC 'YYYY-MM-DD HH:MM:SS'
-      expiry_date         TEXT  — 'YYYY-MM-DD'
-      dte                 INT   — days to expiration at snapshot time
-      atm_avg_iv          REAL  — decimal form (0.18 = 18%); caller × 100
-
-    Performance: uses idx_atm_iv_expiry_snap; at 5-min polling across
-    20 expirations for 6.5 market hours ≈ 1,560 rows/day — trivially fast.
-    """
-    bound = session_date if session_date else datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    with get_conn(db_path) as conn:
-        return conn.execute(
-            """
-            SELECT
-                s.snapshot_timestamp,
-                a.expiry_date,
-                a.dte,
-                a.atm_avg_iv
-            FROM atm_iv_by_expiry a
-            JOIN snapshots s ON s.snapshot_id = a.snapshot_id
-            WHERE s.status              = 'COMPLETE'
-              AND s.snapshot_timestamp >= ?
-            ORDER BY s.snapshot_timestamp, a.expiry_date
-            """,
-            (bound,)
-        ).fetchall()
-
-
-def update_snapshot_notes(db_path: str, snapshot_id: int, notes: str) -> None:
-    """
-    Update the notes field on a snapshot record.
-    The only write operation permitted from app.py on this schema.
-    """
-    with managed_conn(db_path) as conn:
-        conn.execute(
-            "UPDATE snapshots SET notes = ? WHERE snapshot_id = ?",
-            (notes, snapshot_id)
-        )
-
-"""
-APPEND THIS ENTIRE FILE TO THE BOTTOM OF db.py
-───────────────────────────────────────────────
-Adds the trades table, all CRUD operations, live IC mark-price queries,
-and the T-001 seed record.  All new functions follow the same conventions
-as the rest of db.py (managed_conn, _utcnow, logger).
-"""
-
-import json as _json  # local alias — only used in seed_t001
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1349,13 +1249,13 @@ def seed_t001(db_path: str) -> None:
             return
 
         now = _utcnow()
-        initial = _json.dumps([
+        initial = json.dumps([
             {"expiry": "2026-06-30", "type": "Call", "action": "Sell to Open", "strike": 7380, "fill": 24.10},
             {"expiry": "2026-06-30", "type": "Put",  "action": "Sell to Open", "strike": 7320, "fill": 66.65},
             {"expiry": "2026-07-02", "type": "Call", "action": "Buy to Open",  "strike": 7400, "fill": 32.95},
             {"expiry": "2026-07-02", "type": "Put",  "action": "Buy to Open",  "strike": 7300, "fill": 70.70},
         ])
-        transform = _json.dumps([
+        transform = json.dumps([
             {"expiry": "2026-07-02", "type": "Call", "action": "Sell to Close", "strike": 7400, "fill": 37.01},
             {"expiry": "2026-07-02", "type": "Put",  "action": "Sell to Close", "strike": 7300, "fill": 58.34},
             {"expiry": "2026-06-30", "type": "Call", "action": "Buy to Open",   "strike": 7385, "fill": 25.92},

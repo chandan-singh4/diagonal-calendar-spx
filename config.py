@@ -19,24 +19,13 @@ SCHWAB_CALLBACK_URL = os.environ.get("SCHWAB_CALLBACK_URL", "https://127.0.0.1:8
 SCHWAB_TOKEN_PATH   = str(PROJECT_ROOT / os.environ.get("SCHWAB_TOKEN_PATH", "data/token.json"))
 
 DB_PATH      = str(PROJECT_ROOT / os.environ.get("DB_PATH", "data/dashboard.db"))
-DEMO_DB_PATH = str(PROJECT_ROOT / "data" / "demo_dashboard.db")
 
-# Default state of the Demo Mode toggle in the dashboard sidebar, used every time
-# the Streamlit process (re)starts. Demo Mode uses synthetic data and needs no
-# Schwab credentials — handy for previewing the UI or developing chart/layout
-# changes without burning real API calls.
-#
-# If you set DEMO_MODE explicitly in .env, that wins, full stop. Otherwise, the
-# default is smart: ON if no real credentials are present yet (so first-time
-# setup just works with zero config), OFF once SCHWAB_APP_KEY/SECRET are filled
-# in (so a process restart after you've gone live doesn't silently revert you
-# back to synthetic data without you noticing — which is exactly what happened
-# before this fix).
-_explicit_demo_mode = os.environ.get("DEMO_MODE")
-if _explicit_demo_mode is not None:
-    DEMO_MODE = _explicit_demo_mode.lower() == "true"
-else:
-    DEMO_MODE = not (SCHWAB_APP_KEY and SCHWAB_APP_SECRET)
+# NOTE: DEMO_MODE and DEMO_DB_PATH were removed 2026-07-25 (M0.11). Demo Mode
+# had been removed from the dashboard UI, leaving the config flag with zero
+# consumers and demo_data.py orphaned (it also still wrote to the pre-v2
+# `strike_snapshots` schema). Both were deleted. Do not re-add a demo flag
+# without a consumer — the README instructed users to "toggle Demo Mode off in
+# the sidebar" for weeks after the toggle ceased to exist.
 
 UNDERLYING_SYMBOL = "$SPX"   # Schwab's symbol convention for the SPX index
 VIX_SYMBOL        = "$VIX" # Schwab's symbol for the CBOE Volatility Index

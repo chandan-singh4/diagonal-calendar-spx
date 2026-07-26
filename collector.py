@@ -39,6 +39,8 @@ import logging
 import sys
 import time
 from datetime import date, datetime, time as dtime, timedelta, timezone
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -74,16 +76,33 @@ _GAP_THRESHOLD_MINUTES = 8.0
 
 def _setup_logging() -> None:
     """
-    INFO+ → stdout (visible when running in terminal).
-    WARNING+ → collector.log (persistent record of errors and gaps).
+    INFO+   → stdout (visible when running in a terminal).
+    WARNING+→ collector.log (persistent record of errors and gaps).
+
+    The file handler ROTATES (added 2026-07-25, M0.12). Previously it was a
+    plain FileHandler, so collector.log grew without bound — it had reached
+    486 KB and, because it was also tracked in git, every commit carried a log
+    diff. Rotation caps total on-disk log at ~5 x 1 MB; the file is now
+    gitignored.
+
+    Paths are resolved relative to this file, not the process working
+    directory, so the log always lands beside the code regardless of where the
+    collector is launched from (Task Scheduler starts it from C:\\Windows\\System32).
     """
     fmt     = "%(asctime)s  %(levelname)-8s  %(message)s"
     datefmt = "%Y-%m-%d %H:%M:%S"
 
+    log_path = Path(__file__).resolve().parent / "collector.log"
+
     stdout_handler = logging.StreamHandler(sys.stdout)
     stdout_handler.setLevel(logging.INFO)
 
-    file_handler = logging.FileHandler("collector.log", encoding="utf-8")
+    file_handler = RotatingFileHandler(
+        log_path,
+        maxBytes=1_000_000,     # 1 MB per file
+        backupCount=5,          # keep 5 rotations => ~5 MB ceiling
+        encoding="utf-8",
+    )
     file_handler.setLevel(logging.WARNING)
 
     logging.basicConfig(

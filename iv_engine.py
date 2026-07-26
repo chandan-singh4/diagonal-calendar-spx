@@ -2,23 +2,54 @@
 iv_engine.py — Analytics core.
 
 Everything here is pure functions: given data, return numbers.
-No API calls, no UI, no database writes.
+No API calls, no UI, no database writes, no framework imports.
 
-Dashboard v1 additions (2026-06-25):
-  - iv_regime()        → regime label + CSS color for any IV ratio
-  - CalendarEdge       → call edge / put edge per-strike dataclass
-  - calendar_edge()    → computes CalendarEdge from chain_df
-  - TransformCredit    → full transformation viability dataclass
-  - transform_credit() → theoretical lock-in credit calculation
+This purity is deliberate and load-bearing: it makes this module the one part
+of the codebase that is fully unit-testable today, and it is the seed of the
+framework-agnostic `core/` package that M2 builds out. Do not import streamlit,
+sqlite3, or schwab here.
+
+CONVENTIONS
+  IV is passed in PERCENTAGE form (18.5 means 18.5%). The database stores
+  decimals; callers multiply by 100 at the load boundary — nowhere else.
+  Premium is in points, where 1.00 point = $100 per SPX contract.
+
+Contents:
+  atm_iv()             → ATM IV for an expiry, averaged across call and put
+  TermStructure        → front/back IV, spread, ratio
+  term_structure()     → builds TermStructure
+  interpret_curve()    → plain-language, NON-DIRECTIONAL read on curve shape
+  percentile_rank()    → where a value sits within a history
+  sample_size_warning()→ guards against trusting thin percentiles
+  liquidity_score()    → 0-100 from volume + open interest (thresholds UNVALIDATED)
+  RangeStats /
+  range_stats()        → low/high/current position for the range bars
+  StrikeContract /
+  strike_contract()    → per-strike market data with nearest-strike fallback
+  CalendarEdge /
+  calendar_edge()      → per-side front-vs-back IV differential
+  TransformCredit /
+  transform_credit()   → theoretical lock-in credit for the transformation
+  atm_straddle_price() → S x sigma x sqrt(2T/pi) normalisation denominator
+  normalized_debit()   → diagonal mark as a fraction of the expected move
+  ThetaDifferential /
+  theta_differential() → position-level daily theta across all four legs
+
+Removed 2026-07-25 (M0.11) — all were unreachable; see decisions.md:
+  iv_regime, mean_reversion_estimate/ReversionEstimate, trade_quality_score,
+  expected_move_log_check/ExpectedMoveCheck.
+
+NOTE: calendar_edge() and transform_credit() are currently NOT called by the
+dashboard, which duplicates their logic inline. That is a defect in app.py,
+not a reason to delete these — M2.2 wires app.py to call them, which also
+removes the four duplicated copies of the $5.00 threshold and the two
+hardcoded copies of the +/-5 wing offset (backlog DEBT-004, DEBT-006).
 """
 
 import math
 from dataclasses import dataclass
 
-import numpy as np
 import pandas as pd
-
-import config
 
 
 # ---------------------------------------------------------------------------
@@ -97,43 +128,6 @@ def interpret_curve(ts: TermStructure) -> str:
 
 
 # ---------------------------------------------------------------------------
-# IV Regime classification  (NEW — Dashboard v1)
-# ---------------------------------------------------------------------------
-
-def iv_regime(ratio: float) -> tuple[str, str]:
-    """
-    Returns (regime_label, hex_color) for a given IV ratio (front_iv / back_iv).
-
-    NEUTRAL, NON-VALENCED classification. Labels describe WHICH SIDE is elevated;
-    they do NOT assert good/bad. Colors are a non-valenced blue↔purple palette
-    (neither conventionally means good or bad in finance) so the UI never implies
-    that one regime is favorable. Favorability is unvalidated — see
-    DOCUMENTATION.md §3.1 and the 2026-06-25 audit.
-
-    TERMINOLOGY (standard volatility conventions):
-      ratio > 1.0 → front IV > back IV → BACKWARDATION (inverted term structure)
-      ratio < 1.0 → front IV < back IV → CONTANGO (normal term structure)
-
-    Bands:
-      < 0.92        BACK-ELEVATED   (strong contango)
-      0.92 – 0.97   BACK-LEANING
-      0.97 – 1.03   FLAT
-      1.03 – 1.08   FRONT-LEANING
-      > 1.08        FRONT-ELEVATED  (strong backwardation)
-    """
-    if ratio < 0.92:
-        return "BACK-ELEVATED", "#5b8fb9"     # muted blue
-    elif ratio < 0.97:
-        return "BACK-LEANING",  "#7b9cc4"
-    elif ratio <= 1.03:
-        return "FLAT",          "#8b949e"      # neutral gray
-    elif ratio <= 1.08:
-        return "FRONT-LEANING", "#b59cc4"
-    else:
-        return "FRONT-ELEVATED","#9b7cc4"      # muted purple
-
-
-# ---------------------------------------------------------------------------
 # Percentile context
 # ---------------------------------------------------------------------------
 
@@ -162,49 +156,7 @@ def sample_size_warning(history: pd.Series, min_recommended: int = 200) -> str |
 
 
 # ---------------------------------------------------------------------------
-# Mean reversion estimate
-# ---------------------------------------------------------------------------
-
-@dataclass
-class ReversionEstimate:
-    front_vs_mean:      float   # current front IV minus historical mean front IV
-    back_vs_mean:       float
-    estimated_crush_pct: float  # rough estimate of how much front IV could contract
-
-
-def mean_reversion_estimate(
-    current_front_iv: float,
-    current_back_iv: float,
-    historical_front: pd.Series,
-    historical_back: pd.Series,
-    dte: int,
-) -> ReversionEstimate:
-    """
-    A deliberately simple model: assumes IV reverts toward its historical mean,
-    and that more of that reversion happens the more DTE remain.
-
-    This is a heuristic, not a forecast — treat estimated_crush_pct as a rough
-    sizing signal, not a prediction to bet position size on.
-    """
-    front_mean = historical_front.dropna().mean()
-    back_mean  = historical_back.dropna().mean()
-
-    front_vs_mean = (current_front_iv - front_mean) if not np.isnan(front_mean) else float("nan")
-    back_vs_mean  = (current_back_iv  - back_mean)  if not np.isnan(back_mean)  else float("nan")
-
-    # Reversion speed assumption: capped at 70% reversion by 30 DTE.
-    time_factor         = min(dte / 30, 1.0) * 0.7
-    estimated_crush_pct = (front_vs_mean * time_factor) if not np.isnan(front_vs_mean) else float("nan")
-
-    return ReversionEstimate(
-        front_vs_mean=front_vs_mean,
-        back_vs_mean=back_vs_mean,
-        estimated_crush_pct=estimated_crush_pct,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Trade Quality Score
+# Liquidity / range helpers
 # ---------------------------------------------------------------------------
 
 def liquidity_score(volume: float, open_interest: float) -> float:
@@ -241,26 +193,12 @@ def range_stats(series: pd.Series, current_value: float) -> RangeStats:
     return RangeStats(low=low, high=high, current=current_value, position_pct=pct)
 
 
-def trade_quality_score(
-    iv_spread_percentile: float,
-    liquidity: float,
-    theta_advantage: float,
-) -> float:
-    """
-    Weighted composite, 0-100.
-    Weights are a starting point — once you've logged enough actual trade
-    outcomes (Phase 4), replace these with weights fit to your historical win
-    rate rather than these initial guesses.
-    """
-    weights = {"iv_edge": 0.45, "liquidity": 0.30, "theta": 0.25}
-    iv_edge          = min(max(iv_spread_percentile, 0), 100)
-    liquidity_clamped = min(max(liquidity, 0), 100)
-    theta_clamped    = min(max(theta_advantage, 0), 100)
-    return (
-        weights["iv_edge"]  * iv_edge
-        + weights["liquidity"] * liquidity_clamped
-        + weights["theta"]     * theta_clamped
-    )
+# NOTE: trade_quality_score() was removed 2026-07-25 (M0.11). It was never
+# called. DOCUMENTATION.md §8.3 had already rejected composite "magic scores"
+# on the grounds that they obscure which dimension drives the value, and §6.9
+# flagged that two of its three inputs (IV_Edge_Pct direction, Theta_Advantage
+# placeholder) had no validated basis. Do not reintroduce a composite score
+# without first validating the components. See decisions.md ADR-001.
 
 
 # ---------------------------------------------------------------------------
@@ -524,47 +462,11 @@ def transform_credit(
     )
 
 
-# ---------------------------------------------------------------------------
-# Expected Move Log Check
-# ---------------------------------------------------------------------------
-
-@dataclass
-class ExpectedMoveCheck:
-    spot:               float
-    atm_iv_pct:         float
-    max_dte:            int
-    em_1sd:             float
-    em_2sd:             float
-    configured_window:  int
-    window_adequate:    bool
-
-
-def expected_move_log_check(
-    spot: float,
-    atm_iv_pct: float,
-    max_dte: int,
-) -> ExpectedMoveCheck:
-    """
-    Computes 1 SD and 2 SD expected move for the longest expiry in scope
-    and checks whether the configured strike window covers the full 2 SD range.
-
-    Informational only — result is never used to gate or modify what gets fetched.
-
-    Formula: Expected Move = Spot × (IV / 100) × √(DTE / 365)
-    """
-    iv_decimal = atm_iv_pct / 100.0
-    em_1sd = spot * iv_decimal * math.sqrt(max_dte / 365)
-    em_2sd = 2 * em_1sd
-    window = config.STRIKE_FETCH_WIDTH_POINTS
-    return ExpectedMoveCheck(
-        spot=spot,
-        atm_iv_pct=atm_iv_pct,
-        max_dte=max_dte,
-        em_1sd=round(em_1sd, 1),
-        em_2sd=round(em_2sd, 1),
-        configured_window=window,
-        window_adequate=em_2sd <= window,
-    )
+# NOTE: expected_move_log_check() / ExpectedMoveCheck were removed 2026-07-25
+# (M0.11). Never called — the live 2 SD window check is implemented inline in
+# schwab_client.filter_chain_by_strike_window(), which is where it actually
+# runs. Keeping a second, unreachable copy of the same formula was a
+# duplication hazard (backlog DEBT-012).
 
 
 # ---------------------------------------------------------------------------
