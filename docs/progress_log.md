@@ -49,6 +49,46 @@ Why it matters more than a wrong number: the history cannot be re-fetched. A sna
 3,096 rows while holding 2,000 is a hole in the record that *reads as intact*, and no later check
 could tell it from a real one.
 
+### DEBT-014 closed — the scanner's price fallback is protected
+
+**6 tests over a built chain** (`tests/test_scanner_golden.py`). The scanner falls back to the
+midpoint of bid and ask when a contract has no stored price. Mutation-testing on 2026-07-26 found
+the golden net did not protect that branch *at all* — the formula could be changed freely and
+every test still passed.
+
+**The lesson, which generalises: a characterization test can only protect what appears in its
+output.** The captured snapshots did contain NULL-`mark` rows — 77 of 3,096 in snapshot 2608 — so
+the branch genuinely ran. But none of those rows reached the top-50 result, so its output was
+computed and discarded. Coverage would have shown the line as exercised. It was, and it was
+protecting nothing.
+
+**Built rather than captured.** The backlog offered either. A third capture would have needed the
+production database opened and a snapshot hunted for the right shape, and would only have held for
+as long as that snapshot kept producing those rows. A built chain states the contract directly and
+in numbers checkable by hand: front legs quoted 9.00/11.00 and no stored price make the Diagonal
+Mark exactly 30.00. Take the bid alone and it is 32; the ask alone, 28; a mean of three, 33.33.
+There is no way to alter the midpoint and still land on 30.
+
+**Proven closed rather than declared closed.** The same six mutations were re-run against the
+golden fixtures alone and then against the full file: **5 of 6 that the fixtures MISSED are now
+caught, zero survivors.**
+
+### Corrected while doing it
+
+- **My expectation about priceless legs was wrong.** I assumed a pair with no price would be
+  dropped. It is listed with *empty* money columns instead. The tests pin the real behaviour,
+  which is the safer of the two — a listed pair with no price is visibly incomplete, a silently
+  missing one is not. What matters either way is that it is never valued at **zero**: a front leg
+  at 0.00 makes the Diagonal Mark 50.00, the largest number on the screen, sorted straight to the
+  top, describing legs nobody can trade.
+- **Two paths, two outcomes, both safe.** An unparseable quote drops the pair entirely; a missing
+  quote survives as NaN and yields a listed pair with blank values. Same condition, reported two
+  ways. Neither fabricates a number, so neither was changed during M1 — recorded in the tests so
+  the inconsistency reads as understood rather than accidental.
+- **`DEBT-014` was assigned to two unrelated items** — the scanner gap (P2) and ~6 dangling
+  documentation citations (P1). "Close DEBT-014" was therefore ambiguous. Closing the scanner row
+  removes the collision; the surviving item keeps the ID that git history already references.
+
 ### M1 complete — `schwab_client.py` covered (M1.7, M1.8)
 
 **45 tests, 100% statement coverage** (`tests/test_schwab_client.py`). This was the last non-UI
