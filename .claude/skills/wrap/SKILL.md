@@ -1,5 +1,6 @@
 ---
-description: End the session — rewrite STATUS.md (max 100 lines, self-contained), commit
+name: wrap
+description: End the working session — rewrite STATUS.md (max 100 lines, self-contained) and commit. Invoke only when the user asks for it; never load automatically mid-session.
 ---
 
 # /wrap — End-of-session wrap-up
