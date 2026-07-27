@@ -7,6 +7,42 @@ it was recorded here.
 
 ---
 
+## ADR-025 — A characterization test protects only what reaches its output
+**Date:** 2026-07-26 · **Status:** ACCEPTED · **Closes:** DEBT-014 · **Constrains:** M2
+
+**In plain terms:** before rearranging the code behind the opportunity screen, we captured what
+that screen produces today so we can prove the rearranging changed nothing. That safety net is
+narrower than it looks. It can only notice a change that shows up in the captured *result*. Code
+that runs, produces a number, and has that number discarded before the screen is reached is not
+protected at all — even though every coverage report will call it tested.
+
+**How it was found.** Mutation-testing the scanner net: the bid/ask midpoint formula — used
+whenever a contract has no stored price — could be changed to anything at all and every test
+still passed. The captured snapshots *did* contain 77 such rows out of 3,096. The branch genuinely
+ran. None of those rows survived into the top-50 the fixtures record.
+
+**Decision:** where a branch matters but does not reach the captured output, add a **built**
+fixture that asserts real arithmetic, rather than hunting for a real snapshot that happens to
+expose it. Six such tests now pin the fallback. Front legs quoted 9.00/11.00 with no stored price
+make the Diagonal Mark exactly 30.00; the bid alone gives 32, the ask alone 28, a mean of three
+33.33. There is no way to alter the midpoint and still land on 30.
+
+**Why built, not captured.** The backlog offered either. A third capture needs the production
+database opened and a snapshot hunted for the right shape, and it protects the branch only for as
+long as that snapshot keeps producing those rows — the protection would decay silently. A built
+chain states the contract directly and cannot drift.
+
+**Alternative rejected: trusting statement coverage.** It reported the line as exercised. It was.
+Coverage answers "did this run", never "would anyone notice if it were wrong". Mutation testing
+answers the second, which is the question a safety net is for.
+
+**Consequence for M2.** The golden net makes a real but bounded promise: *the visible output does
+not change*. It is not a guarantee that internal behaviour is preserved. Before moving a piece of
+the scanner, check whether its effect actually reaches the captured result — and if it does not,
+pin it with a built fixture first, or the move is unprotected however green the suite looks.
+
+---
+
 ## ADR-024 — Measure the market minutes missed; stop guessing from the clock
 **Date:** 2026-07-26 · **Status:** ACCEPTED · **Closes:** BUG-005
 

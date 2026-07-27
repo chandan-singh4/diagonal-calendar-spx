@@ -1,6 +1,5 @@
 ---
-name: STARTUP
-description: Begin a working session — read STATUS.md, verify it against reality, recap, propose a plan, request permissions. Invoke only when the user asks for it; never load automatically mid-session.
+description: Start a session — read STATUS.md, verify it against reality, recap, propose a plan, request permissions
 ---
 
 # /STARTUP — Begin a working session

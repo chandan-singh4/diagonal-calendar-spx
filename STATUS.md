@@ -1,8 +1,9 @@
 # PROJECT STATUS
 
-**Updated:** 2026-07-26 · **Branch:** `main` · 9 saved points added today, all saved online.
-**State:** Checking grew 151 → **329 checks**, all passing, now **run automatically** on every
-save. Five faults fixed. The price record is untouched and healthy.
+**Updated:** 2026-07-26 · **Branch:** `main` · 6 saved points added today, all saved online.
+**State:** **Stage 1 is finished.** Checking grew 329 → **450 checks**, all passing, run
+automatically whenever work is saved. One fault found and fixed. The price record is untouched
+and healthy; the collector is running.
 
 > Self-contained: read this file alone to start a session. Replaced entirely by `/wrap`.
 
@@ -21,62 +22,64 @@ product** — the screen is just a window onto it.
 | Part | What it does |
 |---|---|
 | **Collector** | Background program. Every 1–5 min while markets are open, records all option prices. Starts automatically when Windows starts. |
-| **Database** | One file, ~1.3 GB of prices since 23 June. Irreplaceable — the broker won't sell you last Tuesday's prices. |
+| **Database** | One file, ~1.4 GB of prices since 23 June. Irreplaceable — the broker won't sell you last Tuesday's prices. |
 | **Dashboard** | Web page, 6 tabs, charts built from that history. Reads only, never writes. |
 | **Journal** | Diary of actual trades, to later check results against predictions. |
 
-**Condition:** trading logic and collector are good; the checking net is now real and
-self-running. The screen's code is still one huge file.
+**Condition:** trading logic and collector are good, and now genuinely checked. The screen's code
+is still one huge file — that is the next job.
 
 ## The 9-stage plan
 
-`0 clean up` **done** → `1 automatic checking` **← here, mostly done** → `2 break up big files` →
+`0 clean up` **done** → `1 automatic checking` **done** → `2 break up big files` **← here next** →
 `3 stop database growing` → `4 data service` → `5 decide on rebuilding the screen` → `6 answer
 trading questions with real results` → `7 machine learning` → `8 run reliably unattended`
 
-Order is fixed: **you can't safely rearrange code you can't check automatically.**
+Order is fixed: **you can't safely rearrange code you can't check automatically.** Stage 1 existed
+to earn the right to start stage 2. That's now done.
 
-## This session (26 July)
+## This session (26 July, second sitting)
 
-1. **The checks now run on their own** whenever work is saved — the exact weakness stage 1
-   exists to remove. It proved its worth the same day, catching a change that broke 34 checks.
-2. **The database go-between is fully checked** (111 checks, every line) — the piece every
-   other part reads through, which had none.
-3. **Five faults fixed**, each recorded first and fixed second, so the fix shows as a visible change.
-   - Deleting a trade made the *next* trade fail to save — this blocked discarding the 6
-     practice trades. Now safe.
-   - A missing price was shown as £0.00 in profit figures.
-   - Asking for one past day of prices returned that day *and every day after it*.
-   - The collector called every ordinary night and weekend a breakdown.
-   - A chart drew a straight line across the 3 July holiday, inventing price movement.
-4. **Two corrections to things previously believed true.** The "collector cries wolf" fault was
-   **also deaf**: a collector dead for three trading days was filed as routine and discarded,
-   leaving no trace — the worst loss possible here, and invisible. It had also been blamed on the
-   wrong code; fixing only that would have left the real source untouched and looked successful.
-5. **The old damage figures were nonsense**: records claimed 19,759 lost readings, more than the
-   database has ever held. True figure is 145. Corrected in place, old values kept.
-6. **Code proofreading tool installed** and run for the first time. Found no faults, but produced
-   an exact list of the "silently ignore all errors" spots in the profit-and-loss screen.
+1. **The part that fetches prices is checked at last** — every price ever stored came through it,
+   and it had no checks while the alarm system guarding it had 38. It is now driven end to end
+   against a throwaway database.
+2. **The broker connection is checked** — the piece most exposed to a change nobody here controls.
+   The broker can rename a field without warning; prices would quietly stop arriving while
+   everything reported healthy. The expected shape is now written down, so that fails loudly.
+3. **A fault found and fixed (BUG-017): a snapshot could overstate how much it held.** It recorded
+   the number of prices *offered* to the database, not the number actually stored. This was
+   **already written down and left** months of work ago — it survived because nothing failed when
+   it was wrong. It matters because the record can't be re-fetched: a snapshot claiming 3,096
+   prices while holding 2,000 reads as intact, and nothing later could tell it from a real one.
+4. **A hole in the safety net closed.** The opportunity screen works out a price when the broker
+   supplies none. That calculation could be changed to anything and every check still passed. The
+   lesson generalises and is now recorded: **a "did anything change?" check only protects what
+   appears in its result.** Those rows existed and the code ran on them — the answers were just
+   thrown away before reaching the screen.
+5. **Two "pending" tasks were already done.** Auto-starting the collector was recorded as awaiting
+   approval; it has worked since June via a startup shortcut, verified running. The version marker
+   was recorded as pending; it already existed. Both corrected.
 
 ## What to do next
 
-1. **Finish checking the collector.** Its gap logic is done; the actual price-fetching cycle,
-   retries and login handling are still unchecked. Largest unchecked area left.
-2. **Discard the 6 practice trades** — now safe. Note the standing commitment below.
-3. **Fix the "silently ignore all errors" spots** in the profit screen (DEBT-007; line numbers
-   in `docs/backlog.md`). A failed calculation currently shows a blank with no reason.
-4. **One question for Chandan:** the statistics code works out a "break-even trades" figure and
+1. **Start stage 2 — breaking up the 3,891-line screen file.** Nothing blocks it. Before moving
+   any piece, check whether its effect actually reaches the captured screen output; if not, pin it
+   first, or the move is unprotected however green things look (ADR-025).
+2. **Discard the 6 practice trades** — safe, and waiting only for you to be at the keyboard. Note
+   the standing commitment below.
+3. **One question for Chandan:** the statistics code works out a "break-even trades" figure and
    never shows it — display intended and forgotten, or just leftover?
-5. Then stage 2 — breaking up the 4,230-line screen file.
+4. Deliberately **not** doing yet, and both agreed: tidying the 85 code-style findings, and adding
+   logging to the screen. Both touch the big file that stage 2 is about to take apart.
 
 ## Open problems, priority order
 
 | Problem | Meaning | Stage |
 |---|---|---|
 | **Unexplained July issue — BLOCKED ON CHANDAN** | "Still having some issue." No leads. **Needs: what looked wrong, which tab, screenshot.** | — |
-| **Dashboard is reachable from other devices on the network** | Confirmed today, not just suspected. Should be locked to this machine before any remote access work. | — |
+| **Dashboard reachable from other devices on the network** | Confirmed. Chandan judged the risk acceptable for now — sole user, own laptop. Revisit before any remote access. | — |
 | Errors silently ignored in the profit screen | ~30 places; a failure shows as a blank | 2 |
-| 4,230-line dashboard file | Appearance, calculations and data all mixed together | 2 |
+| 3,891-line dashboard file | Appearance, calculations and data all mixed together | 2 |
 | Backups manual; database growing without limit | Backups work but nobody runs them on a schedule; ~82 MB per trading day | 3 |
 
 ## Settled — don't reopen
@@ -87,14 +90,16 @@ Order is fixed: **you can't safely rearrange code you can't check automatically.
 - **When a price is missing, show nothing rather than zero.**
 - **The 6 practice trades will be discarded**, diary restarts clean. **Consequence:** the app must
   save market conditions *with each trade* before serious trading resumes.
-- **Record a fault first, fix it second** — otherwise you can't tell whether the check proved the
-  code right or the code was bent to fit the check.
+- **Record a fault first, fix it second**, and **prove a check works by deliberately breaking the
+  code.** 18 faults were injected into the collector and broker code this session; all 18 caught.
+- **Windows Task Scheduler is not used** for the collector — it needs administrator rights. The
+  startup shortcut is the mechanism and it works.
 
 ## How to work here
 
 Plan before coding · rehearse risky changes on a copy · **prove checks work by deliberately
 breaking the code** · challenge assumptions with evidence · say plainly when something is
 unverified · **ask before** deleting, changing the database, saving work, or changing system
-settings · finish with `/wrap`.
+settings · `/structured-task` covers ordinary work · finish with `/wrap`.
 **Deeper detail:** `docs/` — `plan.md` (tasks) · `backlog.md` (open problems) · `decisions.md`
-(why; ADR-022…024) · `progress_log.md` · `DOCUMENTATION.md` (strategy/maths).
+(why; ADR-025 newest) · `progress_log.md` · `DOCUMENTATION.md` (strategy/maths).
