@@ -278,6 +278,55 @@ def make_raw_chain(expiries=None, spot=6000.0, *, iv=18.4,
     return chain
 
 
+class FakeResponse:
+    """Stand-in for the HTTP response schwab-py returns.
+
+    Only the two things the client layer actually uses: raise_for_status() and
+    json(). `status_error` makes raise_for_status() raise, which is how a 401 or
+    a 500 reaches the collector in production.
+    """
+
+    def __init__(self, payload=None, status_error=None):
+        self._payload = payload if payload is not None else {}
+        self._status_error = status_error
+
+    def raise_for_status(self):
+        if self._status_error is not None:
+            raise self._status_error
+
+    def json(self):
+        return self._payload
+
+
+def quote_payload(symbol: str, **fields) -> dict:
+    """Schwab's quote shape: {SYMBOL: {"quote": {...}}}."""
+    return {symbol: {"quote": dict(fields)}}
+
+
+class RecordingClient:
+    """A client that records the arguments it was called with.
+
+    Used only where the ARGUMENTS are the contract worth checking — e.g. that
+    get_option_chain passes the configured strike_count through rather than
+    silently falling back to a Schwab default. Everywhere else the tests assert
+    on returned data instead.
+    """
+
+    def __init__(self, quote_response=None, chain_response=None):
+        self._quote_response = quote_response or FakeResponse()
+        self._chain_response = chain_response or FakeResponse()
+        self.quote_calls: list = []
+        self.chain_calls: list = []
+
+    def get_quote(self, symbol):
+        self.quote_calls.append(symbol)
+        return self._quote_response
+
+    def get_option_chain(self, symbol, **kwargs):
+        self.chain_calls.append({"symbol": symbol, **kwargs})
+        return self._chain_response
+
+
 class FakeSchwabClient:
     """Stand-in for the schwab-py client object.
 

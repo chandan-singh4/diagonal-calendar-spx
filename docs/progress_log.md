@@ -49,6 +49,40 @@ Why it matters more than a wrong number: the history cannot be re-fetched. A sna
 3,096 rows while holding 2,000 is a hole in the record that *reads as intact*, and no later check
 could tell it from a real one.
 
+### M1 complete — `schwab_client.py` covered (M1.7, M1.8)
+
+**45 tests, 100% statement coverage** (`tests/test_schwab_client.py`). This was the last non-UI
+module at zero, and the most exposed to a change nobody here controls: Schwab can rename a field
+without notice, and the failure would be silent — a renamed `volatility` yields None, rows are
+skipped as "illiquid", and collection keeps reporting healthy while storing progressively less.
+The tests write the expected response **shape** down as executable fixtures, so that change fails
+loudly here instead.
+
+**Mutation-verified: 14 injected faults, 14 caught, zero survivors.** Including the double
+conversion (IV divided by 100 in both layers), the expiry key stored raw with its `:DTE` suffix,
+strikes left as strings, a cached token ignored so a browser login fires on every cycle, and the
+2 SD check quietly filtering instead of only warning.
+
+**Three deliberate asymmetries are now pinned**, each of which reads like a bug until you know why:
+IV stays a *percentage* at this layer because the ÷100 belongs to the collector and would
+otherwise be applied twice; a **VIX** failure returns None while an **SPX quote** failure raises,
+because VIX is context and the quote is the product; and the expected-move check only ever warns,
+because a filter there would make the stored window depend on volatility.
+
+**One quirk pinned rather than changed.** `_safe_float` treats 0.0 as "no value". For Schwab that
+is usually right — an unquoted leg arrives as 0.0 and storing a real zero would drag every average
+down. But a deep out-of-the-money option genuinely can be bid 0.00, and that real zero is
+discarded too, reading downstream as "no quote" rather than "quoted worthless". Harmless for the
+near-the-money strikes this strategy trades, consistent with the settled show-nothing-rather-than-
+zero rule, and now written down where someone will find it.
+
+**M1.8 met: 80% coverage of non-UI code** against a ~70% target. `iv_engine`, `db.py`,
+`schwab_client.py` and `config.py` at 100%; `collector.py` at 56%, where the shortfall is
+`main()`'s body, the logging setup and the single-instance lock — process wiring, not logic, and
+unreachable from a test by construction.
+
+**M1 is complete. 444 tests. M2 is unblocked.**
+
 ### M1.6 closed — the loop decisions are covered
 
 **Extracted four judgements out of `main()`, then tested them — 47 tests
