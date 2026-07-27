@@ -647,8 +647,15 @@ def _run_cycle(client, db_path: str, session: str, poll_interval: int) -> int:
             )
 
         # ── 9. Write to database ─────────────────────────────────────────────
-        if option_rows:
-            db.insert_option_rows(db_path, option_rows)
+        #
+        # Use what the database actually STORED, not what was offered (BUG-017,
+        # 2026-07-26). insert_option_rows() uses INSERT OR IGNORE, which SQLite
+        # applies to every constraint — not just uniqueness — so a row failing
+        # a CHECK or NOT NULL is silently skipped rather than raised (ADR-022).
+        # Recording the offered count made a snapshot that had lost rows report
+        # full coverage, which is worse than losing them loudly: the gap is
+        # unrecoverable and the record reads as intact.
+        rows_stored = db.insert_option_rows(db_path, option_rows) if option_rows else 0
         if atm_iv_records:
             db.insert_atm_iv_records(db_path, atm_iv_records)
 
@@ -658,7 +665,7 @@ def _run_cycle(client, db_path: str, session: str, poll_interval: int) -> int:
             db_path               = db_path,
             snapshot_id           = snapshot_id,
             status                = status,
-            strikes_fetched       = len(option_rows),
+            strikes_fetched       = rows_stored,
             expiries_fetched      = actual_expiry_count,
             collection_latency_ms = latency_ms,
             error_message         = error_msg,
@@ -670,7 +677,7 @@ def _run_cycle(client, db_path: str, session: str, poll_interval: int) -> int:
                 "rows=%-5d | exp=%2d | %dms",
                 snapshot_id, session, underlying_price,
                 f"{vix:.2f}" if vix else "N/A",
-                len(option_rows), actual_expiry_count, latency_ms,
+                rows_stored, actual_expiry_count, latency_ms,
             )
         else:
             logger.warning(

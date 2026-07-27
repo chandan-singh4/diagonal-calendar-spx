@@ -416,10 +416,12 @@ def insert_option_rows(db_path: str, rows: list[dict]) -> int:
       collector.log. Deciding per-constraint behaviour (keep OR IGNORE for
       genuine duplicates, raise on everything else) remains M3.6 work.
 
-      NOTE: the collector currently discards this return value and records
-      `strikes_fetched = len(option_rows)` — the offered count, not the stored
-      one. That reporting path is still optimistic; the warning logged here is
-      what actually surfaces the problem today.
+      UPDATED 2026-07-26 (BUG-017): the collector used to discard this return
+      value and record `strikes_fetched = len(option_rows)` — the offered
+      count — so a snapshot that had lost rows still reported full coverage.
+      It now stores this value. Callers must keep doing so: the log warning
+      below is a signal for a human, while this return value is what the
+      recorded history is judged by.
     """
     if not rows:
         return 0

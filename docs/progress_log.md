@@ -5,6 +5,64 @@ what broke, and what remains.
 
 ---
 
+## 2026-07-26 (session 5) — the collection cycle gets its first checks
+
+### Completed
+
+**`_run_cycle()` is now covered — 23 tests (`tests/test_collector_cycle.py`).** This is the
+function that produced every price in the database, and it had no checks at all, while the gap
+classifier guarding it had 38. The alarm system was tested; the thing it guards was not.
+
+**Driven end-to-end, not stubbed.** The Schwab calls are patched at the `schwab_client` module
+boundary and the writes go to a throwaway database, so the cycle runs for real from quote to
+sealed snapshot. The chain fixture is built in Schwab's **raw nested JSON shape**, so
+`chain_to_dataframe()` parsing executes rather than being skipped — a pre-parsed fixture would
+have left the exact layer a Schwab format change would break completely unprotected.
+
+**Assertions read the database, not the mocks.** Checking that a function was called only
+confirms the code does what it currently does. Reading back the stored rows confirms the contract
+the dashboard actually depends on. Covered: snapshot sealing on every exit path, IV
+percentage→decimal conversion, mark as bid/ask midpoint, side-correct intrinsic value, ATM strike
+selection, front-expiry NULLs, missing-IV skipping, VIX being non-fatal, the `last` price
+fallback, error truncation, and expiry trimming.
+
+**Mutation-verified: 7 injected faults, 7 caught.** IV left as a percentage, transposed call/put
+intrinsic, a failed cycle no longer sealing its snapshot, expiries trimmed from the wrong end,
+missing IV stored as zero, VIX made fatal, and a snapshot left PARTIAL on success. `collector.py`
+was restored from git and confirmed byte-identical afterwards.
+
+### Found and fixed
+
+**BUG-017 — a snapshot could overstate its own coverage.** `db.insert_option_rows()` returns the
+count *actually stored*; `INSERT OR IGNORE` silently discards any row failing a constraint, not
+just duplicates (ADR-022). The collector discarded that return value and recorded
+`strikes_fetched = len(option_rows)` — the count *offered*. A snapshot that lost rows still
+reported full coverage.
+
+This was **already known and written down** at `db.py:419-422` when DEBT-008 was analysed; it was
+documented as still-optimistic and left. It was not a new discovery — it was a known hole that
+survived because nothing failed when it was wrong. Recorded as a failing test first (reported 40
+rows against 20 stored), then fixed. The `rows=` figure in the success log now reports the stored
+count too.
+
+Why it matters more than a wrong number: the history cannot be re-fetched. A snapshot claiming
+3,096 rows while holding 2,000 is a hole in the record that *reads as intact*, and no later check
+could tell it from a real one.
+
+### Discovered, not done
+
+- **`main()` cannot be tested where it stands.** Session selection, retry/backoff and
+  auth-failure recovery are all inline inside an infinite loop. Each needs extracting to a pure
+  function first — the move already made for `token_days_remaining()`. Logged in plan.md §1.
+- **The PARTIAL `error_message` is still optimistic.** Status is decided at step 8, before the
+  step-9 write, so its `"{n} option rows written"` text is the offered count. Cosmetic — the
+  `strikes_fetched` column, which analysis actually reads, is now correct. Left alone rather than
+  reordering the cycle for a log string.
+- `ruff` reports 23 findings across the repo under the current config (part of the 85 in
+  DEBT-025). The two new test files are clean.
+
+---
+
 ## 2026-07-26 (session 4) — the codebase is linted for the first time
 
 ### Completed

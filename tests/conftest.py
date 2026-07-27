@@ -210,3 +210,117 @@ def trades_db(temp_db) -> str:
 
     db.init_trades_table(temp_db)
     return temp_db
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Collection-cycle fixtures (collector._run_cycle — M1.7)
+#
+# The cycle reaches the network ONLY through module-level schwab_client
+# functions, so it can be driven end-to-end by patching those. Nothing here
+# touches Schwab, the token file, or the network.
+#
+# The chain is built in Schwab's RAW nested JSON shape, not as a ready-made
+# DataFrame, so chain_to_dataframe() parsing runs for real. A pre-parsed
+# fixture would skip the exact layer where a Schwab format change would bite,
+# and every test would still pass while collection was broken in production.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def make_raw_chain(expiries=None, spot=6000.0, *, iv=18.4,
+                   strikes=None, missing_iv_strikes=(), duplicate_contracts=False):
+    """Build a raw Schwab option-chain response.
+
+    Args:
+        expiries:           list of (expiry_date_str, dte). Defaults to two.
+        spot:               only used to centre the default strike ladder.
+        iv:                 volatility as Schwab sends it — a PERCENTAGE (18.4
+                            means 18.4%). The collector divides by 100 on the
+                            way into the database; tests assert on that.
+        strikes:            explicit strike ladder; defaults to spot ±100 by 50.
+        missing_iv_strikes: strikes whose contracts carry volatility=None, to
+                            exercise the "skip rows with no IV" path.
+        duplicate_contracts: emit each contract TWICE. Schwab returns a list per
+                            strike, so this is a shape it can genuinely produce.
+                            The database's unique constraint drops the second
+                            copy, which is the case where offered and stored
+                            counts diverge (ADR-022 / DEBT-008).
+    """
+    if expiries is None:
+        expiries = [("2026-08-07", 7), ("2026-08-21", 21)]
+    if strikes is None:
+        strikes = [spot - 100, spot - 50, spot, spot + 50, spot + 100]
+
+    chain: dict = {"callExpDateMap": {}, "putExpDateMap": {}}
+
+    for side_key in ("callExpDateMap", "putExpDateMap"):
+        for expiry, dte in expiries:
+            # Schwab keys expiries as "YYYY-MM-DD:DTE".
+            exp_key = f"{expiry}:{dte}"
+            def _contract(strike):
+                return {
+                    "bid":          9.0,
+                    "ask":          11.0,
+                    "last":         10.0,
+                    "totalVolume":  100,
+                    "openInterest": 1000,
+                    "volatility":   None if strike in missing_iv_strikes else iv,
+                    "delta":        0.5,
+                    "gamma":        0.01,
+                    "theta":        -0.5,
+                    "vega":         0.2,
+                }
+
+            copies = 2 if duplicate_contracts else 1
+            chain[side_key][exp_key] = {
+                str(strike): [_contract(strike) for _ in range(copies)]
+                for strike in strikes
+            }
+
+    return chain
+
+
+class FakeSchwabClient:
+    """Stand-in for the schwab-py client object.
+
+    _run_cycle only ever passes this through to schwab_client functions, which
+    the tests patch, so it needs no behaviour of its own. It exists so the
+    tests pass something that is clearly NOT a real authenticated client.
+    """
+
+
+@pytest.fixture
+def fake_client() -> FakeSchwabClient:
+    return FakeSchwabClient()
+
+
+@pytest.fixture
+def patch_schwab(monkeypatch):
+    """Patch collector's Schwab calls. Returns a configure() helper.
+
+    Defaults are a healthy market: a good SPX quote, a VIX value, and a
+    two-expiry chain with IV on every contract. Each test overrides only the
+    part it is about, so a test's setup shows exactly what it is testing.
+    """
+    import collector
+
+    def configure(*, quote=None, vix=18.5, raw_chain=None,
+                  quote_error=None, chain_error=None):
+        if quote is None:
+            quote = {"bid": 5999.0, "ask": 6001.0, "last": 6000.5, "mark": 6000.0}
+        if raw_chain is None:
+            raw_chain = make_raw_chain()
+
+        def _get_quote(_client):
+            if quote_error is not None:
+                raise quote_error
+            return quote
+
+        def _get_chain(_client, _from, _to):
+            if chain_error is not None:
+                raise chain_error
+            return raw_chain
+
+        monkeypatch.setattr(collector.schwab_client, "get_spx_quote_full", _get_quote)
+        monkeypatch.setattr(collector.schwab_client, "get_vix_quote", lambda _c: vix)
+        monkeypatch.setattr(collector.schwab_client, "get_option_chain", _get_chain)
+
+    return configure
