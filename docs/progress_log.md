@@ -49,11 +49,34 @@ Why it matters more than a wrong number: the history cannot be re-fetched. A sna
 3,096 rows while holding 2,000 is a hole in the record that *reads as intact*, and no later check
 could tell it from a real one.
 
-### Discovered, not done
+### M1.6 closed — the loop decisions are covered
 
-- **`main()` cannot be tested where it stands.** Session selection, retry/backoff and
-  auth-failure recovery are all inline inside an infinite loop. Each needs extracting to a pure
-  function first — the move already made for `token_days_remaining()`. Logged in plan.md §1.
+**Extracted four judgements out of `main()`, then tested them — 47 tests
+(`tests/test_collector_main.py`).** These were the last of the collector with no checks, and the
+reason was structural, not editorial: they were written inline inside `while True`, which no test
+can enter — it never returns, it sleeps in real time, and it calls Schwab. Testing *around* the
+loop was never going to work, so the loop gave up the decisions instead.
+
+Now pure functions, in the same style as `token_days_remaining()`: `is_auth_error()`,
+`failure_is_critical()`, `sleep_after_cycle()`, `should_recheck_token()`. **The extraction changed
+no behaviour** — the suite was green before it, after it, and unchanged in count.
+
+**Mutation-verified: 11 injected faults, 11 caught, zero survivors.** The market opening a minute
+late, collection running past the 16:00 close, holidays and weekends treated as trading days, OPEN
+polled at the slow cadence, auth detection stuck on and stuck off, drift correction removed, a
+negative sleep left unclamped, escalation off by one, and the token rechecked every cycle.
+
+The session boundaries are tested at the exact edges rather than at comfortable midpoints. A
+boundary written `<` where it should be `<=` is invisible at 11:00 and obvious at 09:30, and that
+one minute is the entire failure mode.
+
+**One known imprecision pinned rather than fixed.** `is_auth_error` is substring-based, so a
+message containing "expired" — including one about an expired *option* — counts as an auth
+failure. Left alone on purpose: a false positive costs one needless re-login and self-corrects,
+while a missed auth failure costs every remaining cycle of the session. The test names the
+trade-off so that tightening the rule later is a deliberate decision, not an accident.
+
+### Discovered, not done
 - **The PARTIAL `error_message` is still optimistic.** Status is decided at step 8, before the
   step-9 write, so its `"{n} option rows written"` text is the offered count. Cosmetic — the
   `strikes_fetched` column, which analysis actually reads, is now correct. Left alone rather than

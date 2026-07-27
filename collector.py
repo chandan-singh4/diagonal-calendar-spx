@@ -874,6 +874,80 @@ def _release_single_instance_lock() -> None:
         _lock_handle = None
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Loop decisions
+#
+# EXTRACTED 2026-07-26 (M1.6). These three judgements used to be inline inside
+# main()'s `while True`, which no test can enter: it never returns, it sleeps in
+# real time, and it calls the Schwab API. That is why the retry and re-auth
+# paths were the last part of the collector with no checks at all — not because
+# they were unimportant, but because the loop shape made them unreachable.
+#
+# Each is a pure function of its inputs, in the same style as
+# token_days_remaining() and _midsession_gap_reason(). main() reads as before;
+# the decisions can now be examined directly.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Substrings that mark a failure as an authentication problem rather than a
+# data or network one. Matched case-insensitively against the exception text,
+# because Schwab reports auth failures through several unrelated shapes: a bare
+# HTTP 401, a JSON error body, and schwab-py's own exception text.
+_AUTH_ERROR_MARKERS = (
+    "401", "unauthorized", "token", "expired", "authentication",
+)
+
+
+def is_auth_error(error_text: str) -> bool:
+    """True if a cycle failure looks like an authentication problem.
+
+    Auth failures are handled differently from every other failure: the client
+    is discarded so the next cycle logs in again. Getting this wrong is
+    survivable in both directions but not free — a missed auth error means
+    every remaining cycle of the session fails against a dead client, and a
+    false positive throws away a working client for no reason.
+
+    Deliberately substring-based rather than exception-type-based: the same
+    condition arrives as an HTTPError, a ValueError, or a plain RuntimeError
+    depending on which layer noticed it first.
+    """
+    lowered = error_text.lower()
+    return any(marker in lowered for marker in _AUTH_ERROR_MARKERS)
+
+
+def failure_is_critical(consecutive_failures: int) -> bool:
+    """True once repeated failures deserve a CRITICAL log entry.
+
+    The collector keeps retrying either way — it never gives up on its own,
+    because a collector that exits on a bad afternoon loses the rest of the
+    day's prices. This only controls how loudly the run is reported.
+    """
+    return consecutive_failures >= _MAX_CONSECUTIVE_FAILURES
+
+
+def sleep_after_cycle(poll_interval: int, elapsed_seconds: float) -> float:
+    """Seconds to sleep so cycles land on the poll interval, not after it.
+
+    Drift correction: the cycle itself takes 5–13 seconds against a 300-second
+    interval. Sleeping the full interval after each one would push every
+    snapshot progressively later, so the time spent working is subtracted.
+
+    Never negative. A cycle slower than its own interval sleeps zero and the
+    next one starts immediately — falling behind is recorded by the gap
+    detector, not corrected by sleeping backwards.
+    """
+    return max(0.0, poll_interval - elapsed_seconds)
+
+
+def should_recheck_token(now_mono: float, last_check_mono: float) -> bool:
+    """True when the token expiry check is due again (roughly hourly).
+
+    Exists so a collector left running for days keeps warning about an expiring
+    token, rather than warning once at startup and then going quiet for the
+    rest of the week.
+    """
+    return (now_mono - last_check_mono) >= _TOKEN_CHECK_INTERVAL_SEC
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="SPX Diagonal Dashboard — background data collector"
@@ -937,7 +1011,7 @@ def main() -> None:
         # Re-check the token roughly hourly. The value only moves on a re-login,
         # so this is cheap; the point is that a collector left running for days
         # keeps warning, rather than warning once at startup and going quiet.
-        if cycle_start_mono - last_token_check >= _TOKEN_CHECK_INTERVAL_SEC:
+        if should_recheck_token(cycle_start_mono, last_token_check):
             _check_token_expiry()
             last_token_check = cycle_start_mono
 
@@ -1007,12 +1081,7 @@ def main() -> None:
             err_str = str(cycle_err)
 
             # Detect token / auth errors to force re-authentication next cycle
-            is_auth_error = any(
-                kw in err_str.lower()
-                for kw in ("401", "unauthorized", "token", "expired", "authentication")
-            )
-
-            if is_auth_error:
+            if is_auth_error(err_str):
                 logger.warning(
                     "Auth error detected — will re-authenticate next cycle. Error: %s",
                     cycle_err,
@@ -1023,7 +1092,7 @@ def main() -> None:
                 logger.error(
                     "Cycle failure #%d: %s", consecutive_failures, cycle_err
                 )
-                if consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
+                if failure_is_critical(consecutive_failures):
                     logger.critical(
                         "%d consecutive failures. Check Schwab API status. "
                         "Collector is still running and will keep retrying.",
@@ -1038,7 +1107,7 @@ def main() -> None:
 
         # ── Drift-corrected sleep ────────────────────────────────────────────
         elapsed    = time.monotonic() - cycle_start_mono
-        sleep_time = max(0.0, poll_interval - elapsed)
+        sleep_time = sleep_after_cycle(poll_interval, elapsed)
         logger.debug("Cycle: %.1fs elapsed. Sleeping %.1fs.", elapsed, sleep_time)
         time.sleep(sleep_time)
 
