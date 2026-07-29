@@ -5,6 +5,120 @@ what broke, and what remains.
 
 ---
 
+## 2026-07-28 (session 6) — the session-start health check stops lying to you, twice
+
+### Completed
+
+**BUG-018 fixed: `scripts/check_db.py` crashed instead of reporting, whenever its output was
+redirected.** The report is drawn with box characters (═ ─ →). Sent straight to a terminal they
+are fine; sent into a file, into Git Bash, or into anything that captures the output, Python falls
+back to the machine's cp1252 regional encoding, which cannot write them — and the script stopped
+with `UnicodeEncodeError` before printing one line. `main()` now widens the stream to UTF-8 first,
+with a fallback that turns anything still unwritable into `?` rather than losing the report.
+
+**First checks ever for this script — 5 tests (`tests/test_check_db.py`), 450 → 455.** It is the
+first thing run in a session and had none.
+
+**The tests launch a real subprocess, and have to.** Running the script inside pytest proves
+nothing here: pytest substitutes its own output object, which handles these characters happily, so
+the condition that breaks is never present. The tests therefore start the script as a separate
+process with the output forced to cp1252 — the only arrangement in which the fault exists.
+Generalised as **ADR-026: a test that owns only a function cannot see a fault that lives in the
+process.**
+
+**Proven by deliberate breakage — 3 faults injected, all 3 caught,** each by the test meant to
+catch it: reconfiguring to cp1252 instead of UTF-8 (4 tests fail), leaving the fix in place but
+never calling it from `main()` (the 2 subprocess tests fail, the unit tests stay green — so the
+wiring is genuinely covered, not just the function), and removing the guard that tolerates a
+stream it cannot reconfigure (1 test fails).
+
+**BUG-019 fixed in the same sitting: "snapshots today" counted a UTC day, so it read `0` every
+evening.** Found while verifying the first fix — the figure was 126 at 19:59 UTC and `0` an hour
+later, same healthy database. UTC's day rolls over at 8pm New York time, and the count used
+SQLite's `DATE('now')`, which is UTC. A `0` on the top line of the session-start check is exactly
+what a dead collector looks like. It now counts the **Eastern trading day** and prints the date
+next to the figure — `Snapshots today : 126  (2026-07-28 ET)` — so the boundary is never a guess.
+Reasoning in **ADR-027**; the day window is computed in Python because SQLite has no timezone
+support, and the half-open range still uses the existing timestamp index.
+
+**7 more tests, 455 → 462.** Three drive the report end to end with a frozen clock (evening
+snapshots counted, the previous evening excluded, non-COMPLETE snapshots still filtered out); four
+pin the window itself, including both daylight-saving changeovers.
+
+**Proven by deliberate breakage on both fixes — 7 injections, 6 caught, 1 proven equivalent.**
+For BUG-018: reconfiguring to cp1252 instead of UTF-8, never calling the fix from `main()`, and
+removing the guard for a stream that cannot be reconfigured — 3 of 3 caught. For BUG-019:
+reverting to the old `DATE('now')` query, breaking the daylight-saving boundary, and dropping the
+`status='COMPLETE'` filter — 3 of 4 caught, each by the test meant to catch it. The fourth is the
+equivalent mutant described below, and it is counted here rather than quietly dropped.
+
+### Discovered
+
+**A belief written into a docstring turned out to be false, and a failed injection is what caught
+it.** The BUG-019 reasoning claimed that computing the day's end as `start + timedelta(days=1)`
+was a daylight-saving bug. Injecting exactly that changed nothing — 12 tests still passed. The
+tests were not weak: arithmetic on a zoneinfo-aware datetime is **wall-clock** arithmetic, so it
+lands on the next local midnight and is simply correct. The real trap is converting to UTC first
+and *then* adding 24 hours; injecting that version did fail both DST tests. Docstring and ADR-027
+corrected. **The generalisable part: an injection that fails to fail is evidence — it means a
+belief about the code was never true of the code.**
+
+**Checked and deliberately left alone:** a sweep found no other `DATE('now')` anywhere in the
+project. `collector.py` uses `date.today()` for the option-chain fetch window, which is the
+*machine's local* date — correct today only because this machine is set to Eastern, and harmless
+at the edge of a fetch window. Not fixed, to avoid widening the task; recorded in ADR-027 §Scope.
+
+**A correction to the session-start briefing.** It was first reported that the script "crashes in
+a normal Windows console." That was wrong, and the distinction is the whole bug: in an interactive
+console Python writes through the Windows console API and the characters are fine. The failure
+needs the output to be redirected or piped. PowerShell here reports a UTF-8 stream and always
+worked; Git Bash reports cp1252 and always failed.
+
+**Two silently-dropped M1 tasks found and settled (ADR-028).** Reading `AUDIT_2026-07-25.md` §10
+against `plan.md` showed the two files disagreeing about M1. Most of it is renumbering — execution
+reordered the middle of the milestone and the commit messages follow `plan.md`, so those numbers
+are the real ones. But two audit tasks had never happened and had simply stopped being mentioned:
+**GitHub Actions CI** and **`docs/TESTING.md`**. Neither appeared in `decisions.md` or
+`backlog.md`, and neither exists on disk. An omission nobody wrote down is indistinguishable from
+an oversight, so both are now decisions rather than gaps:
+
+- **CI:** the pre-commit hook satisfies the milestone. The criterion said "CI green" but the
+  intent was *checks that run without being remembered*, and the hook delivers that. Its three
+  real costs are written down rather than glossed — single machine, bypassable with `SKIP_TESTS=1`
+  leaving no trace, and it checks what is *about to be* committed rather than what landed on
+  `origin`. Revisit at a second machine, a second person, or M8.
+- **`docs/TESTING.md`: retired, not deferred**, and the audit's MEDIUM rating withdrawn. It was
+  specified for a repo with zero tests, where a written map was the only orientation available.
+  There are now 462, and the conventions live in `conftest.py` and in each module's docstring,
+  where they cannot drift from the code. Writing the document accurately would mean re-reading all
+  462 tests, and keeping it accurate would mean doing so after every milestone — a large recurring
+  cost for a second description of something already documented at the point of use. A summary
+  that goes stale is worse than none, because it is believed.
+
+**The audit is now marked as a frozen snapshot** at its head, and `plan.md` states that its own
+numbering is the operative one. The audit has two commits in its entire history — created, then
+moved — so it was never a living document; nothing said so, which is why the two read as
+contradicting each other. Left frozen deliberately: its value is recording what was true and
+intended on 2026-07-25.
+
+**Stale lines in `plan.md` refreshed:** current milestone said M1 (complete since the 26th), test
+count said 444, and "Close DEBT-014" was listed as a next action though the same file records it
+closed sixty lines earlier.
+
+### Verified
+
+Full suite: **462 passed**, ruff clean on both changed files. The script was also confirmed
+working from Git Bash with no environment override — the exact invocation that failed at the start
+of the session — and now reports `Snapshots today : 126  (2026-07-28 ET)` against the real
+database, where the same command returned `0` earlier in the same sitting.
+
+**Still untested:** the daylight-saving behaviour is pinned by unit tests against a fixed clock,
+not observed on a real changeover day — the next one is 2026-11-01. The `errors="replace"`
+fallback in `_force_utf8_stdout` has no test that reaches it, because no stream on this machine
+both accepts `reconfigure` and then fails to encode UTF-8.
+
+---
+
 ## 2026-07-26 (session 5) — the collection cycle gets its first checks
 
 ### Completed

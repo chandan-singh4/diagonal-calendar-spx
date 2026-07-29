@@ -7,6 +7,146 @@ it was recorded here.
 
 ---
 
+## ADR-028 — The pre-commit hook stands in for CI; `docs/TESTING.md` is retired, not deferred
+**Date:** 2026-07-28 · **Status:** ACCEPTED · **Closes:** the two open items from `AUDIT` §10 M1.8 and M1.9
+
+**Why this exists at all.** M1 was declared complete, but two tasks from the original roadmap had
+quietly not happened: GitHub Actions CI, and a `docs/TESTING.md`. Neither was refused — both just
+stopped being mentioned. Found 2026-07-28 by reading the audit against `plan.md`. An unrecorded
+omission is indistinguishable from an oversight, and gets re-proposed forever. These are now
+decisions.
+
+### 1. CI: the pre-commit hook is the answer, and that is deliberate
+
+**Decision:** `.githooks/pre-commit` running the full suite on any staged `.py` file **satisfies**
+the M1 exit criterion. No GitHub Actions workflow will be added at this stage.
+
+**Reasoning.** The criterion was written as "CI green", but the *intent*, stated in the same
+milestone, was **checks that run without being remembered**. The hook delivers that intent: it is
+live via `core.hooksPath`, it blocks a failing commit (verified by deliberately breaking a test),
+and it skips docs-only commits so editing the backlog stays instant. For a single developer on a
+single machine, a workflow would re-run the same suite minutes later and change no decision.
+
+**The costs, accepted with eyes open — this is the part that matters if it is revisited:**
+- It runs **only on this machine.** A commit pushed from anywhere else is unchecked.
+- It is **bypassable** with `SKIP_TESTS=1`, by design, for when the environment rather than the
+  code is broken. A bypass leaves no trace in the history.
+- It runs **before** the commit, not after the push, so nothing verifies what actually landed on
+  `origin`.
+
+**Revisit when any of these becomes true:** a second machine or a second person commits; the repo
+gains an outside contributor; or M8 arrives, where "operate reliably without babysitting" makes an
+unbypassable post-push check worth its cost. Until then this is sufficient, not merely tolerated.
+
+**Alternative rejected:** adding the workflow now "because it is cheap". It is cheap to add and
+not free to own — a red build nobody is obliged to fix teaches everyone to ignore builds, which is
+the same failure mode ADR-015 avoids by refusing to gate on 85 unresolved lint findings.
+
+### 2. `docs/TESTING.md`: retired
+
+**Decision:** it will not be written. The audit's MEDIUM rating is **withdrawn**, not deferred.
+
+**Reasoning.** The document was specified in July 2025 for a repo with **zero tests**, where a
+written map was the only possible orientation. That premise is gone. There are now 462 tests, and
+the conventions live where they are used and cannot drift from it:
+- `conftest.py` carries the scope rule (no fixture may touch the 1.4 GB production database, with
+  an assert enforcing it), the IV percentage-vs-decimal convention, and why `FakeRow` imitates
+  `sqlite3.Row` rather than using a dict.
+- Each test module's docstring states what layer it covers and why it is shaped that way —
+  `test_check_db.py` explains why it must own a subprocess, `test_collector_cycle.py` why the
+  chain fixture is raw Schwab JSON rather than a parsed frame.
+
+**The deciding argument, and it is the user's:** writing the document accurately would mean
+re-reading all 462 tests, and keeping it accurate would mean doing that again after every
+milestone. That is a large, permanently recurring cost for a summary of information that is
+already correct at the point of use — and a summary that goes stale is worse than none, because it
+is believed. **A second description of the tests is a second thing that can be wrong about them.**
+
+**Tradeoff accepted:** there is no single front door to the test suite. Someone new — including a
+future session with no context — must open `conftest.py` and read module docstrings rather than
+one page. Judged acceptable: that reading is *guaranteed current*, which no separate document can
+promise.
+
+**What would reopen this:** a second contributor who needs to add tests without reading the suite
+first. Then write it, and gate merges on it being updated — because at that point it has an owner
+and a forcing function, which is exactly what it lacks today.
+
+---
+
+## ADR-027 — Store in UTC, but report in Eastern; the storage choice does not settle the reporting one
+**Date:** 2026-07-28 · **Status:** ACCEPTED · **Closes:** BUG-019
+
+**In plain terms:** every timestamp in the database is UTC, which is correct and stays. But the
+health check's "snapshots today" figure was *counted* in UTC too, and those are separate
+decisions. UTC's day rolls over at 8pm New York time, so from 8pm onward the count dropped to 0
+while the collector was working perfectly — and 0 on the top line of the session-start check looks
+exactly like a dead collector. Meanwhile the hours before that silently mixed in the previous
+evening. Confirmed live: 126 at 19:59 UTC, then 0 an hour later, same healthy database.
+
+**Decision:** count against the **Eastern trading day**, and print the date alongside the figure
+(`Snapshots today : 126  (2026-07-28 ET)`) so the boundary in use is never left to guess. The
+ambiguity is what turned an off-by-one into a suspected outage.
+
+**How.** Compute the day's UTC window in Python and pass explicit bounds to a half-open range
+query. Not in SQL: SQLite has no timezone support, only fixed `'localtime'` and `'utc'` modifiers,
+so an in-SQL version would either hardcode an offset that breaks twice a year or depend on the
+machine's own timezone — a different bug in the same clothes. The range also uses the existing
+`idx_snapshots_timestamp` index instead of converting every row.
+
+**A correction worth recording, because it was believed and written down before it was checked.**
+The first version of this reasoning claimed that computing the day's end as `start + timedelta(
+days=1)` is a daylight-saving bug. **It is not.** Arithmetic on a zoneinfo-aware datetime is
+wall-clock arithmetic, so it lands on the next local midnight, not 24 hours later. The genuine
+trap is converting to UTC *first* and then adding 24 hours — that one is wrong on the two
+changeover days, and it is what the DST tests actually pin. The mistaken version was caught only
+because a deliberately injected fault **failed to fail**: injecting it changed nothing, which is
+the signature of a belief about the code that the code never held. **A no-op injection is
+evidence, not a dud.**
+
+**Scope.** `scripts/check_db.py`. A sweep found no other `DATE('now')` in the project. Separately
+noted, not fixed: `collector.py` uses `date.today()` for the option-chain fetch window, which is
+the *machine's local* date. It is right today only because this machine is set to Eastern, and
+being a day out at the edge of a fetch window is harmless. Left alone deliberately rather than
+widened into an unrequested change.
+
+---
+
+## ADR-026 — Some faults live between the process and its output, and only a subprocess can see them
+**Date:** 2026-07-28 · **Status:** ACCEPTED · **Closes:** BUG-018
+
+**In plain terms:** the health check run at the start of every session draws its report with box
+characters (═ ─ →). It died before printing a single line — but only sometimes, which is why it
+survived this long. When its output goes straight to a terminal window, Windows hands those
+characters over intact. When the output is **redirected or piped** — into a file, into Git Bash,
+into any wrapper that captures it — Python instead falls back to the machine's regional encoding,
+cp1252, which has no way to write those characters at all. The script then stopped with an error
+instead of a report.
+
+**Decision:** widen the stream to UTF-8 at the start of `main()`, rather than replacing the box
+characters with plain ASCII. The aligned rules are what make the report scannable at a glance, and
+this is the very first thing run in a session. A second safeguard converts anything still
+unwritable into `?`, because a blemished health check beats no health check.
+
+**The transferable lesson, and the reason this is an ADR at all.** This fault is **invisible to an
+ordinary test.** Running the script inside the test suite proves nothing, because pytest replaces
+the output stream with its own object that handles these characters happily — the very thing that
+breaks is never present. The bug does not live in the code; it lives in the relationship between
+the program and wherever its output is going. **A test that owns only a function cannot see a
+fault that lives in the process.** So these tests launch the script as a real separate process
+with the output deliberately set to cp1252.
+
+**Alternatives rejected.** *Strip the characters to ASCII* — cheapest, but degrades the artefact
+to dodge an environment problem, and any future use of a non-ASCII character reopens it silently.
+*Tell people to set `PYTHONIOENCODING`* — a fix that has to be remembered is not a fix; that is
+precisely how it went unnoticed for months. *Switch the whole project to UTF-8 mode* — larger
+blast radius than the fault deserves, and it would hide the same class of bug elsewhere rather
+than fix it.
+
+**Scope.** `scripts/check_db.py` only. Other scripts printing non-ASCII to a redirected stream
+have the same latent fault; none is on the session-start path, so none is fixed here.
+
+---
+
 ## ADR-025 — A characterization test protects only what reaches its output
 **Date:** 2026-07-26 · **Status:** ACCEPTED · **Closes:** DEBT-014 · **Constrains:** M2
 

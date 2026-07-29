@@ -1,29 +1,69 @@
 # plan.md — Current Implementation Plan
 
-**Last updated:** 2026-07-26
-**Current milestone:** M1 — Test Foundation
-**Status:** ✅ **ALL TASKS COMPLETE** (2026-07-26). M0 ✅ COMPLETE and merged to `main`.
-**444 tests**, run automatically on every commit. **80% coverage of non-UI code** against a ~70%
-target; `iv_engine`, `db.py`, `schwab_client.py` and `config.py` at 100%. Every module was
-mutation-verified rather than assumed: **56 injected faults across the milestone, 54 caught, 2
-proven equivalent.** M2 is unblocked.
-**Reference:** [`AUDIT_2026-07-25.md`](AUDIT_2026-07-25.md) §10 for the full roadmap
+**Last updated:** 2026-07-28
+**Current milestone:** M2 — Architecture Refactor *(not yet started)*
+**Status:** M0 ✅ and M1 ✅ both COMPLETE and merged to `main`. **462 tests**, run automatically on
+every commit. **80% coverage of non-UI code** against a ~70% target; `iv_engine`, `db.py`,
+`schwab_client.py` and `config.py` at 100%. Every module was mutation-verified rather than
+assumed: **56 injected faults across M1, 54 caught, 2 proven equivalent** (plus 7 more in the
+2026-07-28 `check_db.py` work — 6 caught, 1 proven equivalent, ADR-027). M2 is unblocked and is
+the next work.
+**Reference:** [`AUDIT_2026-07-25.md`](AUDIT_2026-07-25.md) §10 for the full M0–M8 roadmap —
+a **frozen snapshot**, superseded by this file wherever they differ (see the banner at its head,
+and ADR-028 for the two M1 tasks settled differently).
 
 ---
 
 ## Where we are
 
-Phase 1 (audit) is complete and approved. M0 is done and merged. We are executing **M1**,
-the second of three milestones on the critical path:
+Phase 1 (audit) is complete and approved. M0 and M1 are both done and merged. Next is **M2**,
+the last of the three milestones on the critical path:
 
 ```
 M0 Cleanup ──► M1 Tests ──► M2 Refactor ──┬──► M3 Data Hardening ──► M8 Deployment
-      done      ▲ YOU ARE HERE             ├──► M4 API ──► M5 Dashboard (gated at 5.0)
+      done          done      ▲ YOU ARE HERE
+                                          ├──► M4 API ──► M5 Dashboard (gated at 5.0)
                                           └──► M6 Analytics ──► M7 ML (gated on trades)
 ```
 
 **Nothing else is safe until M0–M2 complete.** No feature work, no dashboard
 migration, no analytics until the foundation exists.
+
+---
+
+## All nine milestones
+
+The full M0–M8 set at a glance. Task-level detail for the milestones reached so far is in the
+sections below; the rest is in [`AUDIT_2026-07-25.md`](AUDIT_2026-07-25.md) §10.
+
+**Complexity:** **S** ≈ hours · **M** ≈ 1–2 days · **L** ≈ 3–5 days · **XL** ≈ 1–2 weeks
+(solo, part-time). The spread is per task, not a total — a milestone of 14 M-sized tasks is
+weeks of work, not days.
+
+| # | Milestone | Goal | Exit criteria | Complexity (task spread) | Depends on | Blocks | State |
+|---|---|---|---|---|---|---|---|
+| **M0** | Stabilize & Clean | Make the repo safe to work in. No behaviour change. **Blocks everything.** | Clean `git status`, reproducible env, linted, backed up, ~318 MB reclaimed, context files live | 14 tasks — 10 S, 4 M | — | **everything** | ✅ Done, merged |
+| **M1** | Test Foundation | Make change safe. **Keystone — everything after depends on it.** | ≥70% coverage of non-UI code, checks that run unprompted, regressions in M2 detectable | 9 tasks — 3 S, 4 M, 2 L | M0 | M2 → all | ✅ Done (80%, 462 tests) |
+| **M2** | Architecture Refactor | Decompose the monolith. Behaviour-preserving, verified by M1. | `app.py` < 400 lines (composition only); `core/` framework-agnostic and fully tested | 14 tasks — 10 M, 4 L | M1 | M3, M4, M6 (so M5, M7, M8 too) | ← **next** |
+| **M3** | Data Layer Hardening | Put the data pipeline on a sustainable footing | Bounded DB growth, monitored collection, documented operations | 9 tasks — 3 S, 4 M, 2 L | M2 | M8; 3.2 also gates M6.3 | Not started |
+| **M4** | Backend API *(gated)* | Stable contract over `core/`; prerequisite for any UI migration | Documented API; Streamlit still running unchanged | 5 tasks — 1 S, 3 M, 1 L | M2 | M5 | Not started |
+| **M5** | Dashboard Modernization *(decision point)* | Resolve the Streamlit ceiling — **only if it still hurts after M2** | Live-updating UI without full-page reruns; charts hold zoom across updates | 7 tasks — 1 S, 1 M, 3 L, 2 XL | M2 + M4 (5.0 gate) | — *(leaf)* | Gated at 5.0 |
+| **M6** | Analytics Engine | Answer the questions the project set out to answer | Core unvalidated questions answered from data, or explicitly retired | 6 tasks — 2 M, 3 L, 1 XL | M2 (6.3 also needs 3.2) + ~20 trades | M7 | Blocked: needs ~20 trades, have 6 |
+| **M7** | Machine Learning *(explicitly gated)* | Only if it beats a naive baseline — below the trade threshold any model fits noise | Ship only if it beats the naive baseline out-of-sample | 4 tasks — 1 M, 2 L, 1 XL | M6 (backtest engine 6.3) + ≥100 trades | — *(leaf)* | Blocked: have 6 trades |
+| **M8** | Production Deployment | Operate reliably without babysitting | Containerized, supervised, monitored, offsite backups, tested DR runbook | 7 tasks — all M | M3 | — *(leaf)* | Not started |
+
+**The shape:** `M0 → M1 → M2` is a strict chain, then it forks three ways. Only M8 sits at the end
+of a branch; M5 and M7 are the other two leaves.
+
+```
+M0 ──► M1 ──► M2 ──┬──► M3 ──► M8
+                   ├──► M4 ──► M5 (gated at 5.0)
+                   └──► M6 ──► M7 (gated on trade count)
+```
+
+**Three gates are deliberate refusals to pre-commit, not just "later":** **M5.0** re-decides
+whether Streamlit is still painful *after* M2 has made that decision cheap and reversible;
+**M6.2** needs ~20+ trades; **M7** needs ~100+. See ADR-013 and ADR-001.
 
 ---
 
@@ -71,6 +111,13 @@ frozen before M2 moves it, and checks that run without being remembered.
 | 1.8 | Reach ~70% coverage of non-UI code | ✅ Done | **80% overall.** `iv_engine`, `db.py`, `schwab_client.py`, `config.py` all at 100%; `collector.py` at 56% — the shortfall is `main()`'s body, the logging setup and the single-instance lock, none of which are reachable from a test and none of which hold logic. Enforced on every commit by the M1.9 hook. |
 | 1.9 | Checks that run on every save/commit without being remembered | ✅ Done | `.githooks/pre-commit` now runs the full suite when any `.py` file is staged (docs-only commits skip it, so editing the backlog stays instant). `core.hooksPath` was already set, so it is live. **Exercised, not assumed:** verified it skips on a docs-only commit, passes with `VIRTUAL_ENV` unset (the venv is outside the project — DEBT-020), **blocks a deliberately failing test**, and honours the `SKIP_TESTS=1` bypass. |
 
+**Numbering differs from `AUDIT_2026-07-25.md` §10 — these numbers are the real ones,** and are
+what commit messages refer to. Execution reordered the middle of M1: the audit's 1.4 (collector)
+became 1.6, its 1.6 (`schwab_client`) became 1.7, and its 1.7 (scanner net) was pulled forward to
+1.4. Two audit tasks were also settled differently rather than done — **1.8 GitHub Actions CI**,
+met instead by the pre-commit hook at 1.9, and **1.9 `docs/TESTING.md`**, retired. Both recorded
+in **ADR-028**. The audit's exit criterion "≥70% coverage" was promoted to a task here (1.8).
+
 **Scaffolding with an expiry date:** `tests/journal_loader.py` and `tests/app_loader.py` pull
 functions out of Streamlit scripts via AST so they can be tested without launching a page or
 touching the database. Both are **deleted at M2**, when the extracted modules can simply be
@@ -90,13 +137,11 @@ imported. Both raise rather than guess if a target moves.
    2026-07-26 (ADR-023 §1) and covered by a test that runs exactly that sequence. Note the
    related commitment in STATUS.md: the app must save market conditions *with each trade*
    before serious trading resumes.
-3. **Close DEBT-014** — capture a scanner fixture whose near-the-money rows have no stored
-   price, so the bid/ask fallback is actually protected before M2 moves it.
-4. **Work DEBT-025 down toward zero, then gate on it.** 85 lint findings remain after the
+3. **Work DEBT-025 down toward zero, then gate on it.** 85 lint findings remain after the
    first pass. Most dissolve during the M2 decomposition. Only wire `ruff check` into the
    M1.9 pre-commit hook once it is at zero — a gate that fails on every commit teaches
    everyone to bypass it.
-5. **Still blocked on the user: BUG-001.** The duplicate-collector theory is dead (ADR-018).
+4. **Still blocked on the user: BUG-001.** The duplicate-collector theory is dead (ADR-018).
    Needs a symptom, a tab, and a screenshot.
 
 ---
