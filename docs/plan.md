@@ -1,7 +1,7 @@
 # plan.md — Current Implementation Plan
 
 **Last updated:** 2026-07-29
-**Current milestone:** M2 — Architecture Refactor *(pre-work COMPLETE; step 1 of 5 done — `core/` extracted)*
+**Current milestone:** M2 — Architecture Refactor *(pre-work COMPLETE; steps 1–2 of 5 done — `core/` and `dataaccess/` extracted)*
 **Status:** M0 ✅ and M1 ✅ both COMPLETE and merged to `main`. **549 tests**, run automatically on
 every commit. **80% coverage of non-UI code** against a ~70% target; `iv_engine`, `db.py`,
 `schwab_client.py` and `config.py` at 100%. Every module was mutation-verified rather than
@@ -15,9 +15,12 @@ eligibility registry, and all nine query wrappers. A refactor that reorders the 
 cards, mis-draws the IV-ratio line, discards the asymmetric combos before ranking, or shifts
 every chart by four hours now fails a test instead of reaching the screen. **Step 1 of the
 decomposition is now done:** `core/` exists — 4 modules, 8 functions and 6 constants moved out
-of `app.py` (**4,283 → 3,991 lines**) with the 549 tests unchanged and still passing, plus 11 new
-ones enforcing that `core/` never imports the database, the config or Streamlit and that the
-memo seam stays wired. **Steps 2–5 are the remaining work.**
+of `app.py` with the 549 tests unchanged and still passing, plus new ones enforcing that `core/`
+never imports the database, the config or Streamlit and that the memo seam stays wired.
+**Step 2 followed:** `dataaccess/` now holds the nine database reads, each taking the database
+location as an argument rather than assuming it — which closes the half of DEBT-027 that made
+every Mission Control test overwrite a global to get near the code. **`app.py`: 4,283 → 3,936
+lines** across both steps. **564 tests. Steps 3–5 are the remaining work.**
 **Reference:** [`AUDIT_2026-07-25.md`](AUDIT_2026-07-25.md) §10 for the full M0–M8 roadmap —
 a **frozen snapshot**, superseded by this file wherever they differ (see the banner at its head,
 and ADR-028 for the two M1 tasks settled differently).
@@ -155,7 +158,7 @@ appearance is the part that cannot be tested and so should be the thinnest thing
 | # | Task | Status | Notes |
 |---|---|---|---|
 | 2.1 | `core/` — pure functions, no DB and no Streamlit | ✅ Done 2026-07-29 | 4 modules: `format.py` (`_sparkline`, `_fmt_duration`, `_fmt_eta`), `charts.py` (`_break_sessions`, `_banded_ratio_traces` + rangebreaks and ratio bands), `ranking.py` (`_rank_for_panel`, `_card_key`), `scanner.py` (`_compute_transform_scanner`, `_scan_all_offsets` + Phase A thresholds). `app.py` **4,283 → 3,991** lines. **Scope rule: only code the 549 tests already pinned** — moving unpinned code is where a silent break would hide. **The `@st.cache_data` memo stayed in `app.py`** wrapping the moved scanner, because two callers share those saved results and `core/` cannot import Streamlit; `_scan_all_offsets` takes the wrapper through a new `compute=` argument (ADR-032). Zero test edits beyond repointing `tests/app_loader.py` at two sources and the tripwire it was built with. **10 new tests** in `test_core_layering.py` enforce the layer rule on the import list. |
-| 2.2 | `data/queries.py` — the eleven `_load_*` functions | ☐ Next | Return data rather than display shapes. Fix DEBT-027 here: `_candidate_signals` takes `config.DB_PATH` from a module global instead of an argument. `_MC_HISTORY_CAP` moves with this layer. |
+| 2.2 | `dataaccess/queries.py` — the **nine** database reads | ✅ Done 2026-07-30 | **Named `dataaccess/`, not `data/`** — that directory already holds `dashboard.db` and `token.json`, and source code does not belong beside them (ADR-033). **The count was wrong here: nine, not eleven.** Three other `_load_*` functions read small JSON settings files, not the database; they belong to 2.3. Every function takes `db_path` as its first argument, which **closes DEBT-027 site 1** — `_candidate_signals` now takes the path too, defaulting to the global so production is unchanged. `snapshot_id` is gone from four signatures: it was never read, existing only to key the cache, which lives in `app.py`. The nine `@st.cache_data` wrappers stay there and are now memo-and-nothing-else. 564 tests (4 new); mutation-verified 6 injected, 6 caught. **Not done: returning data rather than display shapes** — the naive wall-clock conversion is a display concern in the data layer, but moving it changes every chart's x-axis and is its own job (DEBT-030). |
 | 2.3 | `state/` — the JSON-file persistence | ☐ | Entry locks, chart colours, eligibility registry, currently read and written from inside render functions. **Fix the relative-path defect here** (DEBT-011). |
 | 2.4 | `views/` — one module per tab | ☐ | Mostly mechanical *once* 2.1–2.3 are out. |
 | 2.5 | `app.py` — page config, sidebar, tab dispatch | ☐ | Target: under 400 lines. |

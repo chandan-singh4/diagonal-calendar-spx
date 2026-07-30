@@ -61,6 +61,7 @@ import plotly.graph_objects as go
 import config
 import db
 import iv_engine
+from dataaccess import queries
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 APP_PATH = REPO_ROOT / "app.py"
@@ -326,6 +327,10 @@ def load_pipeline(*, eligible_history_path=None, dte_by_expiry=None) -> dict:
     namespace: dict = {
         "pd": pd, "np": np, "math": math, "bisect": bisect, "json": json,
         "Path": Path, "iv_engine": iv_engine, "db": db, "config": config,
+        # The nine _load_* wrappers are now memo-and-nothing-else: their bodies
+        # call dataaccess.queries. Supplying the REAL module is the point — the
+        # tests measure the actual reads, not a stand-in (M2 step 2.2).
+        "queries": queries,
         "st": st,
         "dte_by_expiry": {} if dte_by_expiry is None else dte_by_expiry,
         "__builtins__": __builtins__,

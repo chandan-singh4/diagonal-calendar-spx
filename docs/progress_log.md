@@ -5,6 +5,63 @@ what broke, and what remains.
 
 ---
 
+## 2026-07-30 (session 8, continued) — the reads move out, and a test stops tampering with the code
+
+### Completed
+
+**Step 2.2: `dataaccess/` holds the nine database reads.** The screen no longer fetches its own
+data. Each read now takes the database location **as an argument** instead of assuming it, and
+`app.py` keeps a thin wrapper per query whose only job is the memory of recent answers.
+**`app.py` is now 3,936 lines**, from 4,283 when M2 started.
+
+**The package is called `dataaccess/`, not `data/` as the plan said.** `data/` already exists and
+holds the 1.57 GB database and the broker token file. Source code does not belong beside those.
+Substance unchanged; renaming later is a directory move and one import line.
+
+**DEBT-027's first half is closed, and this was the point of the step.** `_candidate_signals` used
+to read the database location from a global, so all 22 tests around it had to overwrite that global
+to get near the code — a test modifying the thing it tests. It now takes the path, defaulting to
+the global so nothing in production changes.
+
+### What was harder than it looked
+
+**Adding the parameter proved nothing on its own.** All 563 tests passed with the new argument
+completely ignored, because every one of them sets the global instead. A fix that no test can
+distinguish from *not* fixing it is a claim, not a fix. So one new test aims the global at a file
+that does not exist and passes the real database as the argument: results can only come back if the
+argument won. Injection 6 confirms it fails when the argument is ignored.
+
+**The same memo trap appeared again, in a different disguise.** The at-the-money history has a
+fallback: if today is empty it re-reads a wider window. That second read must reuse the remembered
+result rather than query again. Same shape as step 2.1's scanner, second step running, so both
+seams now have source-level guards. **Assume this trap appears again in `state/` and `views/`.**
+
+### Discovered
+
+**The plan said eleven database reads. There are nine.** Three other similarly-named functions read
+small JSON settings files — chart colours, entry locks, the eligibility registry — not the database.
+They belong to step 2.3. Corrected in `plan.md`.
+
+**Four functions carried an argument none of them ever read.** `snapshot_id` existed only to key
+the cache. The cache stayed in `app.py`, so the key did too, and the queries stopped pretending to
+use it.
+
+**The read layer is quietly deciding what the x-axis looks like** — `.dt.tz_localize(None)`, done
+because Plotly's rangebreaks demand it. That is a display decision inside the data layer, the exact
+thing this step was meant to separate. **Not fixed:** changing it shifts every chart's x-axis and no
+existing test would catch a one-hour error, because the goldens were captured against the current
+behaviour. Opened as DEBT-030, to be done after `views/` exists.
+
+### Verified
+
+560 pre-existing tests pass unchanged; 4 new; **564 total**. Mutation-verified on a throwaway copy:
+**6 faults injected, 6 caught, no survivors.** The one that matters most: dropping the
+decimal-to-percent conversion *in its new home* fails the pipeline tests, proving the moved code is
+still genuinely pinned where it now lives. The dashboard was run again — **all six tabs execute with
+no exception, and the per-tab output is identical to before the change.**
+
+---
+
 ## 2026-07-29 (session 8) — M2 begins: `core/` is out, and `app.py` shrinks for the first time
 
 ### Completed

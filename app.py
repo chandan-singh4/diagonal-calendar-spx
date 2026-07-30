@@ -62,6 +62,7 @@ from core.format import _fmt_duration, _fmt_eta, _sparkline
 from core.ranking import _card_key, _rank_for_panel
 from core.scanner import _APPROACHING_LOW, _TSCAN_THRESHOLD, _scan_all_offsets
 from core.scanner import _compute_transform_scanner as _compute_transform_scanner_pure
+from dataaccess import queries
 
 logger = logging.getLogger(__name__)
 
@@ -1191,122 +1192,71 @@ def _backfill_eligible_history(front_raw: str, back_raw: str,
 # Helper — ATM IV history
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────────────────────
+# The nine reads themselves are dataaccess/queries.py. What stays here is the
+# memo and nothing else (ADR-033).
+#
+# Each wrapper below does three things and no more: apply @st.cache_data, supply
+# config.DB_PATH, and carry the snapshot_id that keys the cache. A new snapshot
+# is the ONLY thing that changes any of these results, so within a snapshot
+# window every rerun — tab click, widget change, autorefresh tick — is a cache
+# hit rather than a fresh query and DataFrame rebuild. st.cache_data returns a
+# COPY on each call, so downstream code can safely mutate the frames it gets.
+#
+# The snapshot_id arguments never reach the query: they were always cache keys
+# alone, which is why they do not appear in dataaccess/queries.py.
+
 @st.cache_data(ttl=55, show_spinner=False, max_entries=48)
 def _load_atm_hist(expiry: str, days: int) -> pd.DataFrame:
-    rows = db.get_atm_iv_history(config.DB_PATH, expiry, days)
-    if not rows:
-        return pd.DataFrame()
-    df = pd.DataFrame([dict(r) for r in rows])
-    df = df.rename(columns={"snapshot_timestamp": "timestamp",
-                             "atm_avg_iv": "atm_iv"})
-    df["atm_iv"] = df["atm_iv"] * 100
-    df["timestamp"] = (
-        pd.to_datetime(df["timestamp"], format="ISO8601", utc=True)
-        .dt.tz_convert(config.DISPLAY_TIMEZONE)
-        .dt.tz_localize(None)  # naive wall-clock: required by Plotly rangebreaks
-    )
-    return df
+    return queries.load_atm_hist(config.DB_PATH, expiry, days)
 
 
 @st.cache_data(ttl=55, show_spinner=False, max_entries=48)
 def _load_atm_hist_fb(expiry: str, days: int) -> pd.DataFrame:
-    df = _load_atm_hist(expiry, days)
-    if df.empty and days == 1:
-        df = _load_atm_hist(expiry, 5)
-        if not df.empty:
-            last_date = df["timestamp"].dt.date.max()
-            df = df[df["timestamp"].dt.date == last_date]
-    return df
+    # load= hands the fallback the MEMOISED loader above, so its second read
+    # reuses saved results instead of querying again. See dataaccess/queries.py.
+    return queries.load_atm_hist_fb(config.DB_PATH, expiry, days,
+                                     load=_load_atm_hist)
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Helper — per-contract IV history
-# ─────────────────────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=55, show_spinner=False, max_entries=48)
 def _load_contract_hist(expiry: str, strike: float,
                          side: str, days: int) -> pd.DataFrame:
-    right_char = "C" if side == "CALL" else "P"
-    rows = db.get_contract_iv_history(
-        config.DB_PATH, expiry, strike, right_char, days
-    )
-    if not rows and days == 1:
-        rows = db.get_contract_iv_history(
-            config.DB_PATH, expiry, strike, right_char, 5
-        )
-    if not rows:
-        return pd.DataFrame()
-    df = pd.DataFrame([dict(r) for r in rows])
-    df["iv"] = df["iv"] * 100
-    df["timestamp"] = (
-        pd.to_datetime(df["snapshot_timestamp"], format="ISO8601", utc=True)
-        .dt.tz_convert(config.DISPLAY_TIMEZONE)
-        .dt.tz_localize(None)  # naive wall-clock: required by Plotly rangebreaks
-    )
-    if days == 1 and not df.empty:
-        last_date = df["timestamp"].dt.date.max()
-        df = df[df["timestamp"].dt.date == last_date]
-    return df
+    return queries.load_contract_hist(config.DB_PATH, expiry, strike, side, days)
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Snapshot-keyed read caches
-# ─────────────────────────────────────────────────────────────────────────────
-# Each of these wraps a raw DB read and is keyed on snapshot_id (a new snapshot
-# is the ONLY thing that changes their result). Within a snapshot window every
-# rerun — tab click, widget change, autorefresh tick — is a cache hit instead of
-# a fresh query + DataFrame rebuild. st.cache_data returns a COPY on each call,
-# so downstream code can safely mutate the returned frames.
 
 @st.cache_data(ttl=120, show_spinner=False, max_entries=3)
 def _load_chain_df(snapshot_id: int) -> pd.DataFrame:
-    """Full option chain for a snapshot, built into the working DataFrame once."""
-    rows = db.get_option_chain(config.DB_PATH, snapshot_id)
-    if not rows:
-        return pd.DataFrame()
-    df = pd.DataFrame([dict(r) for r in rows])
-    df = df.rename(columns={"expiry_date": "expiry"})
-    df["side"] = df["right"].map({"C": "CALL", "P": "PUT"})
-    df["iv"] = df["iv"] * 100  # decimal -> percent, at the load boundary
-    return df
+    return queries.load_chain_df(config.DB_PATH, snapshot_id)
 
 
 @st.cache_data(ttl=120, show_spinner=False, max_entries=3)
 def _load_spx_intraday(session_date: str, snapshot_id: int) -> pd.DataFrame:
-    """Intraday SPX path for the session. snapshot_id is a cache-key only."""
-    rows = db.get_spx_intraday_today(config.DB_PATH, session_date)
-    return pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
+    return queries.load_spx_intraday(config.DB_PATH, session_date)
 
 
 @st.cache_data(ttl=300, show_spinner=False, max_entries=3)
 def _load_prior_close(session_date: str) -> "float | None":
-    """Prior session close — stable for the whole session."""
-    return db.get_prior_session_close(config.DB_PATH, session_date)
+    return queries.load_prior_close(config.DB_PATH, session_date)
 
 
 @st.cache_data(ttl=55, show_spinner=False, max_entries=32)
 def _load_transform_marks(front: str, back: str, call_s: float, put_s: float,
                            days: int, snapshot_id: int) -> pd.DataFrame:
-    """Transform/diagonal mark history for one strike pair (gap chart)."""
-    rows = db.get_transform_mark_history(config.DB_PATH, front, back,
-                                          call_s, put_s, days=days)
-    return pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
+    return queries.load_transform_marks(config.DB_PATH, front, back,
+                                         call_s, put_s, days=days)
 
 
 @st.cache_data(ttl=55, show_spinner=False, max_entries=32)
 def _load_latest_atm_iv(exp_date: str, snapshot_id: int, n: int = 2) -> list:
-    """The n most recent ATM-IV snapshots for an expiry (as plain dicts)."""
-    rows = db.get_latest_atm_iv_snapshots(config.DB_PATH, exp_date, n=n)
-    return [dict(r) for r in rows] if rows else []
+    return queries.load_latest_atm_iv(config.DB_PATH, exp_date, n)
 
 
 @st.cache_data(ttl=55, show_spinner=False, max_entries=32)
 def _load_diagonal_hist(front: str, back: str, call_s: float, put_s: float,
                          days: int, snapshot_id: int) -> pd.DataFrame:
-    """Diagonal net-debit history for one strike pair (scatter)."""
-    rows = db.get_diagonal_history(config.DB_PATH, front, back,
-                                    call_s, put_s, days=days)
-    return pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
+    return queries.load_diagonal_hist(config.DB_PATH, front, back,
+                                       call_s, put_s, days=days)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1347,7 +1297,7 @@ _MC_HISTORY_CAP   = 20    # max candidates per tier to run Phase B history on
 @st.cache_data(ttl=60, show_spinner=False, max_entries=64)
 def _candidate_signals(front_raw: str, back_raw: str,
                         put_strike: float, call_strike: float,
-                        days: int = 1) -> dict | None:
+                        days: int = 1, *, db_path=None) -> dict | None:
     """
     Phase B — for ONE candidate combo, compute:
       duration   — how long the gap has stayed continuously >= 5, ending now
@@ -1358,9 +1308,15 @@ def _candidate_signals(front_raw: str, back_raw: str,
       spark      — unicode sparkline of the recent gap trajectory
       trend_up   — whether the last 3 readings are monotonically increasing
     Returns None if there isn't enough history to say anything useful.
+
+    db_path — DEBT-027, fixed in M2 step 2.2 (ADR-033). This used to read
+    config.DB_PATH directly, so no caller could aim it at another database and
+    every test had to overwrite that global to get near it. It defaults to the
+    global, so production is unchanged and existing callers need no edit.
     """
     rows = db.get_transform_mark_history(
-        config.DB_PATH, front_raw, back_raw, call_strike, put_strike, days=days
+        db_path if db_path is not None else config.DB_PATH,
+        front_raw, back_raw, call_strike, put_strike, days=days,
     )
     if not rows:
         return None

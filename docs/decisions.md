@@ -7,6 +7,65 @@ it was recorded here.
 
 ---
 
+## ADR-033 — `dataaccess/` extracted: the database location becomes an argument, and the package is not called `data/`
+**Date:** 2026-07-30 · **Status:** ACCEPTED · **Completes:** M2 task 2.2 · **Closes:** DEBT-027 site 1
+
+**Decision.** Move the nine database reads out of `app.py` into `dataaccess/queries.py`, each
+taking `db_path` as its **first argument**. `app.py` keeps a thin `_load_*` wrapper per query whose
+entire job is the `@st.cache_data` memo, `config.DB_PATH`, and the cache key.
+
+**The package is called `dataaccess/`, not `data/` as the plan said.** `data/` already exists and
+holds `dashboard.db` — 1.57 GB of irreplaceable market data — and `token.json`, the broker
+credentials. Only `.gitkeep` in it is tracked. Putting source code in that directory would mix
+program files with a database the collector holds open and a secret that must never be committed;
+it would also make the whole thing an importable package. The plan's structure is unchanged in
+substance. Renaming later is a directory move and one import line.
+
+**The count in the plan was wrong: nine, not eleven.** Three other functions match `_load_*` but
+read small JSON settings files — chart colours, entry locks, the eligibility registry — not the
+database. They belong to step 2.3, `state/`. Corrected in `plan.md`.
+
+**`db_path` as an argument is the substance of this step, not tidiness.** Before it,
+`_candidate_signals` called `db.get_transform_mark_history(config.DB_PATH, ...)`, so nothing could
+aim it at another database and all 22 tests in `test_mission_control_golden.py` had to monkeypatch
+that global — **a test modifying the thing it is testing.** The parameter defaults to the global, so
+production and every existing caller are unchanged, and the 22 tests that exercise the default path
+were deliberately left alone: production calls it without the argument, so that path is the one
+that has to keep working.
+
+**A new parameter that no test uses is not a fix, it is a claim.** Adding `db_path` changed nothing
+observable — all 563 tests passed with it ignored, because they all set the global. So
+`test_the_database_location_can_be_given_instead_of_patched` points `config.DB_PATH` at a file that
+does not exist and passes the real fixture as the argument: signals can only come back if the
+argument won. Injection 6 confirms it fails when the argument is ignored.
+
+**`snapshot_id` is gone from four signatures.** `_load_spx_intraday`, `_load_transform_marks`,
+`_load_latest_atm_iv` and `_load_diagonal_hist` all accepted it and **none of them ever read it** —
+it existed solely to key Streamlit's cache. The cache stays in `app.py`, so its key does too. The
+wrappers still take it; the queries no longer pretend to.
+
+**Second memo seam, same shape as ADR-032.** `load_atm_hist_fb` falls back to a wider window when
+today is empty, and that second read must reuse the memoised loader rather than query again. It
+takes a `load=` argument that `app.py` supplies, exactly as `_scan_all_offsets` takes `compute=`.
+Both now have source-level wiring guards, because dropping either keyword changes no number and no
+behavioural test can see it. **This is the second time the same trap has appeared in two
+consecutive steps — assume it will appear again in `state/` and `views/`.**
+
+**Deliberately not done: "return data rather than display shapes."** The plan asks for it, and the
+reads mostly already do — rename columns, scale IV to percent. The exception is real:
+`.dt.tz_localize(None)` produces a naive wall-clock timestamp *because Plotly's rangebreaks require
+one*. That is a display concern living in the data layer. Changing it moves every chart's x-axis,
+which is not something to do in the same step as an extraction and cannot be verified by the tests
+that exist. Recorded as DEBT-030.
+
+**Verified.** 560 pre-existing tests pass unchanged; 4 new; **564 total.** Mutation-verified on a
+copy: **6 faults injected, 6 caught, no survivors.** The most valuable is injection 4 — dropping the
+IV percent conversion *in its new home* fails the pipeline goldens, proving the moved code is still
+genuinely pinned where it now lives. The dashboard was also run: all six tabs execute with no
+exception, with output identical to before the change.
+
+---
+
 ## ADR-032 — `core/` extracted: move only what is pinned, and keep the memo out of the pure layer
 **Date:** 2026-07-29 · **Status:** ACCEPTED · **Completes:** M2 task 2.1
 

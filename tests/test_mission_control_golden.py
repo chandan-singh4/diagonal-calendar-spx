@@ -52,12 +52,18 @@ CORRECT. The ETA is a straight-line projection from at most six readings, which
 is a modelling choice, not a truth. These tests freeze it so M2 cannot change it
 by accident.
 
-THE ONE UNAVOIDABLE UGLINESS
-----------------------------
-_candidate_signals reads config.DB_PATH — a module global — rather than taking a
-path argument, so every test here must monkeypatch it. That is a real defect in
-the code, logged as DEBT-027, not an artefact of testing. It is also precisely
-the hidden dependency M2 should turn into a parameter.
+THE ONE UNAVOIDABLE UGLINESS — NO LONGER UNAVOIDABLE
+----------------------------------------------------
+_candidate_signals used to read config.DB_PATH — a module global — rather than
+taking a path argument, so every test here had to monkeypatch it: a test
+modifying the thing it was testing. That was DEBT-027, and M2 step 2.2 fixed it
+(ADR-033): the function now takes `db_path`, defaulting to the global.
+
+The `signals` fixture below still monkeypatches, deliberately. Production calls
+these without the argument, so the default path is the one that has to keep
+working, and leaving 22 tests exercising it is the cheapest way to be sure.
+`test_the_database_location_can_be_given_instead_of_patched` covers the new
+argument, and is the only test here that proves the fix.
 """
 from __future__ import annotations
 
@@ -90,6 +96,28 @@ def signals(mc, monkeypatch):
 
 def _minutes(td) -> float:
     return td.total_seconds() / 60.0
+
+
+def test_the_database_location_can_be_given_instead_of_patched(mc, mc_db, tmp_path,
+                                                               monkeypatch):
+    """DEBT-027, fixed in M2 step 2.2 (ADR-033) — and this is what proves it.
+
+    config.DB_PATH is aimed at a file that does not exist; the argument is aimed
+    at the fixture. Getting signals back is only possible if the argument won.
+    Without this, the new parameter could quietly be ignored and every other
+    test here would still pass, because they all set the global.
+    """
+    db_path, write = mc_db
+    write([6.0, 6.0, 6.0])
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "no-such-database.db")
+
+    out = mc["_candidate_signals"](
+        MC_FRONT_EXPIRY, MC_BACK_EXPIRY, MC_PUT_STRIKE, MC_CALL_STRIKE,
+        db_path=db_path,
+    )
+
+    assert out is not None, "the db_path argument was ignored"
+    assert out["spark"], "read the right database but produced nothing"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
