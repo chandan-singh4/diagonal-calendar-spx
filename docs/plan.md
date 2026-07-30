@@ -9,7 +9,7 @@ commit. **80% coverage of non-UI code** against a ~70% target; `iv_engine`, `db.
 the display pinning (ADR-029), 43 across the Mission Control pinning (ADR-030/031), 7 + 10 across
 the `views/` extraction (ADR-036/037) and 6 clearing the debt behind it (ADR-038).
 **M2's pre-work is COMPLETE and DEBT-026 is closed.** 88 characterization tests cover what reaches
-the screen. **Steps 2.1–2.4 are done: `app.py` is 4,283 → 2,480 lines,** down 42% and no longer the
+the screen. **Steps 2.1–2.4 are done: `app.py` is 4,283 → 2,505 lines,** down 42% and no longer the
 largest file in the repo. All six tabs live in `views/`, and every one of the six bodies was proved
 byte-identical to the version it replaced before anything was renamed. **The debt those safe moves
 deliberately left behind is now cleared too** — DEBT-028, DEBT-030 and DEBT-032, all closed
@@ -184,11 +184,11 @@ between two runs minutes apart as the collector adds snapshots.
 
 ## Immediate next actions
 
-1. **M1 is complete and DEBT-014 is closed — M2 is unblocked.** Every task 1.1–1.9 is
-   done, the coverage target is exceeded, and the scanner net no longer has the hole
-   that would have let M2 change the midpoint fallback unnoticed. **M2 has now started:**
-   step 2.1 is done and `app.py` is down to 3,991 lines, with appearance, calculations
-   and data access still mixed together in what remains.
+1. **Step 2.5 is the only M2 step left.** 2.1–2.4 are done and the debt they left was
+   cleared the same day (ADR-038). `app.py` is 4,283 → 2,505 lines. Target for 2.5 is
+   under 400. Of what remains, **757 lines are CSS** and **115 are `_render_mc_section`**,
+   which needs a signature change to move because it reads two prelude globals — that is
+   the bulk of the step, and neither part is difficult, only fiddly.
 2. **The 6 practice trades can now safely be discarded.** BUG-016 was the blocker — the
    next ID after a deletion collided with a live PRIMARY KEY and the save raised. Fixed
    2026-07-26 (ADR-023 §1) and covered by a test that runs exactly that sequence. Note the
