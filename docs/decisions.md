@@ -7,6 +7,75 @@ it was recorded here.
 
 ---
 
+## ADR-036 — `views/` extracted as *provable* moves, because this layer cannot be tested
+**Date:** 2026-07-30 · **Status:** ACCEPTED · **Advances:** M2 task 2.4 (3 of 6 tabs) · **Opens DEBT-031, BUG-018**
+
+**The problem this answers.** Steps 2.1–2.3 followed one rule: *only move code the tests already
+pin.* That rule cannot survive step 2.4. A tab body is drawing — eight metric tiles, a scatter, a
+strip of HTML — and a panel whose rows come back in a different order still looks like a panel.
+There is no assertion to hide behind here, so the extraction had to be shaped so that a *different*
+claim becomes checkable instead.
+
+**Decision.** Each tab moves **verbatim**, and the verbatim-ness is verified mechanically rather
+than asserted in a commit message. Three things make that possible:
+
+1. **Zero reindentation.** A tab body sat one level in under `if st.session_state[...] == "x":` and
+   sits one level in under `def render(ctx):`. Same column. So the body is copied, not rewritten.
+2. **A rebind preamble.** The only new lines are `front_expiry = ctx.front_expiry` and friends,
+   directly under the docstring. The body still refers to the names it always did — including the
+   underscore-prefixed ones, which look wrong in a package and are DEBT-028 on purpose.
+3. **A diff against the commit where the tab was still inline.** Each moved body is compared
+   line-for-line with `git show <rev>:app.py`. All three came back **byte-identical**.
+
+**Why not tidy the names in the same step.** Because then the diff proves nothing, and the diff is
+the only evidence available. `ctx.diag_mark` throughout would be better code and an unverifiable
+change; the sequence *move, prove, then rename* costs one extra pass and keeps every step provable.
+This is the same reasoning as ADR-032's decision to keep the underscores through step 2.1.
+
+**The layer rule that matters most.** `views/` may not import `dataaccess`. The memo wrappers live
+in app.py and arrive on the context. A view that imported the reads directly would render an
+identical page, return identical numbers, pass every test — and re-query SQLite on every rerun. It
+is the same invisible-failure shape as ADR-032's missing `compute=`, and it is now enforced on the
+import list, along with: `render` takes `ctx` and nothing else (a defaulted parameter is an input
+the caller never has to think about), nothing draws at module import (Streamlit reruns the script,
+not the imports, so a module-level `st.` call draws once into whichever tab happened to be first and
+never again), and app.py must actually dispatch each view — an extracted tab nothing calls is a
+blank page, and no other check would notice.
+
+**A test failed and was re-pointed, not weakened.** `test_the_statistics_frame_is_deliberately_not_broken`
+reads app.py's source for a section that had moved, and tripped its own `"anchor moved"` guard —
+exactly as ADR-032 predicted this class of test would behave. It now reads the view module, and got
+*stronger*: the module IS the tab, so the 2,000-character search window is gone and a
+`_break_sessions` call sitting just past the old cut-off can no longer hide.
+
+**The before/after check, and its two holes.** `render_check.py` proves a tab does not raise; it
+counts elements, and a count cannot see a lost decimal. So each moved tab is also compared by
+content — `AppTest` run against a git worktree of the previous commit and against the working tree,
+same database, state redirected so nothing touches the real registry, every rendered string diffed.
+All three tabs identical. **Two cautions are worth more than that result.** First, the harness's
+first version wrote **empty files** (its output crashed on the console's cp1252 codec) and two empty
+files diff clean — a green result proving nothing, which is ADR-029's lesson arriving in a new
+costume; it now refuses to report a dump of nothing. Second, **charts are not covered at all**:
+Streamlit 1.58's `AppTest` exposes no accessor for `plotly_chart`, so for a chart tab the diff sees
+the captions and stops. Element counts are separately useless for the Scanner tab, whose panel
+legitimately differs between two runs minutes apart as the collector adds snapshots.
+
+**Two defects found by reading, and deliberately not fixed.** DEBT-031: the 5-point transform
+threshold is hardcoded three times in the Entry tab while `core/scanner.py` defines it once, and at
+exactly 5.00 two panels in that one tab contradict each other because one test is `>` and the rest
+are `>=`. BUG-018: on any expiry day the front-expiry default is 0 DTE, so there is no straddle, and
+the Normalized Debit tile reads `"— (set strikes)"` next to a Diagonal Mark computed from those very
+strikes. **Both were left alone.** A move that changes a trading threshold is not a move, and BUG-018
+is a wording decision that is Chandan's to make. Fixing either would have destroyed the byte-identical
+property that is the whole evidentiary basis of this step.
+
+**Found by looking at the numbers, not the verdict.** BUG-018 was sitting in the *output* of the
+before/after comparison, which reported IDENTICAL — correctly, since the bug predates the move. The
+comparison was built to answer "did this change anything"; it answered that, and the defect was
+visible only because the captured values were read as well.
+
+---
+
 ## ADR-035 — `state/` extracted and DEBT-011 closed: an absolute home, an atomic write, and a corrupt file that no longer erases itself
 **Date:** 2026-07-30 · **Status:** ACCEPTED · **Completes:** M2 task 2.3 · **Closes three of DEBT-011's five parts**
 

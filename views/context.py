@@ -41,11 +41,23 @@ class ViewContext:
     strikes_set: bool
 
     # ── Derived once in app.py, used by more than one tab ─────────────────
-    # ts_now is iv_engine.term_structure(...); typed loosely so this module
+    # ts_now is iv_engine.term_structure(...) and theta_diff is
+    # iv_engine.theta_differential(...); both typed loosely so this module
     # stays free of anything it does not itself use.
     ts_now: Any
     diag_mark: float | None
     norm_deb: float | None
+
+    # Added for the Entry Analysis tab. Every one of these is None or absent
+    # under some real condition — no strikes chosen, wing strikes missing
+    # from the chain, fewer than 90 days of history — and the tab has a
+    # distinct message for each. Optionality is the behaviour here, not an
+    # oversight, so it stays visible in the types.
+    straddle: float
+    theta_diff: Any
+    ic_mark: float | None
+    iv_pct: float | None
+    liquidity: float
 
     # ── Memoised loaders, injected ────────────────────────────────────────
     # These are app.py's @st.cache_data wrappers, passed in rather than

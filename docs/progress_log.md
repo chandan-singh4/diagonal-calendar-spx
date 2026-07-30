@@ -5,6 +5,79 @@ what broke, and what remains.
 
 ---
 
+## 2026-07-30 (session 9) — step 2.4 begins: three tabs out, and two faults found by reading
+
+### Completed
+
+**Three of the dashboard's six tabs now live in their own files** — Historical Statistics, Research,
+and Entry Analysis. The main file is down from 3,945 lines to **3,644**. Nothing on the screen
+changed, and that is the entire point.
+
+**Why this step is different from the three before it.** Until now, every piece of code moved was
+code the automatic checks already watched, so if a move broke something a check went red. The tabs
+are *drawing* — a panel whose rows come out in the wrong order still looks like a panel, and no
+check can tell. So instead of proving the moved code still works, each tab was moved in a way that
+lets us prove **nothing was rewritten on the way**: the code sits at the same indentation in its new
+home, so it could be copied rather than retyped, and a script then compared each moved block
+character-by-character against the old file. **All three came back identical.** Tidying up the names
+afterwards is a separate job (DEBT-028), precisely because tidying and moving in one go would leave
+nothing to compare.
+
+**Seven new automatic checks** guard the new folder. The one that matters: a tab is forbidden from
+fetching its own data. If it did, the page would look exactly the same and give exactly the same
+numbers, while asking the database for them again every few seconds — a fault with no visible
+symptom at all. All seven were proved by deliberately breaking the code on a copy: **7 faults
+injected, 7 caught.** 600 checks in total, all passing.
+
+### Bugs and debt found
+
+**BUG-018 — on expiry day the screen tells you to set strikes you have already set.** The "Front
+Expiry" box defaults to the nearest expiry. On any day something expires *that same day*, that
+default has zero days left, so the "expected move" figure it needs cannot be calculated — correctly,
+by design. But the tile that depends on it then displays **"— (set strikes)"**, sitting directly
+beside another tile showing a real price calculated from those very strikes. The message is not
+merely unhelpful, it is false, and it points at the wrong control. Today is such a day, so this is
+live right now. The Research tab loses its "you are here" marker on the same days for the same
+reason. **Not fixed — the replacement wording is Chandan's call.**
+
+**DEBT-031 — the 5-point transform threshold is written out four times and two copies disagree.**
+The Scanner reads it from one named place. The Entry tab hardcodes it three separate times, and one
+of those uses "greater than" where everything else uses "greater than or equal to" — so at exactly
+5.00 two panels *on the same tab* contradict each other. Worse in future than now: change the
+threshold and the Scanner would flag opportunities the Entry tab calls unfavourable, with nothing
+reporting the disagreement.
+
+**Neither was fixed here, deliberately.** Both were found by reading the tab closely while moving
+it. Changing a trading threshold inside a move means it is no longer a move, and the
+character-by-character comparison — the only real evidence this step has — would have been
+destroyed to fix something that has been true for weeks.
+
+### Mistakes in my own work
+
+**A comparison that passed while proving nothing.** The before/after check writes down everything a
+tab displays, before and after, and compares. Its first version crashed while saving — the file it
+wrote was **empty** — and two empty files compare as identical. It reported success. Caught by
+checking the file sizes rather than trusting the verdict; it now refuses to report an empty result.
+**This is the third time in three steps** that a check has been too weak to fail (ADR-029, the
+2.0a assertions, and now this).
+
+**Charts are not covered by that comparison at all,** which I would rather state than let the word
+"identical" imply otherwise. The testing tool in this Streamlit version cannot reach inside a chart,
+so for the Research tab the comparison sees the captions around it and nothing else. The chart's
+only assurance is that its code was proved unchanged.
+
+**A wrong assumption, corrected.** The frozen dashboard was assumed to be caused by the work in
+progress. It was not — nothing had been edited at that point. The running program had been up since
+07:35, through three separate rounds of changes, and had consumed 5,200 seconds of processor time in
+three hours. It needs restarting before anything it shows is trusted.
+
+### Remaining
+
+Three tabs left: Strike Detail, Scanner, and Calendar Edge. **Calendar Edge is half the remaining
+work on its own** (~750 lines) and holds the ten chart sites that DEBT-030 is waiting on.
+
+---
+
 ## 2026-07-30 (session 8, continued) — step 2.3: the file that would have quietly erased itself
 
 ### Completed
