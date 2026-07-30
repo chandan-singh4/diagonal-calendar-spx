@@ -5,6 +5,67 @@ what broke, and what remains.
 
 ----
 
+## 2026-07-30 (session 9, continued) — expired locks now delete themselves
+
+### Completed
+
+**A locked entry disappears once its front leg is done.** Three dead locks were still listed on
+screen, the newest expired ten days earlier. The reason was the plainest one available: the cleanup
+Chandan designed was never built. The saved-locks file could create a lock, read one, correct its
+price, and delete one *when the trash button was pressed* — that was the whole list. Nothing
+anywhere compared a lock against today's date.
+
+It does now. A lock is gone once its front expiry date is past, or once the clock passes **4:15 PM
+New York on the expiry date itself** — the cash-index close, not the 4:00 PM equity bell. No prompt,
+no message; it simply stops being there.
+
+**Deleted, not hidden — Chandan's call:** *"I don't think I'd look once it expires so no point in
+archiving it."* That decision is what set the standard of proof for the rest of the work. A rule
+that fires one day early now destroys a lock on a position still open, and the entry price it holds
+is the number every chart is measured against. So the rule is a small self-contained calculation
+handed the current time rather than reading a clock itself, which makes it testable at any instant:
+4:14 PM keeps the lock, 4:15 deletes it, the morning of expiry day keeps it.
+
+**The cleanup runs where every reader passes.** Filtering the on-screen list was the cheap option
+and would have been wrong — the list would look tidy while the chart and the current-position
+lookup carried on using the dead record.
+
+**Two things the cleanup refuses to do.** A lock whose date cannot be read is *kept*, not deleted;
+deleting what you cannot read is how records go missing quietly. And when nothing has expired the
+file is not rewritten at all — this runs on every page load, and a rewrite that changes nothing is
+still a chance to lose the file.
+
+### Found
+
+**One of my own checks was blind, and only breaking the code showed it.** Seven deliberate faults
+were introduced on a throwaway copy to see whether the new checks would notice. Six were caught.
+The seventh — code that *relabels* an incoming time as New York instead of *converting* it — sailed
+through, because the two example times I had picked happened to give the same answer either way.
+Rewritten with times where the two approaches disagree; 7 of 7 caught. A check that has never
+failed has never been tested.
+
+**The scrambled-controls problem is not fixed, and is not the same bug.** Chandan asked whether the
+expiry cleanup made it moot. It does not. Clicking "View Chart" stages the lock's expiries and
+strikes, a safety guard drops any value missing from today's data, and each dropdown then quietly
+falls back to its default — so the screen shows a *different* diagonal than the one clicked, with
+nothing saying so. Expiry was one way to trigger that. Two remain on a **live** position: a strike
+drifting outside the range the collector stores as the market moves, and a back expiry further out
+than the furthest one collected. Recorded as BUG-022, P1, awaiting Chandan's call on scope.
+
+**Tab clicks are slow, and the cause is not yet established.** Logged as ENH-011 at Chandan's
+request. Distinct from the freeze fixed earlier today — that was a page that never finished; this
+is one that finishes slowly. The shape is known (every click re-runs the whole page from the top,
+and the caches expire on 55- and 120-second timers rather than on new data arriving) but nothing is
+measured yet, and the note says explicitly not to start by tuning those timers.
+
+### Remains
+
+The saved-locks file was backed up before anything was written to it. **The cleanup has not yet run
+against the real file** — that happens on the next page load, and the three dead locks should be
+gone from the popover.
+
+----
+
 ## 2026-07-30 (session 9, continued) — clearing the debt the safe moves left behind
 
 ### Completed

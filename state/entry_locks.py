@@ -18,6 +18,7 @@ import uuid
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from core import expiry
 from state.store import read_json, write_json
 
 FILENAME = "entry_locks.json"
@@ -74,6 +75,39 @@ def clear(state_dir, front_expiry: str, back_expiry: str,
     if k in locks:
         del locks[k]
         save(state_dir, locks)
+
+
+def purge_expired(state_dir, *, now: datetime) -> list[str]:
+    """Drop every lock whose FRONT leg has expired, and return the keys removed.
+
+    Deletion, not archival — Chandan's call: once the front leg is done the
+    lock has nothing left to say, and a hidden-but-present record is just a
+    file that grows forever (ADR-039). The rule itself lives in core.expiry so
+    it can be tested against a fixed clock with no file involved.
+
+    Two deliberate refusals:
+
+      * A lock whose front_expiry will not parse is KEPT, not deleted. Deleting
+        what you cannot read is how data goes missing quietly; it stays visible
+        for a human to deal with.
+      * If nothing expired, the file is not rewritten at all. This runs on
+        every script run, and a rewrite that changes nothing is still a chance
+        to lose the file.
+    """
+    locks = load(state_dir)
+    expired = []
+    for k, record in locks.items():
+        try:
+            if expiry.is_expired(record["front_expiry"], now):
+                expired.append(k)
+        except (KeyError, ValueError, TypeError):
+            continue
+    if not expired:
+        return []
+    for k in expired:
+        del locks[k]
+    save(state_dir, locks)
+    return expired
 
 
 def update_mark(state_dir, front_expiry: str, back_expiry: str, put_strike: float,

@@ -36,6 +36,7 @@ import sys
 from datetime import UTC, datetime
 from datetime import time as dt_time
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -903,6 +904,15 @@ def _entry_lock_key(front_expiry: str, back_expiry: str, put_strike: float, call
 
 
 def _load_entry_locks() -> dict:
+    """Every reader of the locks file comes through here — the popover, the
+    current-combo lookup, the chart. The purge sits INSIDE the loader for that
+    reason: filtering the popover alone would tidy the visible list while the
+    chart and the lookup carried on seeing a lock whose front leg expired
+    weeks ago (BUG-021, ADR-039)."""
+    entry_locks.purge_expired(
+        config.STATE_DIR,
+        now=datetime.now(ZoneInfo(config.DISPLAY_TIMEZONE)),
+    )
     return entry_locks.load(config.STATE_DIR)
 
 

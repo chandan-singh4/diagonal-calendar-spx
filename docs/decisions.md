@@ -7,6 +7,83 @@ it was recorded here.
 
 ---
 
+## ADR-040 — What BUG-020 cost, and the blind spot that let it run for a month
+**Date:** 2026-07-30 · **Status:** ACCEPTED · **Closes BUG-020**
+
+Recorded because the fix is one line and the lesson is not. The row is deleted per ADR-017;
+this is the reasoning worth keeping.
+
+**The defect.** `st.rerun()` aborts the running script *where it stands*. The live-refresh
+poller called it on seeing a newer snapshot, but the line recording which snapshot was on
+screen sat ~100 lines further down. It never ran. Every subsequent execution found the same
+stale value and rerun again — forever, at 100% of a core, never reaching the code that draws
+anything. Fixed by adopting the snapshot id *before* rerunning.
+
+**The comment three lines above described this exact trap** and guarded the first-run branch.
+The newer-snapshot branch had the identical hazard and no guard. A known danger, half-handled.
+
+**Why no test could have caught it: `AppTest` does not fire fragment timers at all.** Not
+"we forgot to test it" — there was no way to reach that code from a test, `render_check.py`
+included. "All six tabs render" was true throughout and worth nothing here; they render fine,
+they just never got the chance. It is now pinned by asserting on the *source*
+(`test_the_refresh_poller_adopts_the_snapshot_before_it_reruns`), which is the weaker tool
+you fall back to when there is no seam to call.
+
+**A second `AppTest` blind spot found alongside it, still open:** it cannot change a strike.
+Both `select()` and `select_index()` feed the formatted label ("7,410") back through
+`format_func=lambda s: f"{int(s):,}"`, which then fails on the comma. That is harness misuse
+on my part rather than an app defect, but the consequence is real — **the single most common
+interaction on this dashboard has never been exercised automatically.**
+
+**The diagnostic lesson, which cost the most.** I misdiagnosed this twice: first as the work
+in progress, then as a stale process — and stated the second with more confidence than the
+evidence carried. What actually cracked it was one detail in Chandan's report that neither
+theory explained: *the charts stopped responding to the expiry and strike controls.* A slow
+app is still a responding app. Both of my theories predicted slowness; only an aborted script
+predicts controls that do nothing. **The symptom a theory cannot explain is worth more than
+the three it can.**
+
+---
+
+## ADR-039 — An entry lock is deleted when its front leg expires, not hidden
+**Date:** 2026-07-30 · **Status:** ACCEPTED · **Closes BUG-021** · **Opens BUG-022**
+
+**The defect.** Nothing anywhere removed an expired lock. `state/entry_locks.py` could create,
+read, edit and delete-on-request; the automatic cleanup Chandan had designed was never built.
+Three dead locks were still listed on 2026-07-30, the newest expired ten days earlier.
+
+**Delete, not archive — Chandan's call:** *"I don't think I'd look once it expires so no point
+in archiving it."* Noted here because it makes the clock rule load-bearing in a way a display
+filter would not be. A rule that fires one day early now **destroys a lock on a live position**,
+and the entry price it holds is the number every chart is measured against. That is why the
+rule is a pure function with the clock injected, tested to the minute from both sides, and why
+the mutation run covers a 4:00-vs-4:15 close, an off-by-one at the boundary, and a timezone
+that is relabelled rather than converted. 7/7 caught.
+
+**The rule.** Expired when the front expiry date is past, or it is that date and the New York
+time is ≥ 16:15 — the cash-index close, not the 4:00 PM equity bell.
+
+**Where it lives.** The rule in `core/expiry.py` (pure, clock injected); the file write in
+`state/entry_locks.py`; the call inside app.py's `_load_entry_locks`, which is the single
+funnel every reader passes through. **Filtering the popover instead was the obvious cheap
+option and is wrong:** the visible list would look clean while the chart and the
+current-combo lookup carried on seeing the dead record.
+
+**Two deliberate refusals in the purge.** A lock whose `front_expiry` will not parse is **kept**
+— deleting what you cannot read is how data goes missing quietly. And when nothing has expired
+the file is not rewritten at all: this runs on every script run, and a no-op rewrite is still
+a chance to lose the file.
+
+**What this does NOT fix, now BUG-022.** Chandan asked whether the expiry fix made the
+scrambled-controls problem moot. It does not, and the correction matters: "View Chart" stages
+the lock's expiries and strikes, and a guard drops any value absent from today's chain, after
+which each dropdown silently falls back to its default. Expiry was one way to trigger that.
+Two remain on a **live** lock — a strike drifting outside the collector's window as SPX moves,
+and a back expiry beyond the furthest one collected. In both cases the trader clicks a position
+they are actually holding and is shown a different diagonal, with nothing saying so.
+
+---
+
 ## ADR-038 — Clearing the debris the safe moves left: names, scaffolding, and the clock
 **Date:** 2026-07-30 · **Status:** ACCEPTED · **Closes DEBT-028, DEBT-030, DEBT-032** · **Opens BUG-019**
 
