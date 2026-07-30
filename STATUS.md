@@ -1,6 +1,6 @@
 # PROJECT STATUS
 
-**Updated:** 2026-07-30 · **Branch:** `m2-core-extraction` · 9 saved points, **none sent online yet.**
+**Updated:** 2026-07-30 · **Branch:** `m2-core-extraction`, **pushed to GitHub, not yet merged.**
 **State:** Stage 2 is 4 steps of 5 done. **639 checks**, all passing. Price record healthy (126
 recordings today, latest 15:59 New York). **The screen was used today,** and a freeze that made it
 unusable was found and fixed — see "This session".
@@ -23,7 +23,7 @@ IS the product** — the screen is just a window onto it.
 | **Journal** | Diary of actual trades. 6 practice entries, to be discarded. |
 
 **Honest condition:** the record and the checking are in good shape. The screen has real faults, all
-known and listed below. Nothing runs anywhere but this machine.
+known and listed below. The code is backed up to GitHub; nothing *runs* anywhere but this machine.
 
 ## The 9-stage plan
 
