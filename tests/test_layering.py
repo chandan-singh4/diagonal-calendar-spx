@@ -311,6 +311,60 @@ def test_no_view_helper_is_also_left_behind_in_app():
     )
 
 
+def test_every_consumer_of_a_timestamped_read_converts_it_for_display():
+    """DEBT-030's standing guard, and the reason that fix was survivable.
+
+    `load_atm_hist`, `load_atm_hist_fb` and `load_contract_hist` return ZONED
+    UTC. Anything that plots one must put it through `to_display_time` first.
+    Miss a single site and the chart's x-axis moves four or five hours: every
+    session break lands in the wrong place, the day's shape is wrong, and the
+    picture still looks completely plausible. No golden test can see it — the
+    fixtures would simply be recaptured against the shifted values — and the
+    render comparison cannot either, because AppTest cannot read inside a
+    chart.
+
+    So it is asserted structurally: every call to one of those loaders must sit
+    inside a to_display_time(...) call. Crude, and it is the only check that
+    covers this at all.
+    """
+    LOADERS = {"load_atm_hist", "load_atm_hist_fb", "load_contract_hist"}
+    offenders = []
+
+    for path in [APP_PATH, *view_modules()]:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+
+        # Calls that are DIRECTLY wrapped: to_display_time(loader(...), tz)
+        wrapped = {
+            id(arg)
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Call)
+            and ((isinstance(n.func, ast.Name) and n.func.id == "to_display_time")
+                 or (isinstance(n.func, ast.Attribute) and n.func.attr == "to_display_time"))
+            for arg in n.args
+        }
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = (node.func.attr if isinstance(node.func, ast.Attribute)
+                    else getattr(node.func, "id", None))
+            if name not in LOADERS or id(node) in wrapped:
+                continue
+            # The memo wrappers in app.py are definitions, not consumers: they
+            # call queries.<loader> to BUILD the cached read. Converting there
+            # would put the display decision straight back in the data path.
+            if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name) \
+                    and node.func.value.id == "queries":
+                continue
+            offenders.append(f"{_rel(path)}:{node.lineno} — {name}(...)")
+
+    assert not offenders, (
+        "these read timestamps and never convert them for display; if any of "
+        "them reaches a chart its x-axis is silently hours out:\n  "
+        + "\n  ".join(offenders)
+    )
+
+
 def test_the_extracted_tabs_are_dispatched_from_app():
     """app.py must actually call each view — an extracted tab that nothing
     invokes is a blank page, and no other test here would notice."""

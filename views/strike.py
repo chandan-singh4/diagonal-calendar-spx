@@ -10,8 +10,9 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+import config
 import iv_engine
-from core.charts import SESSION_RANGEBREAKS, break_sessions
+from core.charts import SESSION_RANGEBREAKS, break_sessions, to_display_time
 from views.context import ViewContext
 
 
@@ -115,10 +116,13 @@ def render(ctx: ViewContext) -> None:
         st.caption("Front vs back IV at your trade strikes — ratio on right axis.")
 
         if ctx.strikes_set:
-            fch = ctx.load_contract_hist(ctx.front_expiry, ctx.call_strike, "CALL", sd_period_days)
-            bch = ctx.load_contract_hist(ctx.back_expiry,  ctx.call_strike, "CALL", sd_period_days)
-            fph = ctx.load_contract_hist(ctx.front_expiry, ctx.put_strike,  "PUT",  sd_period_days)
-            bph = ctx.load_contract_hist(ctx.back_expiry,  ctx.put_strike,  "PUT",  sd_period_days)
+            # DEBT-030: zoned UTC in, naive wall-clock out, at the point of
+            # drawing rather than in the read layer.
+            _tz = config.DISPLAY_TIMEZONE
+            fch = to_display_time(ctx.load_contract_hist(ctx.front_expiry, ctx.call_strike, "CALL", sd_period_days), _tz)
+            bch = to_display_time(ctx.load_contract_hist(ctx.back_expiry,  ctx.call_strike, "CALL", sd_period_days), _tz)
+            fph = to_display_time(ctx.load_contract_hist(ctx.front_expiry, ctx.put_strike,  "PUT",  sd_period_days), _tz)
+            bph = to_display_time(ctx.load_contract_hist(ctx.back_expiry,  ctx.put_strike,  "PUT",  sd_period_days), _tz)
 
             call_ready = not fch.empty and not bch.empty
             put_ready  = not fph.empty and not bph.empty

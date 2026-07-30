@@ -55,6 +55,7 @@ from conftest import (
 )
 
 import config
+from core.charts import to_display_time
 
 pytestmark = pytest.mark.integration
 
@@ -646,11 +647,22 @@ def test_atm_history_converts_iv_to_percent_and_local_time(pipe):
     df = pipe["_load_atm_hist"](MC_FRONT_EXPIRY, 1)
 
     assert list(df["atm_iv"].round(1)) == [18.4, 19.0]
+
+    # UPDATED for DEBT-030 (ADR-038). The read layer used to return naive
+    # Eastern; it now returns zoned UTC and the chart converts. The protection
+    # this test gave is unchanged and is asserted one step further down the
+    # pipeline: the value a CHART receives must still be Eastern wall-clock.
+    assert str(df["timestamp"].dt.tz) == "UTC", (
+        "reads must hand back the stored zone, not a display decision"
+    )
+
+    df = to_display_time(df, config.DISPLAY_TIMEZONE)
     assert df["timestamp"].dt.tz is None, "must be naive for Plotly rangebreaks"
 
-    # The newest fixture row was written "now", so the value returned must match
-    # the current EASTERN wall-clock, not the current UTC one. In summer those are
-    # four hours apart, so this fails loudly if the conversion goes missing.
+    # The newest fixture row was written "now", so the value the chart gets must
+    # match the current EASTERN wall-clock, not the current UTC one. In summer
+    # those are four hours apart, so this fails loudly if the conversion goes
+    # missing at either end.
     latest = df["timestamp"].max()
     expected = (
         pd.Timestamp.now(tz="UTC").tz_convert(config.DISPLAY_TIMEZONE).tz_localize(None)
@@ -726,7 +738,10 @@ def test_contract_history_converts_iv_and_falls_back(pipe):
     df = pipe["_load_contract_hist"](MC_FRONT_EXPIRY, MC_CALL_STRIKE, "CALL", 1)
     assert not df.empty
     assert df["iv"].max() == pytest.approx(18.4)
-    assert df["timestamp"].dt.tz is None
+    # Zoned UTC from the read, naive Eastern once the chart has had it —
+    # DEBT-030 (ADR-038).
+    assert str(df["timestamp"].dt.tz) == "UTC"
+    assert to_display_time(df, config.DISPLAY_TIMEZONE)["timestamp"].dt.tz is None
 
 
 def test_transform_marks_and_diagonal_history_return_frames(pipe):

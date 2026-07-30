@@ -4,7 +4,9 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
+import config
 import iv_engine
+from core.charts import to_display_time
 from views.context import ViewContext
 
 
@@ -33,8 +35,14 @@ def render(ctx: ViewContext) -> None:
         stat_cols,
         [("Today", 1), ("5 Days", 5), ("10 Days", 10), ("20 Days", 20)],
     ):
-        pf = ctx.load_atm_hist_fb(ctx.front_expiry, days)
-        pb = ctx.load_atm_hist_fb(ctx.back_expiry,  days)
+        # Converted even though this tab draws no time axis: the two frames
+        # are merged ON this column, and both sides must agree. Keeping it
+        # identical to what every other consumer sees is also what makes
+        # "nothing changed" true here rather than merely likely (DEBT-030).
+        pf = to_display_time(ctx.load_atm_hist_fb(ctx.front_expiry, days),
+                             config.DISPLAY_TIMEZONE)
+        pb = to_display_time(ctx.load_atm_hist_fb(ctx.back_expiry,  days),
+                             config.DISPLAY_TIMEZONE)
         with col:
             st.caption(label)
             if not pf.empty and not pb.empty:

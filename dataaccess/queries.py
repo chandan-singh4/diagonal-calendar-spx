@@ -13,11 +13,16 @@ TWO THINGS DELIBERATELY NOT DONE HERE (M2 step 2.2, ADR-033):
     never read — it existed only to key Streamlit's cache. The cache lives in
     app.py, so its key does too.
 
-  * The timezone conversion stays, including `.dt.tz_localize(None)`. That
-    produces a naive wall-clock timestamp because Plotly's rangebreaks require
-    one, which is a DISPLAY concern sitting in the data layer. Moving it would
-    change every chart's x-axis and is not something to do in the same step as
-    an extraction. Recorded as DEBT-030.
+  * ~~The timezone conversion stays~~ — DONE 2026-07-30, DEBT-030 closed by
+    ADR-038. These reads now return ZONED UTC and take no display decision.
+    Whoever draws converts, through `core.charts.to_display_time`, which is
+    the one place that knows Plotly's rangebreaks need a naive value.
+
+    If you add a read here: return the timestamp as stored. Do not localise
+    it however convenient that is for the caller in front of you — the next
+    caller is not a chart. The one place market time is still unavoidable is
+    `load_contract_hist`'s "today" filter, where the calendar date IS a
+    trading-session question; it converts locally and does not write it back.
 """
 from __future__ import annotations
 
@@ -36,11 +41,9 @@ def load_atm_hist(db_path, expiry: str, days: int) -> pd.DataFrame:
     df = df.rename(columns={"snapshot_timestamp": "timestamp",
                              "atm_avg_iv": "atm_iv"})
     df["atm_iv"] = df["atm_iv"] * 100
-    df["timestamp"] = (
-        pd.to_datetime(df["timestamp"], format="ISO8601", utc=True)
-        .dt.tz_convert(config.DISPLAY_TIMEZONE)
-        .dt.tz_localize(None)  # naive wall-clock: required by Plotly rangebreaks
-    )
+    # Zoned UTC, exactly as stored. Converting to a local wall-clock is the
+    # chart's job (core.charts.to_display_time) — DEBT-030, ADR-038.
+    df["timestamp"] = pd.to_datetime(df["timestamp"], format="ISO8601", utc=True)
     return df
 
 
@@ -75,14 +78,18 @@ def load_contract_hist(db_path, expiry: str, strike: float,
         return pd.DataFrame()
     df = pd.DataFrame([dict(r) for r in rows])
     df["iv"] = df["iv"] * 100
-    df["timestamp"] = (
-        pd.to_datetime(df["snapshot_timestamp"], format="ISO8601", utc=True)
-        .dt.tz_convert(config.DISPLAY_TIMEZONE)
-        .dt.tz_localize(None)  # naive wall-clock: required by Plotly rangebreaks
-    )
+    # Zoned UTC, exactly as stored — DEBT-030, ADR-038.
+    df["timestamp"] = pd.to_datetime(df["snapshot_timestamp"],
+                                     format="ISO8601", utc=True)
     if days == 1 and not df.empty:
-        last_date = df["timestamp"].dt.date.max()
-        df = df[df["timestamp"].dt.date == last_date]
+        # "Today" means the last TRADING day, so this date comparison has to
+        # happen in market time and cannot follow the column into UTC. A
+        # 20:00 New York row is already tomorrow in UTC, so comparing UTC
+        # dates would split one session across two and return only the
+        # after-hours tail. The conversion is local to this filter and is
+        # deliberately NOT written back to the column.
+        local_date = df["timestamp"].dt.tz_convert(config.DISPLAY_TIMEZONE).dt.date
+        df = df[local_date == local_date.max()]
     return df
 
 

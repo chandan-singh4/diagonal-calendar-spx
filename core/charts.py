@@ -24,6 +24,40 @@ SESSION_RANGEBREAKS = [
 ]
 
 
+def to_display_time(df: pd.DataFrame, display_tz: str,
+                    ts_col: str = "timestamp") -> pd.DataFrame:
+    """Turn stored UTC into the naive local wall-clock the charts require.
+
+    THE DEBT-030 FIX LIVES HERE. `dataaccess/` used to end every timestamp
+    with `.dt.tz_localize(None)`, handing out a bare "14:30" with nothing
+    saying where. That is a DISPLAY decision, and it was being taken in the
+    read layer, so anything else reading that data inherited it — fine while
+    every consumer was a chart, wrong the moment one is not (M4's data
+    service, M7's models, where a time with no zone is ambiguous).
+
+    So the read layer now returns zoned UTC, and the stripping happens here,
+    once, at the last moment before drawing.
+
+    WHY STRIP AT ALL. Plotly's rangebreaks — the thing that collapses nights
+    and weekends — mis-place points when handed zoned timestamps. The naive
+    value is a genuine requirement of the chart, not laziness. It is simply
+    the chart's business, not the database's.
+
+    `display_tz` is passed in rather than read from config: this is core/,
+    and core/ is handed what it needs (see tests/test_layering.py).
+
+    Returns a COPY. Callers hold frames that came out of a Streamlit memo,
+    and mutating one of those in place would corrupt the cached object for
+    every later reader.
+    """
+    if df.empty or ts_col not in df.columns:
+        return df
+    out = df.copy()
+    ts = pd.to_datetime(out[ts_col], utc=True)
+    out[ts_col] = ts.dt.tz_convert(display_tz).dt.tz_localize(None)
+    return out
+
+
 def break_sessions(df: pd.DataFrame, ts_col: str = "timestamp",
                      max_gap_minutes: int = 60) -> pd.DataFrame:
     """Insert a NaN row wherever consecutive points gap more than

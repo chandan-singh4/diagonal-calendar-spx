@@ -21,7 +21,12 @@ from plotly.subplots import make_subplots
 
 import config
 import iv_engine
-from core.charts import SESSION_RANGEBREAKS, banded_ratio_traces, break_sessions
+from core.charts import (
+    SESSION_RANGEBREAKS,
+    banded_ratio_traces,
+    break_sessions,
+    to_display_time,
+)
 from views.context import ViewContext
 
 
@@ -94,8 +99,12 @@ def render(ctx: ViewContext) -> None:
     period_label = st.session_state.get("period_radio", "Today")
 
     period_days = {"Today": 1, "5D": 5, "10D": 10, "20D": 20}[period_label]
-    _fhp = ctx.load_atm_hist_fb(ctx.front_expiry, period_days)
-    _bhp = ctx.load_atm_hist_fb(ctx.back_expiry,  period_days)
+    # DEBT-030: the reads hand back zoned UTC now, so the wall-clock the
+    # rangebreaks need is applied HERE, at the point of drawing.
+    _fhp = to_display_time(ctx.load_atm_hist_fb(ctx.front_expiry, period_days),
+                           config.DISPLAY_TIMEZONE)
+    _bhp = to_display_time(ctx.load_atm_hist_fb(ctx.back_expiry,  period_days),
+                           config.DISPLAY_TIMEZONE)
     atm_merged = pd.DataFrame()
     if not _fhp.empty and not _bhp.empty:
         atm_merged = pd.merge(

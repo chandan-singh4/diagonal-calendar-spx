@@ -54,6 +54,7 @@ import schwab_client
 # leading underscores for the same reason; both are transitional — see ADR-032.
 # core.charts is gone from here entirely: every chart site moved to views/ in
 # step 2.4, which is what DEBT-030's fix has been waiting for.
+from core.charts import to_display_time
 from core.format import fmt_duration, fmt_eta, sparkline
 from core.ranking import card_key, nearest_idx, rank_for_panel
 from core.scanner import APPROACHING_LOW, TSCAN_THRESHOLD, scan_all_offsets
@@ -2171,8 +2172,11 @@ front_iv_atm = iv_engine.atm_iv(chain_df, front_expiry, spx_price)
 back_iv_atm  = iv_engine.atm_iv(chain_df, back_expiry,  spx_price)
 ts_now       = iv_engine.term_structure(front_iv_atm, back_iv_atm)
 
-_fh90 = _load_atm_hist(front_expiry, 90)
-_bh90 = _load_atm_hist(back_expiry,  90)
+# DEBT-030: these feed a merge and a percentile, not an axis, so the zone
+# would not change a displayed number — converted anyway so that every
+# consumer of these reads sees exactly what it saw before the change.
+_fh90 = to_display_time(_load_atm_hist(front_expiry, 90), config.DISPLAY_TIMEZONE)
+_bh90 = to_display_time(_load_atm_hist(back_expiry,  90), config.DISPLAY_TIMEZONE)
 atm_merged_90d = pd.DataFrame()
 if not _fh90.empty and not _bh90.empty:
     atm_merged_90d = pd.merge(
