@@ -5,6 +5,65 @@ what broke, and what remains.
 
 ---
 
+## 2026-07-30 (session 8, continued) — 569 green checks, and a completely broken dashboard
+
+### Completed
+
+**DEBT-027 is closed and off the backlog.** The label helper that writes "Friday, Aug 21, 2026
+(23 DTE)" now takes the expiry table as an argument instead of reaching for a shared copy. Its only
+caller was checking one table and looking up another, four lines apart — identical today, so it
+worked; the day they differed the label would have silently lost its "(23 DTE)" with no error.
+
+**I reversed my own advice on this, and should have checked before giving it.** I said it was best
+left until step 4. It had two call sites in one function. Twenty seconds of looking would have told
+me that before I said otherwise.
+
+**DEBT-030 now has a safety net, but is deliberately still open.** The read layer flattens
+timestamps to a local wall-clock because the charting library demands it. Fixing that properly means
+touching **ten** chart sites, all of which step 4 moves anyway. What was dangerous was never the
+change — it was that **no check could see it**: the frozen references were captured against the
+current behaviour, so shifting every chart by four hours would match its own reference and pass. Two
+new checks now assert the conversion from a known stored value, working the expected answer out
+independently of the code. **They are designed to fail when DEBT-030 is fixed** — that failure is
+what will force the ten charts to be updated in the same change.
+
+### The thing worth remembering from today
+
+**Every one of the 569 checks passed while all six tabs of the dashboard crashed on load.**
+
+The label helper gained a required argument. I searched for `_exp_label(` and found two call sites,
+updated both. What that search could not find is the two places the function is handed to Streamlit
+**by name**, as the formatter for the expiry dropdowns — where Streamlit calls it with one argument.
+Result: `TypeError` on every tab, and a completely green suite.
+
+Three things came out of it:
+
+1. **Searching for `name(` is not searching for uses.** A function passed as a callback is invisible
+   to it. Search the bare name when changing any signature.
+2. **The suite structurally cannot catch this**, and won't until `views/` exists — it exercises
+   functions, and this was the page.
+3. **`scripts/render_check.py` is now part of the repo**, not a scratch file. It runs the app once
+   per tab and fails loudly if any raises. It is the only thing that caught this. Run it after any
+   change to `app.py`.
+
+**And a third instance of the same pattern.** Testing the label helper directly proved it honours
+its argument; it did not prove the caller passes the right one. Re-injecting the original defect at
+the call site left everything green until a new check was written for it. Three steps in a row now
+where the gap was a wrong or missing **call** rather than a wrong calculation.
+
+### Verified
+
+564 pre-existing checks pass unchanged; 5 new; **569 total**. Mutation-verified on a copy: 4 faults
+injected, 3 caught, **1 survivor which produced a fifth check**, then re-injected and caught. All
+six tabs render, with output identical to before the change. Lint unchanged at 94.
+
+### Remains
+
+DEBT-030 (after step 2.4), DEBT-028, DEBT-029, DEBT-011. Next: **step 2.3, `state/`** — the small
+JSON settings files, and the relative-path defect.
+
+---
+
 ## 2026-07-30 (session 8, continued) — the reads move out, and a test stops tampering with the code
 
 ### Completed

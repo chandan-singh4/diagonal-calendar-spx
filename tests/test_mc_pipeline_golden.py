@@ -21,15 +21,18 @@ strategy. It still renders. It still looks sorted. Nothing errors.
 test_asymmetric_combos_survive_the_cap is that test, and it is the reason this
 file exists.
 
-TWO MODULE-LEVEL HAZARDS, BOTH ISOLATED IN THE LOADER
------------------------------------------------------
-1. `_ELIGIBLE_HISTORY_PATH` is a RELATIVE path. Without pointing it at tmp_path,
-   every test here would overwrite the real 599 KB eligible_history.json in the
-   repo root. This is the same class of hazard as conftest's production-database
-   guard, and it is why load_pipeline() takes the path as an argument.
-2. `_exp_label` reads a module GLOBAL `dte_by_expiry` while
-   `_build_non_atm_panel` is handed a parameter of the same name that it passes
-   nowhere. In production they are one object. Both recorded under DEBT-027.
+ONE MODULE-LEVEL HAZARD LEFT, ISOLATED IN THE LOADER
+----------------------------------------------------
+`_ELIGIBLE_HISTORY_PATH` is a RELATIVE path. Without pointing it at tmp_path,
+every test here would overwrite the real 599 KB eligible_history.json in the
+repo root. This is the same class of hazard as conftest's production-database
+guard, and it is why load_pipeline() takes the path as an argument. Still open
+as DEBT-011; step 2.3 fixes it.
+
+There was a second: `_exp_label` read a module GLOBAL `dte_by_expiry` while
+`_build_non_atm_panel` was handed a parameter of the same name that it passed
+nowhere. Fixed (ADR-034) — the table is now an argument, so the loader no
+longer injects that global at all.
 
 WHAT THIS DOES NOT CLAIM
 ------------------------
@@ -65,15 +68,35 @@ def pipe(tmp_path, monkeypatch, temp_db):
     Returns the loaded namespace dict; `p["_st"].session_state` is the
     session-state stand-in and `p["_db"]` the database path.
     """
-    dte = {MC_FRONT_EXPIRY: 7, MC_BACK_EXPIRY: 21}
-    p = load_pipeline(
-        eligible_history_path=tmp_path / "eligible_history.json",
-        dte_by_expiry=dte,
-    )
+    p = load_pipeline(eligible_history_path=tmp_path / "eligible_history.json")
     monkeypatch.setattr(config, "DB_PATH", temp_db)
     p["_db"] = temp_db
     p["_registry_path"] = tmp_path / "eligible_history.json"
     return p
+
+
+def test_the_expiry_label_uses_the_table_it_is_given(pipe):
+    """DEBT-027 site 2, fixed in ADR-034 — and this is what proves it.
+
+    _exp_label used to read a module global while its only caller checked
+    membership against the parameter it had been handed. Two tables, four lines
+    apart. Handing it two DIFFERENT tables must give two different answers; the
+    old version would have given the same one twice, or dropped the suffix.
+    """
+    seven = pipe["_exp_label"](MC_FRONT_EXPIRY, {MC_FRONT_EXPIRY: 7})
+    ninety = pipe["_exp_label"](MC_FRONT_EXPIRY, {MC_FRONT_EXPIRY: 90})
+
+    assert "(7 DTE)" in seven
+    assert "(90 DTE)" in ninety
+
+
+def test_an_expiry_missing_from_the_table_loses_only_its_suffix(pipe):
+    """The fallback path, pinned: an unknown expiry still renders a readable
+    date rather than raising or printing None."""
+    label = pipe["_exp_label"](MC_FRONT_EXPIRY, {})
+
+    assert "DTE" not in label
+    assert label.strip(), "an unknown expiry produced an empty label"
 
 
 def _combos(rows):
@@ -319,6 +342,32 @@ def _entry(put, call, *, max_gap, hits, last_seen, first_seen=None):
 def _registry(*entries):
     return {f"{MC_FRONT_EXPIRY}|{MC_BACK_EXPIRY}|{int(p)}|{int(c)}": e
             for p, c, e in entries}
+
+
+def test_the_panel_labels_cards_with_the_table_it_was_handed(pipe):
+    """DEBT-027 site 2 at the CALL SITE, not just in the function.
+
+    Testing _exp_label directly proved the function honours its argument. It did
+    NOT prove _build_non_atm_panel passes the right one — injecting the original
+    defect (guard reads the parameter, lookup gets a different table) left every
+    other test green, because none of them looks at a label. This one does.
+
+    The panel is handed a real table here, unlike the sort tests above which pass
+    {} because they only care about ordering.
+    """
+    registry = _registry(
+        (5800.0, 6200.0, _entry(5800.0, 6200.0, max_gap=6.0, hits=1,
+                                last_seen="2026-07-23 19:00:00")),
+    )
+    dte = {MC_FRONT_EXPIRY: 7, MC_BACK_EXPIRY: 21}
+
+    cards, _, _ = pipe["_build_non_atm_panel"](
+        _combos([(5800.0, 6200.0, 7.0)]), registry, dte, 30, SNAP_TS
+    )
+
+    assert cards, "no cards to inspect"
+    assert "(7 DTE)" in cards[0]["front_label"], cards[0]["front_label"]
+    assert "(21 DTE)" in cards[0]["back_label"], cards[0]["back_label"]
 
 
 def test_panel_puts_live_above_historical(pipe):

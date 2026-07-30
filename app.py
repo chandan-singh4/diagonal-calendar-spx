@@ -1512,8 +1512,12 @@ def _build_non_atm_panel(non_atm_current: pd.DataFrame, registry: dict,
         is_live  = cur is not None and cur["gap"] >= _TSCAN_THRESHOLD
         rank_gap = cur["gap"] if is_live else entry["max_gap"]
         front_raw, back_raw = entry["front_raw"], entry["back_raw"]
-        front_label = _exp_label(front_raw) if front_raw in dte_by_expiry else front_raw
-        back_label  = _exp_label(back_raw)  if back_raw  in dte_by_expiry else back_raw
+        # One table, checked and looked up. Before ADR-034 the guard read the
+        # parameter and _exp_label read a global of the same name.
+        front_label = (_exp_label(front_raw, dte_by_expiry)
+                       if front_raw in dte_by_expiry else front_raw)
+        back_label  = (_exp_label(back_raw, dte_by_expiry)
+                       if back_raw in dte_by_expiry else back_raw)
         try:
             ago_str = _fmt_duration(pd.Timestamp(snapshot_ts) - last_seen_ts) + " ago"
         except (ValueError, TypeError):
@@ -1852,7 +1856,15 @@ available_expiries = sorted(chain_df["expiry"].unique())
 dte_by_expiry = chain_df.groupby("expiry")["dte"].first().astype(int).to_dict()
 
 
-def _exp_label(expiry: str) -> str:
+def _exp_label(expiry: str, dte_by_expiry: dict) -> str:
+    """Pretty expiry label, e.g. "Friday, Aug 21, 2026  (23 DTE)".
+
+    dte_by_expiry — DEBT-027 site 2, fixed in M2 (ADR-034). This used to read a
+    module global of the same name while its ONLY caller checked membership
+    against the parameter it had been handed. Identical objects in production,
+    so it worked; the day they differed, the guard would pass and the lookup
+    return nothing, dropping "(N DTE)" from the label with no error anywhere.
+    """
     d = dte_by_expiry.get(expiry)
     try:
         dt = pd.Timestamp(expiry)
@@ -2134,11 +2146,18 @@ if "back_expiry_select" in st.session_state and st.session_state["back_expiry_se
 
 c1, c2, c3, c4 = st.columns(4)
 
+# _exp_label takes the expiry table as an argument (ADR-034), and Streamlit
+# calls format_func with the option alone — so the table is bound here rather
+# than reached for inside the function.
+def _expiry_option_label(expiry: str) -> str:
+    return _exp_label(expiry, dte_by_expiry)
+
+
 with c1:
     _fe_kwargs = {} if "front_expiry_select" in st.session_state else {"index": 0}
     front_expiry = st.selectbox(
         "Front Expiry", available_expiries,
-        format_func=_exp_label, key="front_expiry_select", **_fe_kwargs,
+        format_func=_expiry_option_label, key="front_expiry_select", **_fe_kwargs,
     )
 with c2:
     _be_kwargs = (
@@ -2147,7 +2166,7 @@ with c2:
     )
     back_expiry = st.selectbox(
         "Back Expiry", available_expiries,
-        format_func=_exp_label, key="back_expiry_select", **_be_kwargs,
+        format_func=_expiry_option_label, key="back_expiry_select", **_be_kwargs,
     )
 
 _put_strikes = sorted(set(

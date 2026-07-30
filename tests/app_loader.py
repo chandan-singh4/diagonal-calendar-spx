@@ -302,11 +302,8 @@ def load_mission_control_functions() -> dict:
     return _load_from_app(_MC_FUNCS, _MC_CONSTS, namespace, what="Mission Control layer")
 
 
-def load_pipeline(*, eligible_history_path=None, dte_by_expiry=None) -> dict:
+def load_pipeline(*, eligible_history_path=None) -> dict:
     """Return {name: obj} for the whole Mission Control pipeline.
-
-    Two arguments exist because two module-level dependencies cannot be passed in
-    any other way, and both are real defects rather than testing inconveniences:
 
     `eligible_history_path` — `_ELIGIBLE_HISTORY_PATH` is `Path(
     "eligible_history.json")`, a RELATIVE path resolved against the working
@@ -315,10 +312,11 @@ def load_pipeline(*, eligible_history_path=None, dte_by_expiry=None) -> dict:
     is mandatory, not tidiness. (It also means the production registry silently
     depends on where the dashboard was launched from — noted under DEBT-011.)
 
-    `dte_by_expiry` — `_exp_label()` reads a module GLOBAL of this name, even
-    though `_build_non_atm_panel` is handed a `dte_by_expiry` PARAMETER and passes
-    it nowhere. In production they are the same object so it works; the parameter
-    is decorative. Recorded under DEBT-027 with `config.DB_PATH`.
+    There used to be a second argument, `dte_by_expiry`, because `_exp_label()`
+    read a module global of that name. It takes the table as a parameter as of
+    ADR-034, so the workaround is gone — nothing here injects that global any
+    more, and a function that starts reading it again will fail with NameError
+    rather than silently picking up a stale table.
 
     The returned dict also carries "_st" — the FakeStreamlit whose session_state
     the pipeline reads and writes — so a test can inspect or seed it.
@@ -332,7 +330,6 @@ def load_pipeline(*, eligible_history_path=None, dte_by_expiry=None) -> dict:
         # tests measure the actual reads, not a stand-in (M2 step 2.2).
         "queries": queries,
         "st": st,
-        "dte_by_expiry": {} if dte_by_expiry is None else dte_by_expiry,
         "__builtins__": __builtins__,
     }
     loaded = _load_from_app(_PIPELINE_FUNCS, _PIPELINE_CONSTS, namespace,

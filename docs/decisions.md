@@ -7,6 +7,67 @@ it was recorded here.
 
 ---
 
+## ADR-034 — DEBT-027 fully closed, DEBT-030 given a safety net — and the day 569 green tests hid a broken dashboard
+**Date:** 2026-07-30 · **Status:** ACCEPTED · **Closes:** DEBT-027 · **Guards:** DEBT-030
+
+**Decision.** `_exp_label` takes the expiry table as a parameter instead of reading a module global,
+closing DEBT-027 site 2 and the whole item. Separately, add two characterization tests pinning the
+wall-clock conversion in `dataaccess/queries.py`, so DEBT-030 can no longer be changed silently —
+without doing DEBT-030 itself.
+
+**Why site 2 was fixed now rather than at 2.4, reversing earlier advice.** The estimate was wrong.
+`_exp_label` had two direct call sites, four lines apart, in one function — not a step-4-sized
+change. And the defect was sharper than the backlog recorded: the guard tested membership against
+the **parameter** while the lookup used the **global**. Same objects in production, so it worked;
+the day they diverged, the guard would pass, the lookup return `None`, and the card would render
+`Friday, Aug 21, 2026` with `(23 DTE)` silently missing. Carrying that into a refactor of the code
+around it was the worse option.
+
+**Why DEBT-030 was NOT fixed, and what was done instead.** `_break_sessions` and the rangebreak
+settings appear **10 times** in `app.py`. Returning zoned timestamps means re-adding the conversion
+at all ten chart sites — in the least-tested code in the repo, every line of which 2.4 moves anyway.
+The *danger*, though, was never the change: it was that **no test could see it.** The goldens were
+captured against the current behaviour, so shifting every chart by four hours produces output
+matching its own recorded reference and passes. `tests/test_query_timestamps.py` now asserts the
+behaviour directly from a known stored value, computing the expected answer via `zoneinfo` rather
+than `config.DISPLAY_TIMEZONE` so it cannot merely agree with itself. **Those two tests are designed
+to fail when DEBT-030 is done** — which is the point: whoever does it must update them and the ten
+chart sites together.
+
+**THE FINDING THAT MATTERS MOST TODAY. All 569 tests passed while every tab of the dashboard raised
+`TypeError` on load.** `_exp_label` gained a required argument; `grep '_exp_label('` found the two
+call sites and the definition. It did not find the two places the function is handed to Streamlit
+**by reference** as a selectbox `format_func`, where Streamlit calls it with one argument. The suite
+could not catch it: it exercises functions, and this was the page.
+
+Three consequences, all acted on:
+1. The two selectboxes now bind the table through a small named wrapper rather than passing the
+   function bare.
+2. **`scripts/render_check.py` is now part of the repo**, not a scratch file. It executes `app.py`
+   via `AppTest` once per tab and exits non-zero if any raises. Run it after any change to `app.py`.
+   A plain HTTP fetch of the running server proves nothing — Streamlit only executes the script when
+   a client session connects.
+3. **Searching for a function by `name(` is not a search for its uses.** A reference passed as a
+   callback is invisible to it. Grep for the bare name when changing any signature.
+
+**A second seam, found by injection.** Testing `_exp_label` directly proved the function honours its
+argument; it did **not** prove the caller passes the right one. Re-injecting the original defect at
+the call site left every other test green, because nothing asserted a label. That survivor produced
+`test_the_panel_labels_cards_with_the_table_it_was_handed`. **Third time in three steps that the
+gap was a wrong or missing CALL rather than a wrong calculation** — the pattern is now reliable
+enough to plan around: after changing any signature, test the call site, not just the function.
+
+**The loader lost an argument.** `load_pipeline(dte_by_expiry=...)` existed solely to inject the
+global this ADR removed. It is gone, and nothing injects that name any more — so a function that
+starts reading it again fails with `NameError` instead of silently picking up a stale table.
+
+**Verified.** 564 pre-existing tests pass unchanged; 5 new; **569 total.** Mutation-verified on a
+copy: **4 faults injected, 3 caught, 1 survivor** (the call site) **which produced a fifth test,
+then re-injected and caught.** All six tabs render with output identical to before the change. Lint
+unchanged at 94.
+
+---
+
 ## ADR-033 — `dataaccess/` extracted: the database location becomes an argument, and the package is not called `data/`
 **Date:** 2026-07-30 · **Status:** ACCEPTED · **Completes:** M2 task 2.2 · **Closes:** DEBT-027 site 1
 
