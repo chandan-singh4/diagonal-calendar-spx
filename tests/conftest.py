@@ -416,7 +416,8 @@ _MC_WING = 5.0
 _MC_BACK = 30.0
 
 
-def _mc_legs(snapshot_id: int, gap: float) -> list[dict]:
+def _mc_legs(snapshot_id: int, gap: float,
+             put_strike=MC_PUT_STRIKE, call_strike=MC_CALL_STRIKE) -> list[dict]:
     """The six option rows one snapshot needs, arranged so gap == front call."""
     def row(expiry, dte, strike, right, mark):
         return dict(
@@ -429,17 +430,18 @@ def _mc_legs(snapshot_id: int, gap: float) -> list[dict]:
         )
 
     return [
-        row(MC_FRONT_EXPIRY, 7, MC_CALL_STRIKE, "C", gap),            # the lever
-        row(MC_FRONT_EXPIRY, 7, MC_PUT_STRIKE, "P", _MC_FRONT_PUT),
-        row(MC_BACK_EXPIRY, 21, MC_CALL_STRIKE, "C", _MC_BACK),
-        row(MC_BACK_EXPIRY, 21, MC_PUT_STRIKE, "P", _MC_BACK),
-        row(MC_FRONT_EXPIRY, 7, MC_CALL_STRIKE + 5, "C", _MC_WING),   # wings
-        row(MC_FRONT_EXPIRY, 7, MC_PUT_STRIKE - 5, "P", _MC_WING),
+        row(MC_FRONT_EXPIRY, 7, call_strike, "C", gap),            # the lever
+        row(MC_FRONT_EXPIRY, 7, put_strike, "P", _MC_FRONT_PUT),
+        row(MC_BACK_EXPIRY, 21, call_strike, "C", _MC_BACK),
+        row(MC_BACK_EXPIRY, 21, put_strike, "P", _MC_BACK),
+        row(MC_FRONT_EXPIRY, 7, call_strike + 5, "C", _MC_WING),   # wings
+        row(MC_FRONT_EXPIRY, 7, put_strike - 5, "P", _MC_WING),
     ]
 
 
 def make_transform_history(db_path, gaps, *, interval_minutes=5,
                            end_minutes_ago=0, spx=6000.0,
+                           put_strike=MC_PUT_STRIKE, call_strike=MC_CALL_STRIKE,
                            incomplete_indices=(), missing_leg_indices=()):
     """Write one COMPLETE snapshot per entry in `gaps`, evenly spaced, ending
     `end_minutes_ago` minutes before now. Returns the timestamps written.
@@ -476,10 +478,10 @@ def make_transform_history(db_path, gaps, *, interval_minutes=5,
             underlying_bid=spx - 1, underlying_ask=spx + 1, vix_value=18.5,
         )
 
-        legs = _mc_legs(snapshot_id, gap)
+        legs = _mc_legs(snapshot_id, gap, put_strike, call_strike)
         if i in missing_leg_indices:
             legs = [r for r in legs
-                    if not (r["strike"] == MC_CALL_STRIKE + 5 and r["right"] == "C")]
+                    if not (r["strike"] == call_strike + 5 and r["right"] == "C")]
         db.insert_option_rows(db_path, legs)
 
         db.finalize_snapshot(
@@ -507,3 +509,43 @@ def mc_db(temp_db):
         return make_transform_history(temp_db, gaps, **kwargs)
 
     return temp_db, write
+
+
+def make_atm_iv_history(db_path, ivs, *, expiry=None, interval_minutes=5,
+                        end_minutes_ago=0, spx=6000.0, dte=7):
+    """Write one COMPLETE snapshot per entry in `ivs`, each carrying an
+    atm_iv_by_expiry row for `expiry`. Returns the timestamps written.
+
+    `ivs` are DECIMAL (0.184 == 18.4%), matching what the collector stores.
+    _load_atm_hist multiplies by 100 at the load boundary, and that conversion is
+    one of the things worth pinning — a chart silently plotting 0.18 instead of 18
+    would be a flat line at the bottom of the axis, not an error.
+    """
+    import datetime as dt
+
+    import db
+
+    expiry = expiry or MC_FRONT_EXPIRY
+    n = len(ivs)
+    now = dt.datetime.now(dt.UTC)
+    written = []
+
+    for i, iv in enumerate(ivs):
+        offset = end_minutes_ago + (n - 1 - i) * interval_minutes
+        ts = (now - dt.timedelta(minutes=offset)).strftime("%Y-%m-%d %H:%M:%S")
+        snapshot_id = db.create_snapshot(
+            db_path, snapshot_timestamp=ts, market_session="MIDDAY",
+            poll_interval_used=300, underlying_price=spx,
+            underlying_bid=spx - 1, underlying_ask=spx + 1, vix_value=18.5,
+        )
+        db.insert_atm_iv_records(db_path, [dict(
+            snapshot_id=snapshot_id, expiry_date=expiry, dte=dte,
+            atm_strike=spx, atm_call_iv=iv, atm_put_iv=iv, atm_avg_iv=iv,
+            iv_spread_to_front=0.0, iv_ratio_to_front=1.0,
+        )])
+        db.finalize_snapshot(db_path, snapshot_id, status="COMPLETE",
+                            strikes_fetched=1, expiries_fetched=1,
+                            collection_latency_ms=100)
+        written.append(ts)
+
+    return written

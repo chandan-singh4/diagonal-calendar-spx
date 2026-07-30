@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import ast
 import bisect
+import json
 import math
 from pathlib import Path
 
@@ -65,6 +66,53 @@ _DISPLAY_CONSTS = ("_SPARK_BARS", "_RATIO_THRESHOLDS", "_RATIO_BANDS")
 # needs db and config in its namespace. See DEBT-026 / ADR-030.
 _MC_FUNCS = ("_candidate_signals", "_sparkline")
 _MC_CONSTS = ("_SPARK_BARS", "_TSCAN_THRESHOLD")
+
+# The FULL Mission Control pipeline plus the query wrappers — everything left in
+# DEBT-026 after _candidate_signals. Needs db, config, json, Path and a
+# session_state stand-in. See ADR-031.
+_PIPELINE_FUNCS = (
+    # scanner, because _scan_all_offsets is a real collaborator of the core
+    "_compute_transform_scanner", "_scan_all_offsets",
+    # display helpers the pipeline calls directly
+    "_rank_for_panel", "_card_key", "_sparkline", "_fmt_duration", "_exp_label",
+    # signals
+    "_candidate_signals",
+    # the persisted eligibility registry
+    "_load_eligible_history", "_save_eligible_history", "_update_eligible_history",
+    # the pipeline itself
+    "_compute_mc_core", "_build_non_atm_panel", "_run_mission_control",
+    # the query wrappers
+    "_load_atm_hist", "_load_atm_hist_fb", "_load_contract_hist", "_load_chain_df",
+    "_load_spx_intraday", "_load_prior_close", "_load_transform_marks",
+    "_load_latest_atm_iv", "_load_diagonal_hist",
+)
+_PIPELINE_CONSTS = (
+    "_SWEEP_OFFSETS", "_TSCAN_THRESHOLD", "_APPROACHING_LOW", "_MC_HISTORY_CAP",
+    "_SPARK_BARS", "_ELIGIBLE_HISTORY_PATH", "_ELIGIBLE_HISTORY_RETENTION_DAYS",
+)
+
+
+class FakeSessionState(dict):
+    """Stand-in for st.session_state — a dict with .get(), which is all
+    _run_mission_control uses of it.
+
+    Deliberately a real dict rather than a mock: the "New" badge logic depends on
+    values PERSISTING across calls, and that persistence is the thing under test.
+    A mock that recorded calls would prove nothing about whether a card correctly
+    stops being new on the second look at the same snapshot.
+    """
+
+
+class FakeStreamlit:
+    """The only Streamlit surface the pipeline touches at runtime.
+
+    Cache decorators are stripped by the loader, so nothing else is needed. If
+    this ever has to grow a method, that is a finding: it means logic has started
+    reaching for the page from inside the data layer.
+    """
+
+    def __init__(self):
+        self.session_state = FakeSessionState()
 
 
 def _decorator_is_pure(node: ast.expr) -> bool:
@@ -178,3 +226,46 @@ def load_mission_control_functions() -> dict:
         "__builtins__": __builtins__,
     }
     return _load_from_app(_MC_FUNCS, _MC_CONSTS, namespace, what="Mission Control layer")
+
+
+def load_pipeline(*, eligible_history_path=None, dte_by_expiry=None) -> dict:
+    """Return {name: obj} for the whole Mission Control pipeline.
+
+    Two arguments exist because two module-level dependencies cannot be passed in
+    any other way, and both are real defects rather than testing inconveniences:
+
+    `eligible_history_path` — `_ELIGIBLE_HISTORY_PATH` is `Path(
+    "eligible_history.json")`, a RELATIVE path resolved against the working
+    directory. Left alone, a test calling `_update_eligible_history()` would
+    overwrite the real 599 KB registry in the repo root. Pointing it at tmp_path
+    is mandatory, not tidiness. (It also means the production registry silently
+    depends on where the dashboard was launched from — noted under DEBT-011.)
+
+    `dte_by_expiry` — `_exp_label()` reads a module GLOBAL of this name, even
+    though `_build_non_atm_panel` is handed a `dte_by_expiry` PARAMETER and passes
+    it nowhere. In production they are the same object so it works; the parameter
+    is decorative. Recorded under DEBT-027 with `config.DB_PATH`.
+
+    The returned dict also carries "_st" — the FakeStreamlit whose session_state
+    the pipeline reads and writes — so a test can inspect or seed it.
+    """
+    st = FakeStreamlit()
+    namespace: dict = {
+        "pd": pd, "np": np, "math": math, "bisect": bisect, "json": json,
+        "Path": Path, "iv_engine": iv_engine, "db": db, "config": config,
+        "st": st,
+        "dte_by_expiry": {} if dte_by_expiry is None else dte_by_expiry,
+        "__builtins__": __builtins__,
+    }
+    loaded = _load_from_app(_PIPELINE_FUNCS, _PIPELINE_CONSTS, namespace,
+                            what="Mission Control pipeline")
+
+    if eligible_history_path is not None:
+        # Rebind inside the namespace the functions actually close over, not in
+        # the returned dict — the readers resolve the name at call time.
+        namespace["_ELIGIBLE_HISTORY_PATH"] = Path(eligible_history_path)
+        loaded["_ELIGIBLE_HISTORY_PATH"] = namespace["_ELIGIBLE_HISTORY_PATH"]
+
+    loaded["_st"] = st
+    loaded["_namespace"] = namespace
+    return loaded

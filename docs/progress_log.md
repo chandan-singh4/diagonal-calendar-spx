@@ -161,13 +161,87 @@ to make.
 - `ruff check` clean on the new files. The remaining findings in `conftest.py` are the pre-existing
   deferred-import family already parked under DEBT-025.
 
+### Later still — DEBT-026 closed, M2's pre-work is complete
+
+**The rest of the pipeline is pinned — 38 tests, 511 → 549.** `_compute_mc_core`,
+`_build_non_atm_panel`, `_run_mission_control`, the persisted eligibility registry, and all nine
+`_load_*` query wrappers. With the two earlier files that is **88 characterization tests** standing
+between a refactor and a silently changed screen, and DEBT-026's row is deleted.
+
+**The single most valuable test in the whole set.** `_compute_mc_core` ranks *before* it caps the
+list to 20 candidates, and until today the only thing enforcing that was a comment. The test gives
+it 25 symmetric combos at $4.90 and 3 asymmetric ones at $4.10: rank first and all three asymmetric
+combos survive at the top of the panel; cap first by raw gap and every one of them disappears.
+
+That matters because a symmetric combo — same put and call strike — is a degenerate straddle, not
+the structure this strategy trades. So the failure mode is: **the dashboard quietly stops showing
+the trades you actually take.** It still renders. It still looks sorted. Nothing errors. Injection 1
+confirmed the test catches exactly that reordering.
+
+**Two module-level hazards found by writing the tests, both real.**
+
+The first nearly bit immediately. `_ELIGIBLE_HISTORY_PATH` is `Path("eligible_history.json")` — a
+**relative** path, resolved against whatever directory the process happens to be in. The first draft
+of these tests would have overwritten the live 599 KB registry in the repo root. The loader now takes
+the path as an argument, which is the same shape of guard as `conftest`'s production-database
+assertion. It also means the real registry silently depends on where the dashboard was launched
+from: start it from the wrong folder and the eligibility history is simply empty, with no error.
+Added to DEBT-011 rather than opened as a new item.
+
+The second: `_build_non_atm_panel` takes a `dte_by_expiry` **parameter** and passes it nowhere —
+`_exp_label()` reads a module **global** of the same name. In production they are the same object, so
+the parameter is decorative. Filed with `config.DB_PATH` under DEBT-027; same defect, same fix.
+
+**A stand-in for `st.session_state`, deliberately a real dict rather than a mock.** The "New" badge
+logic is entirely about values *persisting between calls* — a card must be new the first time a
+snapshot is seen and not new the second. A recording mock would confirm writes happened while proving
+nothing about the behaviour that matters. `FakeStreamlit` having exactly one attribute is itself a
+check: if it ever needs a second, logic has started reaching for the page from inside the data layer.
+
+### Discovered
+
+**32 injections, 31 caught, 1 proven equivalent — but four survived the first pass, and three of
+those were my assertions again.** The pattern is now clear enough to be worth stating as a rule,
+because it is the third time in two days:
+
+> Every one of the three fixable misses was an assertion about a **set, a boundary, or an
+> ordering**, tested against data containing only one case. One card cannot demonstrate an order.
+> A gap of $6.00 cannot probe a threshold at $5.00. A membership check cannot detect a permutation.
+
+Concretely: `is_live` flipped from `>=` to `>` went unnoticed because every test used gaps like 6.0
+or 7.0; the call/put mapping inverted went unnoticed because the assertion was
+`set(df["side"]) <= {"CALL", "PUT"}`, which passes just as happily when C and P are swapped; and the
+asymmetric-first tier being dropped from "Likely Next" went unnoticed because only one card had a
+computable ETA, so there was no order to observe. All three now have data that can express the fault.
+
+The fourth survivor was **genuinely equivalent** and left alone: `best` ignoring liveness cannot
+differ from taking the first card, because the panel already sorts live cards first. Documented at
+the test rather than forced red — and it becomes load-bearing the moment anyone changes that sort,
+which is separately pinned.
+
+**One stub, and it is defensible.** `_scan_all_offsets` is replaced when testing
+`_compute_mc_core`'s ordering. The rank-before-cap tie cannot be coaxed out of a real option chain,
+and the scanner is already pinned by its own golden tests, so controlling the collaborator is what
+makes the decision observable. Testing it through a real chain would have tested the chain.
+
+### Verified (DEBT-026 closure)
+
+- **549 tests pass.** `git diff app.py db.py config.py` empty — no production code was touched at
+  any point today.
+- **43 injections across the three new files: 40 caught, 3 proven equivalent.** Each of the three
+  survivors was investigated to a conclusion rather than assumed to be a gap.
+- `ruff check` clean on the new files; the remainder in `conftest.py` is the pre-existing
+  deferred-import family parked under DEBT-025.
+- The registry tests confirm the file is actually written to disk, not merely returned — an
+  in-memory-only registry would have passed every other test in that section and lost everything on
+  restart.
+
 ### Still not done
 
-- **2.0b is partial.** `_compute_mc_core` — which holds the rank-*before*-cap decision that
-  determines which opportunities reach the screen at all — plus `_build_non_atm_panel`,
-  `_run_mission_control` and the eleven `_load_*` queries remain unpinned (DEBT-026). The fixture
-  now exists, so these are the cheap part.
-- No code has been decomposed. M2 proper has not started.
+- **No code has been decomposed.** M2 proper — the actual extraction into `core/`, `data/`,
+  `state/`, `views/` — has not started. What is finished is the safety net that makes it survivable.
+- The rendering layer itself is still untested and will stay that way; it is the part that should end
+  up thinnest.
 
 ### Housekeeping
 

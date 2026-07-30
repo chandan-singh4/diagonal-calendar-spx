@@ -7,6 +7,69 @@ it was recorded here.
 
 ---
 
+## ADR-031 — DEBT-026 closed: the whole Mission Control pipeline is pinned, and what that surfaced
+**Date:** 2026-07-29 · **Status:** ACCEPTED · **Closes:** DEBT-026 · **Completes:** M2 task 2.0b
+
+**Decision.** Pin the remainder of the pipeline — `_compute_mc_core`, `_build_non_atm_panel`,
+`_run_mission_control`, the eligibility registry, and all nine `_load_*` query wrappers — in
+`tests/test_mc_pipeline_golden.py`. 38 tests. With ADR-029 and ADR-030 this closes DEBT-026:
+**462 → 549 tests** across the three files.
+
+**The single most valuable test in the set.** `_compute_mc_core` ranks *before* capping to
+`_MC_HISTORY_CAP`. Its own comment says why, and the comment was the only thing enforcing it. The
+test builds 25 symmetric combos at $4.90 and 3 asymmetric ones at $4.10, with a cap of 20: rank
+first and all three asymmetric combos survive at the top; cap first by raw gap and every one of
+them disappears. A symmetric combo is a degenerate straddle, not this strategy's structure, so
+that failure means **the dashboard silently stops showing the trades that are actually taken** —
+while still rendering, still looking sorted, and erroring nowhere. Injection 1 confirmed the test
+catches exactly that reordering.
+
+**Two module-level hazards found while writing the tests, both real.**
+1. `_ELIGIBLE_HISTORY_PATH` is `Path("eligible_history.json")` — **relative**, resolved against the
+   working directory. The first draft of these tests would have overwritten the live 599 KB
+   registry in the repo root. `load_pipeline()` therefore takes the path as an argument, the same
+   shape of guard as `conftest.temp_db`'s production-database assertion. It also means the
+   production registry silently depends on where the dashboard was launched from; noted on
+   DEBT-011 rather than opened as a new item.
+2. `_build_non_atm_panel` accepts a `dte_by_expiry` **parameter** and passes it nowhere;
+   `_exp_label()` reads a module **global** of the same name. In production they are one object, so
+   the parameter is decorative. Filed with `config.DB_PATH` under DEBT-027 — same defect, same fix
+   during the extraction.
+
+**A stand-in for `st.session_state`, and why a real dict rather than a mock.** The "New" badge
+logic is entirely about values *persisting between calls*: a card must be new on the first look at
+a snapshot and not new on the second. A recording mock would verify that writes happened while
+proving nothing about the behaviour that matters. `FakeStreamlit` carries a real dict, and
+`FakeStreamlit` having exactly one attribute is itself a check — if it ever needs a second, logic
+has started reaching for the page from inside the data layer.
+
+**Stubbing `_scan_all_offsets` was necessary and is defensible.** The rank-before-cap tie cannot be
+coaxed out of a real option chain, and the scanner is already pinned by `test_scanner_golden.py`.
+Controlling the collaborator is what makes the decision under test observable; testing it through a
+real chain would have tested the chain.
+
+**Tally: 32 injections, 31 caught, 1 proven equivalent.** The four initial survivors were
+instructive and only one was genuinely equivalent:
+- *`is_live` flipped from `>=` to `>`* — missed because every test used gaps like 6.0 or 7.0, which
+  cannot distinguish the two. Now tested at exactly $5.00.
+- *Call/put mapping inverted* — missed because the assertion was `set(df["side"]) <= {"CALL",
+  "PUT"}`, which passes just as happily when C and P are swapped. Now asserts the mapping.
+- *The asymmetric-first tier dropped from `likely_next`* — missed because only one card had a
+  computable ETA, so the ordering was unobservable. Fixed by teaching the fixture writer to take
+  strikes, so two histories can exist at once.
+- *`best` ignoring liveness* — **genuinely equivalent.** `_build_non_atm_panel` already sorts live
+  cards first, so `next(c for c in panel if c["is_live"])` and `panel[0]` cannot disagree while
+  that sort holds. Defence-in-depth, documented at the test rather than forced red.
+
+**The lesson, third occurrence in two days, now with a pattern to it.** ADR-029 said an assertion
+protects only what its test data can express. Every one of the three fixable misses above was that
+same failure, and each had the same tell: **an assertion over a set, a boundary, or an ordering,
+made against data with only one case in it.** One card cannot demonstrate an order. A gap of 6.0
+cannot probe a threshold at 5.0. A membership check cannot detect a permutation. Worth reading
+before writing the next batch of characterization tests.
+
+---
+
 ## ADR-030 — Build the fixture database through `db.py`'s own writers, and let the fixture be the deliverable
 **Date:** 2026-07-29 · **Status:** ACCEPTED · **Extends:** ADR-029 · **Partially closes:** DEBT-026
 
