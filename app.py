@@ -545,7 +545,6 @@ div[class*="st-key-mc_card_"] .stButton > button {
 .mc-metric-l { font-size: .56rem; text-transform: uppercase; letter-spacing: .08em; color: var(--text-3); display: block; }
 .mc-metric-v { font-family: var(--mono); font-size: .92rem; font-weight: 600; color: var(--text); }
 .mc-metric-v.gap { color: var(--green); }
-.mc-spark { font-family: var(--mono); font-size: .85rem; color: var(--green); letter-spacing: -.05em; }
 .mc-eta { font-size: .68rem; color: var(--amber); margin-top: .2rem; }
 .st-dot {
   width: 7px; height: 7px;
@@ -2276,9 +2275,14 @@ def _render_mc_section(cards: list[dict], section: str, title: str, icon: str,
                         _live_badge = ""
                     _gap_label = "Gap" if _is_live else "Peak Gap"
                     _gap_class = "gap" if _is_live else "gap gap-stale"
+                    # The trend arrow used to ride on the end of the sparkline.
+                    # That was removed 2026-07-30 as clutter; the arrow moved
+                    # here, onto the number it actually describes.
+                    _trend_arrow = " ↑" if card["trend_up"] else ""
                     _metrics = (
                         f'<div><span class="mc-metric-l">{_gap_label}</span>'
-                        f'<span class="mc-metric-v {_gap_class}">+{card["gap"]:.2f}</span></div>'
+                        f'<span class="mc-metric-v {_gap_class}">'
+                        f'+{card["gap"]:.2f}{_trend_arrow}</span></div>'
                     )
                     if show_duration and _is_live:
                         _metrics += (
@@ -2300,17 +2304,19 @@ def _render_mc_section(cards: list[dict], section: str, title: str, icon: str,
                             f'<div><span class="mc-metric-l">IV Ratio</span>'
                             f'<span class="mc-metric-v">{card["iv_ratio"]:.4f}</span></div>'
                         )
-                    _trend_arrow = " ↑" if card["trend_up"] else ""
                     _eta_html = (
                         f'<div class="mc-eta">ETA {_fmt_eta(card["eta_minutes"])}</div>'
                         if card.get("eta_minutes") is not None else ""
                     )
+                    # No sparkline row: the gap's shape over time is what "View
+                    # Chart" opens, drawn properly and at a readable size, so a
+                    # 10-glyph version on every card was clutter rather than
+                    # information. Removed 2026-07-30 at Chandan's request.
                     st.markdown(
                         f'<div class="mc-rank">#{gidx + 1}{_live_badge}{_new_badge}</div>'
                         f'<div class="mc-combo">{int(card["put_strike"])}P / {int(card["call_strike"])}C</div>'
                         f'<div class="mc-expiry">{card["front_label"]} → {card["back_label"]}</div>'
                         f'<div class="mc-metrics">{_metrics}</div>'
-                        f'<div class="mc-spark">{card["spark"]}{_trend_arrow}</div>'
                         f'{_eta_html}',
                         unsafe_allow_html=True,
                     )

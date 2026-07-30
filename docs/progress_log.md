@@ -58,6 +58,21 @@ stray or quarantined files anywhere.
 (the Scanner tab shows fewer cards). That is live market data and a registry that has moved on, not
 a code change — the structural counts are unchanged and nothing raised.
 
+### Also done: the sparkline is off the opportunity cards
+
+Removed at Chandan's request. The reasoning was sound — the gap's shape over time is exactly what
+"View Chart" opens, drawn properly and at a readable size, so a 10-character version squeezed onto
+every card was clutter competing with the numbers above it.
+
+**One judgement call, stated because it was mine:** a small trend arrow (↑) used to ride on the end
+of that sparkline. It is a different signal from the bars — "the last three readings are rising" —
+so rather than delete it along with the chart, it moved onto the Gap number, which is the thing it
+actually describes. Say if you would rather it went entirely.
+
+**Only the display was removed.** The value is still computed and still carried on every card, and
+is pinned by tests in two files. Deleting the field means retiring those tests, which is a different
+kind of change from removing a `<div>` and deserves its own deliberate commit. Logged as DEBT-031.
+
 ---
 
 ## 2026-07-30 (session 8, continued) — 569 green checks, and a completely broken dashboard
