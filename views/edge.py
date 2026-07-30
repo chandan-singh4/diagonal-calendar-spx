@@ -21,7 +21,7 @@ from plotly.subplots import make_subplots
 
 import config
 import iv_engine
-from core.charts import _SESSION_RANGEBREAKS, _banded_ratio_traces, _break_sessions
+from core.charts import SESSION_RANGEBREAKS, banded_ratio_traces, break_sessions
 from views.context import ViewContext
 
 
@@ -47,70 +47,55 @@ def _render_note(text: str, *, kind: str = "info", icon: str | None = None) -> N
 def render(ctx: ViewContext) -> None:
     """Draw the tab.
 
-    A verbatim move of app.py's Calendar Edge body — see views/historical.py
-    for why the body is untouched and only the rebinds below are new.
+    Moved out of app.py in M2 step 2.4, then de-scaffolded in DEBT-028. The
+    move itself was verbatim — same statements, same order, same indentation
+    — and each body was proved byte-identical to app.py's before anything
+    here was renamed. That evidence is now spent: this file reads `ctx.` in
+    place of the rebind preamble the move needed, so the comparison that
+    justified it no longer applies and the before/after RENDER comparison is
+    what stands behind this file instead (ADR-038).
 
     `config` IS imported here, unlike in the other views, for one line:
-    `config.DISPLAY_TIMEZONE`. Rebinding it would have meant editing the body,
-    and editing the body is the one thing this step does not do. A layer test
-    keeps that from becoming a door to `config.DB_PATH`.
+    `config.DISPLAY_TIMEZONE`. It survived DEBT-028 because there is nothing
+    on the context to inline it to — it is a setting, not per-render state.
+    A layer test stops that import becoming a door to `config.DB_PATH`.
 
     Carried across unchanged: `use_container_width` (DEBT-029), the hardcoded
     threshold DEBT-031 also covers, and the naive wall-clock timestamps the
     rangebreaks require — this file holds most of DEBT-030's ten chart sites,
     and is the reason that fix was deferred until after 2.4.
     """
-    snapshot_id = ctx.snapshot_id
-    session_date = ctx.session_date
-    chain_df = ctx.chain_df
-    front_expiry = ctx.front_expiry
-    back_expiry = ctx.back_expiry
-    call_strike = ctx.call_strike
-    put_strike = ctx.put_strike
-    strikes_set = ctx.strikes_set
-    ts_now = ctx.ts_now
-    CHART_COLORS = ctx.chart_colors
-    _load_atm_hist_fb = ctx.load_atm_hist_fb
-    _load_transform_marks = ctx.load_transform_marks
-    _entry_lock_key = ctx.entry_lock_key
-    _create_entry_lock = ctx.create_entry_lock
-    _clear_entry_lock = ctx.clear_entry_lock
-    _get_entry_lock = ctx.get_entry_lock
-    _render_all_locks_popover = ctx.render_all_locks_popover
-    _backfill_eligible_history = ctx.backfill_eligible_history
-
-
     _ce_ttl_col, _ce_locks_col = st.columns([4, 1.3])
     with _ce_ttl_col:
         st.markdown(
             '<div class="sh"><span class="sh-ico">📈</span>'
             f'<span class="sh-ttl">Calendar Edge</span>'
-            f'<span class="sh-bdg">{iv_engine.interpret_curve(ts_now)[:30]}</span>'
+            f'<span class="sh-bdg">{iv_engine.interpret_curve(ctx.ts_now)[:30]}</span>'
             '</div>',
             unsafe_allow_html=True,
         )
     with _ce_locks_col:
         st.markdown('<div style="text-align:right;margin-top:.15rem;">', unsafe_allow_html=True)
         _current_combo_key = (
-            _entry_lock_key(front_expiry, back_expiry, put_strike, call_strike)
-            if strikes_set else None
+            ctx.entry_lock_key(ctx.front_expiry, ctx.back_expiry, ctx.put_strike, ctx.call_strike)
+            if ctx.strikes_set else None
         )
-        _render_all_locks_popover(_current_combo_key)
+        ctx.render_all_locks_popover(_current_combo_key)
         st.markdown('</div>', unsafe_allow_html=True)
 
     # Metrics row
-    iv_index = float(chain_df.groupby("expiry")["iv"].mean().mean())
+    iv_index = float(ctx.chain_df.groupby("expiry")["iv"].mean().mean())
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("ATM IV Ratio (F/B)", f"{ts_now.ratio:.4f}")
-    m2.metric("Front ATM IV",       f"{ts_now.front_iv:.2f}%")
-    m3.metric("Back ATM IV",        f"{ts_now.back_iv:.2f}%")
+    m1.metric("ATM IV Ratio (F/B)", f"{ctx.ts_now.ratio:.4f}")
+    m2.metric("Front ATM IV",       f"{ctx.ts_now.front_iv:.2f}%")
+    m3.metric("Back ATM IV",        f"{ctx.ts_now.back_iv:.2f}%")
     m4.metric("IV Index (avg)",     f"{iv_index:.2f}%")
 
     period_label = st.session_state.get("period_radio", "Today")
 
     period_days = {"Today": 1, "5D": 5, "10D": 10, "20D": 20}[period_label]
-    _fhp = _load_atm_hist_fb(front_expiry, period_days)
-    _bhp = _load_atm_hist_fb(back_expiry,  period_days)
+    _fhp = ctx.load_atm_hist_fb(ctx.front_expiry, period_days)
+    _bhp = ctx.load_atm_hist_fb(ctx.back_expiry,  period_days)
     atm_merged = pd.DataFrame()
     if not _fhp.empty and not _bhp.empty:
         atm_merged = pd.merge(
@@ -119,7 +104,7 @@ def render(ctx: ViewContext) -> None:
             on="timestamp", how="inner",
         )
         atm_merged["iv_ratio"] = atm_merged["front_iv"] / atm_merged["back_iv"]
-        atm_merged = _break_sessions(atm_merged)
+        atm_merged = break_sessions(atm_merged)
 
     # Both synced charts autorange independently unless given an explicit
     # range, and their underlying queries don't cover the same history:
@@ -133,13 +118,13 @@ def render(ctx: ViewContext) -> None:
     # portion show as an honest gap in Chart 1 rather than a silently
     # shifted, seemingly-synced axis.
     if period_label == "Today":
-        _shared_range = [f"{session_date} 09:30", f"{session_date} 16:15"]
+        _shared_range = [f"{ctx.session_date} 09:30", f"{ctx.session_date} 16:15"]
     elif not atm_merged.empty:
         _shared_range = [atm_merged["timestamp"].min(), atm_merged["timestamp"].max()]
     else:
         _shared_range = None
 
-    _gap_xaxis = dict(rangebreaks=_SESSION_RANGEBREAKS, gridcolor="#0c1928")
+    _gap_xaxis = dict(rangebreaks=SESSION_RANGEBREAKS, gridcolor="#0c1928")
     if _shared_range is not None:
         _gap_xaxis["range"] = _shared_range
 
@@ -183,13 +168,13 @@ def render(ctx: ViewContext) -> None:
         )
         st.markdown('</div>', unsafe_allow_html=True)
 
-    if not strikes_set:
+    if not ctx.strikes_set:
         st.caption("Set call and put strikes in Controls above to see the Transform Gap chart.")
     else:
         _perf_marks0 = _perf_counter()
-        _gap_df = _load_transform_marks(
-            front_expiry, back_expiry, call_strike, put_strike,
-            period_days, snapshot_id,
+        _gap_df = ctx.load_transform_marks(
+            ctx.front_expiry, ctx.back_expiry, ctx.call_strike, ctx.put_strike,
+            period_days, ctx.snapshot_id,
         )
         _perf_marks_ms = (_perf_counter() - _perf_marks0) * 1000.0
 
@@ -217,13 +202,13 @@ def render(ctx: ViewContext) -> None:
             # Opportunistic registry backfill — see _backfill_eligible_history
             # docstring. Only meaningful for non-ATM combos, matching the
             # registry's scope everywhere else.
-            if put_strike != call_strike:
-                _backfill_eligible_history(
-                    front_expiry, back_expiry, put_strike, call_strike,
+            if ctx.put_strike != ctx.call_strike:
+                ctx.backfill_eligible_history(
+                    ctx.front_expiry, ctx.back_expiry, ctx.put_strike, ctx.call_strike,
                     _gap_df.rename(columns={"transform_gap": "gap"})[["timestamp", "gap"]],
                 )
 
-            _gap_df = _break_sessions(_gap_df)
+            _gap_df = break_sessions(_gap_df)
 
             # ── Entry Lock — position management mode ────────────────────────
             # Once a diagonal is actually filled, the trader stops caring where
@@ -232,8 +217,8 @@ def render(ctx: ViewContext) -> None:
             # Locking freezes diagonal_mark at the moment of the click; the
             # chart and the metrics below switch from "discovery" framing to
             # "position management" framing for this exact strike/expiry combo.
-            _lock = _get_entry_lock(front_expiry, back_expiry, put_strike, call_strike)
-            _lock_toggle_key = f"_show_lock_panel_{_entry_lock_key(front_expiry, back_expiry, put_strike, call_strike)}"
+            _lock = ctx.get_entry_lock(ctx.front_expiry, ctx.back_expiry, ctx.put_strike, ctx.call_strike)
+            _lock_toggle_key = f"_show_lock_panel_{ctx.entry_lock_key(ctx.front_expiry, ctx.back_expiry, ctx.put_strike, ctx.call_strike)}"
 
             _lk_l, _lk_m = st.columns([3, 2])
             with _lk_l:
@@ -264,7 +249,7 @@ def render(ctx: ViewContext) -> None:
                     with _clear_col:
                         if st.button("Clear", key="clear_entry_lock_btn",
                                      help="Remove this entry lock and return to discovery mode."):
-                            _clear_entry_lock(front_expiry, back_expiry, put_strike, call_strike)
+                            ctx.clear_entry_lock(ctx.front_expiry, ctx.back_expiry, ctx.put_strike, ctx.call_strike)
                             st.rerun()
 
             if _lock is None and st.session_state.get(_lock_toggle_key):
@@ -272,8 +257,8 @@ def render(ctx: ViewContext) -> None:
                     _current_diag = float(_gap_df.iloc[-1]["diagonal_mark"])
                     st.markdown(
                         f"**Lock entry at current Diagonal Mark: ${_current_diag:.2f}**  \n"
-                        f"Put {put_strike:.0f} / Call {call_strike:.0f} · "
-                        f"{front_expiry} → {back_expiry}"
+                        f"Put {ctx.put_strike:.0f} / Call {ctx.call_strike:.0f} · "
+                        f"{ctx.front_expiry} → {ctx.back_expiry}"
                     )
                     _lock_mode_choice = st.radio(
                         "How should this lock behave?",
@@ -293,7 +278,7 @@ def render(ctx: ViewContext) -> None:
                         if st.button("Confirm Lock", key="confirm_lock_btn", type="primary",
                                      use_container_width=True):
                             _mode = "monitor_and_log" if _lock_mode_choice == "Monitor + Log Trade" else "monitor_only"
-                            _create_entry_lock(front_expiry, back_expiry, put_strike, call_strike,
+                            ctx.create_entry_lock(ctx.front_expiry, ctx.back_expiry, ctx.put_strike, ctx.call_strike,
                                                 _current_diag, _mode)
                             st.session_state[_lock_toggle_key] = False
                             st.rerun()
@@ -338,22 +323,22 @@ def render(ctx: ViewContext) -> None:
                 fig_gap.add_trace(go.Scatter(
                     x=_gap_df["timestamp"], y=_gap_df["diagonal_mark"],
                     name="Live Diagonal Mark (hypothetical)",
-                    line=dict(color=CHART_COLORS["diagonal_mark"], width=1.2, dash="dot"),
+                    line=dict(color=ctx.chart_colors["diagonal_mark"], width=1.2, dash="dot"),
                     opacity=0.45,
                     hovertemplate="Live Diagonal Mark: $%{y:.2f}<extra></extra>",
                 ))
                 fig_gap.add_hline(
                     y=_lock["entry_diagonal_mark"], line_width=1.6, line_dash="dash",
-                    line_color=CHART_COLORS["diagonal_mark"],
+                    line_color=ctx.chart_colors["diagonal_mark"],
                     annotation_text=f"Entry ${_lock['entry_diagonal_mark']:.2f}",
                     annotation_position="right",
-                    annotation_font=dict(size=10, color=CHART_COLORS["diagonal_mark"]),
+                    annotation_font=dict(size=10, color=ctx.chart_colors["diagonal_mark"]),
                 )
             else:
                 fig_gap.add_trace(go.Scatter(
                     x=_gap_df["timestamp"], y=_gap_df["diagonal_mark"],
                     name="Diagonal Mark",
-                    line=dict(color=CHART_COLORS["diagonal_mark"], width=1.8),
+                    line=dict(color=ctx.chart_colors["diagonal_mark"], width=1.8),
                     hovertemplate="Diagonal Mark: $%{y:.2f}<extra></extra>",
                 ))
             # Gap / live-difference series (computed first so it can feed the
@@ -395,7 +380,7 @@ def render(ctx: ViewContext) -> None:
             fig_gap.add_trace(go.Scatter(
                 x=_gap_df["timestamp"], y=_gap_df["transform_mark"],
                 name="Transform Order Mark",
-                line=dict(color=CHART_COLORS["transform_mark"], width=1.8),
+                line=dict(color=ctx.chart_colors["transform_mark"], width=1.8),
                 customdata=_master_cd,
                 hovertemplate=_master_ht,
                 **_gap_fill,
@@ -428,7 +413,7 @@ def render(ctx: ViewContext) -> None:
                 fig_gap.add_trace(go.Scatter(
                     x=_up_x, y=_up_y, mode="markers", name="cross-up",
                     marker=dict(symbol="triangle-up", size=11,
-                                color=CHART_COLORS["transform_mark"],
+                                color=ctx.chart_colors["transform_mark"],
                                 line=dict(width=1, color="#0c1421")),
                     showlegend=False,
                     hovertemplate="▲ Diagonal crossed up through Transform<extra></extra>",
@@ -437,7 +422,7 @@ def render(ctx: ViewContext) -> None:
                 fig_gap.add_trace(go.Scatter(
                     x=_dn_x, y=_dn_y, mode="markers", name="cross-down",
                     marker=dict(symbol="triangle-down", size=11,
-                                color=CHART_COLORS["transform_mark"],
+                                color=ctx.chart_colors["transform_mark"],
                                 line=dict(width=1, color="#0c1421")),
                     showlegend=False,
                     hovertemplate="▼ Diagonal crossed down through Transform<extra></extra>",
@@ -476,8 +461,8 @@ def render(ctx: ViewContext) -> None:
                 # chart-generation so we optimise the actual bottleneck.
                 try:
                     _spx_now = float(_gap_df["spx"].iloc[-1])
-                    _dist_txt = (f" · call {call_strike - _spx_now:+.0f} / "
-                                 f"put {put_strike - _spx_now:+.0f} pts from spot")
+                    _dist_txt = (f" · call {ctx.call_strike - _spx_now:+.0f} / "
+                                 f"put {ctx.put_strike - _spx_now:+.0f} pts from spot")
                 except Exception:
                     _dist_txt = ""
                 st.caption(
@@ -514,8 +499,8 @@ def render(ctx: ViewContext) -> None:
             # position when the marks moved" — the band is the zone between the
             # short strikes; the SPX line poking out = a short strike being tested.
             if "spx" in _gap_df.columns and _gap_df["spx"].notna().any():
-                _lo_k = float(min(put_strike, call_strike))
-                _hi_k = float(max(put_strike, call_strike))
+                _lo_k = float(min(ctx.put_strike, ctx.call_strike))
+                _hi_k = float(max(ctx.put_strike, ctx.call_strike))
                 _spx_series = _gap_df["spx"].astype(float)
 
                 fig_spx = go.Figure()
@@ -526,8 +511,8 @@ def render(ctx: ViewContext) -> None:
                     y0=_lo_k, y1=_hi_k,
                     fillcolor="rgba(124,148,199,0.09)", line_width=0, layer="below",
                 )
-                for _k, _lbl in [(call_strike, f"{call_strike:.0f} C"),
-                                 (put_strike, f"{put_strike:.0f} P")]:
+                for _k, _lbl in [(ctx.call_strike, f"{ctx.call_strike:.0f} C"),
+                                 (ctx.put_strike, f"{ctx.put_strike:.0f} P")]:
                     fig_spx.add_hline(
                         y=float(_k), line_width=1.2, line_dash="dash",
                         line_color="#4a5d80",
@@ -537,8 +522,8 @@ def render(ctx: ViewContext) -> None:
 
                 # SPX line — light gray so it doesn't compete with blue/amber/green.
                 _cd = np.column_stack([
-                    _spx_series.to_numpy() - put_strike,
-                    _spx_series.to_numpy() - call_strike,
+                    _spx_series.to_numpy() - ctx.put_strike,
+                    _spx_series.to_numpy() - ctx.call_strike,
                 ])
                 fig_spx.add_trace(go.Scatter(
                     x=_gap_df["timestamp"], y=_spx_series,
@@ -554,7 +539,7 @@ def render(ctx: ViewContext) -> None:
                 _sx = _spx_series.to_numpy()
                 _tx = _gap_df["timestamp"].to_numpy()
                 _cu_x, _cu_y, _cd_x, _cd_y = [], [], [], []
-                for _k in (put_strike, call_strike):
+                for _k in (ctx.put_strike, ctx.call_strike):
                     for _i in range(1, len(_sx)):
                         if _sx[_i - 1] < _k <= _sx[_i]:
                             _cu_x.append(_tx[_i]); _cu_y.append(float(_k))
@@ -564,7 +549,7 @@ def render(ctx: ViewContext) -> None:
                     fig_spx.add_trace(go.Scatter(
                         x=_cu_x, y=_cu_y, mode="markers", name="cross-up",
                         marker=dict(symbol="triangle-up", size=11,
-                                    color=CHART_COLORS["transform_mark"],
+                                    color=ctx.chart_colors["transform_mark"],
                                     line=dict(width=1, color="#0c1421")),
                         showlegend=False,
                         hovertemplate="▲ SPX crossed up through strike<extra></extra>",
@@ -573,7 +558,7 @@ def render(ctx: ViewContext) -> None:
                     fig_spx.add_trace(go.Scatter(
                         x=_cd_x, y=_cd_y, mode="markers", name="cross-down",
                         marker=dict(symbol="triangle-down", size=11,
-                                    color=CHART_COLORS["transform_mark"],
+                                    color=ctx.chart_colors["transform_mark"],
                                     line=dict(width=1, color="#0c1421")),
                         showlegend=False,
                         hovertemplate="▼ SPX crossed down through strike<extra></extra>",
@@ -672,8 +657,8 @@ def render(ctx: ViewContext) -> None:
             )
         else:
             st.caption(
-                f"No transform-mark history yet for Put {put_strike:.0f} / "
-                f"Call {call_strike:.0f} in the selected range."
+                f"No transform-mark history yet for Put {ctx.put_strike:.0f} / "
+                f"Call {ctx.call_strike:.0f} in the selected range."
             )
 
     if not atm_merged.empty:
@@ -696,11 +681,11 @@ def render(ctx: ViewContext) -> None:
         )
         fig_stack.add_trace(go.Scatter(
             x=atm_merged["timestamp"], y=atm_merged["front_iv"],
-            name="Front ATM IV", line=dict(color=CHART_COLORS["front_iv"], width=1.8)), row=1, col=1)
+            name="Front ATM IV", line=dict(color=ctx.chart_colors["front_iv"], width=1.8)), row=1, col=1)
         fig_stack.add_trace(go.Scatter(
             x=atm_merged["timestamp"], y=atm_merged["back_iv"],
-            name="Back ATM IV",  line=dict(color=CHART_COLORS["back_iv"], width=1.8)), row=1, col=1)
-        for tr in _banded_ratio_traces(atm_merged["timestamp"], atm_merged["iv_ratio"]):
+            name="Back ATM IV",  line=dict(color=ctx.chart_colors["back_iv"], width=1.8)), row=1, col=1)
+        for tr in banded_ratio_traces(atm_merged["timestamp"], atm_merged["iv_ratio"]):
             fig_stack.add_trace(tr, row=2, col=1)
         for thr, dash in [(1.00, "solid"), (0.70, "dot"), (1.30, "dot")]:
             fig_stack.add_hline(
@@ -708,11 +693,11 @@ def render(ctx: ViewContext) -> None:
         if _shared_range is not None:
             fig_stack.update_xaxes(
                 range=_shared_range,
-                rangebreaks=_SESSION_RANGEBREAKS,
+                rangebreaks=SESSION_RANGEBREAKS,
                 gridcolor="#0c1928",
             )
         else:
-            fig_stack.update_xaxes(rangebreaks=_SESSION_RANGEBREAKS, gridcolor="#0c1928")
+            fig_stack.update_xaxes(rangebreaks=SESSION_RANGEBREAKS, gridcolor="#0c1928")
         fig_stack.update_yaxes(title_text="IV %",    row=1, col=1, gridcolor="#0c1928", automargin=False)
         fig_stack.update_yaxes(title_text="Ratio",   row=2, col=1, gridcolor="#0c1928", automargin=False)
         _add_market_open_lines(fig_stack, atm_merged["timestamp"], row="all", col="all")
@@ -748,10 +733,10 @@ def render(ctx: ViewContext) -> None:
         fig_atm = go.Figure()
         fig_atm.add_trace(go.Scatter(
             x=atm_merged["timestamp"], y=atm_merged["front_iv"],
-            name="Front ATM IV", line=dict(color=CHART_COLORS["front_iv"], width=1.8), yaxis="y1"))
+            name="Front ATM IV", line=dict(color=ctx.chart_colors["front_iv"], width=1.8), yaxis="y1"))
         fig_atm.add_trace(go.Scatter(
             x=atm_merged["timestamp"], y=atm_merged["back_iv"],
-            name="Back ATM IV",  line=dict(color=CHART_COLORS["back_iv"], width=1.8), yaxis="y1"))
+            name="Back ATM IV",  line=dict(color=ctx.chart_colors["back_iv"], width=1.8), yaxis="y1"))
         fig_atm.add_trace(go.Scatter(
             x=atm_merged["timestamp"], y=atm_merged["iv_ratio"],
             name="IV Ratio (F/B)", line=dict(color="#f05252", width=1.8), yaxis="y2"))
@@ -825,4 +810,4 @@ def render(ctx: ViewContext) -> None:
         )
 
     else:
-        st.caption(f"No ATM IV history for {front_expiry} / {back_expiry} in the selected range.")
+        st.caption(f"No ATM IV history for {ctx.front_expiry} / {ctx.back_expiry} in the selected range.")

@@ -1,15 +1,15 @@
 """
-Tests for _break_sessions() — the line-breaking helper behind BUG-002.
+Tests for break_sessions() — the line-breaking helper behind BUG-002.
 
 WHY THIS MODULE: charts in app.py are drawn from rows that are contiguous in
 the DATA but not in TIME. Between Friday's close and Monday's open there are no
 points, so Plotly joins the last Friday point to the first Monday point with a
 straight line — inventing a smooth IV move across a period when the market was
-shut. _break_sessions() inserts a NaN row into the gap so the line breaks
+shut. break_sessions() inserts a NaN row into the gap so the line breaks
 instead.
 
-ADR-006 describes the pairing: `_SESSION_RANGEBREAKS` collapses the empty axis
-SPACE, `_break_sessions()` breaks the LINE across it. They are complementary,
+ADR-006 describes the pairing: `SESSION_RANGEBREAKS` collapses the empty axis
+SPACE, `break_sessions()` breaks the LINE across it. They are complementary,
 and the rangebreak alone does not stop the connector being drawn.
 
 BUG-002 was that the helper was wired into two of the three chart frames and
@@ -30,7 +30,7 @@ from app_loader import APP_PATH, definition_sources, load_scanner_functions
 
 @pytest.fixture(scope="module")
 def break_sessions():
-    return load_scanner_functions()["_break_sessions"]
+    return load_scanner_functions()["break_sessions"]
 
 
 def frame(*stamps: str, value_col: str = "iv") -> pd.DataFrame:
@@ -171,15 +171,15 @@ def test_the_selected_strike_frames_are_passed_through_break_sessions(frame_name
     in.
     """
     src = _selected_strike_source()
-    assert f"{frame_name} = _break_sessions({frame_name})" in src, (
-        f"the {frame_name} frame is no longer passed through _break_sessions "
+    assert f"{frame_name} = break_sessions({frame_name})" in src, (
+        f"the {frame_name} frame is no longer passed through break_sessions "
         f"-- BUG-002 has regressed and the chart will draw connectors across "
         f"holidays again"
     )
 
 
 def test_break_sessions_is_applied_after_the_ratio_is_computed():
-    """Order matters. _break_sessions() only copies the timestamp column into
+    """Order matters. break_sessions() only copies the timestamp column into
     the breaker row, so every other column comes out NaN — which is what breaks
     the line. Computing the ratio AFTER the break would fill that NaN with a
     real number (or an inf) and the ratio trace would cross the holiday even
@@ -188,7 +188,7 @@ def test_break_sessions_is_applied_after_the_ratio_is_computed():
     src = _selected_strike_source()
     for frame_name, ratio in (("cm", "call_ratio"), ("pm", "put_ratio")):
         ratio_at = src.index(f'{frame_name}["{ratio}"] =')
-        break_at = src.index(f"{frame_name} = _break_sessions({frame_name})")
+        break_at = src.index(f"{frame_name} = break_sessions({frame_name})")
         assert ratio_at < break_at, f"{ratio} must be computed before the break"
 
 
@@ -205,18 +205,18 @@ def test_the_statistics_frame_is_deliberately_not_broken():
     which is what the anchor is for. The window search is gone with it — the
     whole module is now that one tab, so the assertion covers the file rather
     than 2,000 characters after a heading, and can no longer be satisfied by
-    a `_break_sessions` call sitting just past the cut-off.
+    a `break_sessions` call sitting just past the cut-off.
     """
     src = (APP_PATH.parent / "views" / "historical.py").read_text(encoding="utf-8")
     assert 'pm["ratio"] = pm["f"] / pm["b"]' in src, "anchor moved; re-point this test"
-    assert "_break_sessions" not in src, (
+    assert "break_sessions" not in src, (
         "the statistics frame must NOT be broken -- NaN rows would corrupt "
         "range_stats() and percentile_rank()"
     )
 
 
 def test_break_sessions_is_defined_once_where_the_loader_expects_it():
-    """Guards the AST loader: if _break_sessions moves again, fail here with a
+    """Guards the AST loader: if break_sessions moves again, fail here with a
     clear reason rather than mysteriously.
 
     REPOINTED in M2 (ADR-032). It used to assert app.py defined the function;
@@ -225,4 +225,4 @@ def test_break_sessions_is_defined_once_where_the_loader_expects_it():
     left behind in app.py, where the dashboard would run one version and the
     golden tests would measure the other.
     """
-    assert definition_sources("_break_sessions") == ["core/charts.py"]
+    assert definition_sources("break_sessions") == ["core/charts.py"]

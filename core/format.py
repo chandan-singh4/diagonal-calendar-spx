@@ -7,23 +7,23 @@ from __future__ import annotations
 
 import pandas as pd
 
-_SPARK_BARS = "▁▂▃▄▅▆▇█"
+SPARK_BARS = "▁▂▃▄▅▆▇█"
 
 
-def _sparkline(values: list[float], width: int = 10) -> str:
+def sparkline(values: list[float], width: int = 10) -> str:
     if not values:
         return "─"
     step = max(1, len(values) // width)
     sampled = values[::step][-width:]
     mn, mx = min(sampled), max(sampled)
     if mx == mn:
-        return _SPARK_BARS[3] * len(sampled)
+        return SPARK_BARS[3] * len(sampled)
     return "".join(
-        _SPARK_BARS[int((v - mn) / (mx - mn) * 7)] for v in sampled
+        SPARK_BARS[int((v - mn) / (mx - mn) * 7)] for v in sampled
     )
 
 
-def _fmt_duration(td) -> str:
+def fmt_duration(td) -> str:
     """Format a pandas/python timedelta as '2h 12m' / '47m' / '8m'."""
     if td is None or pd.isna(td):
         return "—"
@@ -34,7 +34,7 @@ def _fmt_duration(td) -> str:
     return f"{h}h {m}m" if h else f"{m}m"
 
 
-def _fmt_eta(minutes: float | None) -> str:
+def fmt_eta(minutes: float | None) -> str:
     if minutes is None:
         return "—"
     if minutes < 1:

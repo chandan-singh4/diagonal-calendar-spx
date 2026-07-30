@@ -103,7 +103,7 @@ def test_an_expiry_missing_from_the_table_loses_only_its_suffix(pipe):
 
 
 def _combos(rows):
-    """Build the frame _scan_all_offsets returns: one row per candidate combo."""
+    """Build the frame scan_all_offsets returns: one row per candidate combo."""
     return pd.DataFrame([
         {
             "Front Expiry": f"{MC_FRONT_EXPIRY} (7 DTE)",
@@ -120,7 +120,7 @@ def _combos(rows):
 
 
 def _stub_scan(pipe, combos):
-    """Replace _scan_all_offsets in the pipeline's own namespace.
+    """Replace scan_all_offsets in the pipeline's own namespace.
 
     Legitimate here: the subject under test is _compute_mc_core's own ordering and
     banding logic, and the scanner it calls is already pinned by
@@ -128,7 +128,7 @@ def _stub_scan(pipe, combos):
     rank-before-cap decision observable at all — a real chain cannot be coaxed
     into producing exactly the tie this needs.
     """
-    pipe["_namespace"]["_scan_all_offsets"] = lambda *_a, **_k: combos
+    pipe["_namespace"]["scan_all_offsets"] = lambda *_a, **_k: combos
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

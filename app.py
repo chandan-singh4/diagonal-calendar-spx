@@ -49,15 +49,15 @@ import iv_engine
 import schwab_client
 
 # ─── core/ — pure calculation, extracted from this file in M2 (ADR-032) ───────
-# Imported by name rather than qualified (core_format._sparkline etc.) so the
+# Imported by name rather than qualified (core_format.sparkline etc.) so the
 # extraction stayed a pure move with no call-site churn. The names keep their
 # leading underscores for the same reason; both are transitional — see ADR-032.
 # core.charts is gone from here entirely: every chart site moved to views/ in
 # step 2.4, which is what DEBT-030's fix has been waiting for.
-from core.format import _fmt_duration, _fmt_eta, _sparkline
-from core.ranking import _card_key, _rank_for_panel
-from core.scanner import _APPROACHING_LOW, _TSCAN_THRESHOLD, _scan_all_offsets
-from core.scanner import _compute_transform_scanner as _compute_transform_scanner_pure
+from core.format import fmt_duration, fmt_eta, sparkline
+from core.ranking import card_key, nearest_idx, rank_for_panel
+from core.scanner import APPROACHING_LOW, TSCAN_THRESHOLD, scan_all_offsets
+from core.scanner import compute_transform_scanner as _compute_transform_scanner_pure
 from dataaccess import queries
 from state import chart_colors, eligible_history, entry_locks
 
@@ -850,7 +850,7 @@ div[class*="st-key-chartcard_"]:hover {
 """, unsafe_allow_html=True)
 
 # ─── Constants ────────────────────────────────────────────────────────────────
-# _SPARK_BARS, the session rangebreaks and _break_sessions, and the IV-ratio
+# SPARK_BARS, the session rangebreaks and break_sessions, and the IV-ratio
 # bands now live in core/format.py and core/charts.py — imported at the top of
 # this file. Only page-bound state stays here.
 
@@ -1018,7 +1018,7 @@ def _update_eligible_history(non_atm_df: pd.DataFrame, snapshot_ts: str) -> dict
     """
     registry = _load_eligible_history()
     if not non_atm_df.empty:
-        eligible_now = non_atm_df[non_atm_df["Transform Diff"] >= _TSCAN_THRESHOLD]
+        eligible_now = non_atm_df[non_atm_df["Transform Diff"] >= TSCAN_THRESHOLD]
         for _, row in eligible_now.iterrows():
             front_raw = row["Front Expiry"].split(" ")[0]
             back_raw  = row["Back Expiry"].split(" ")[0]
@@ -1060,7 +1060,7 @@ def _backfill_eligible_history(front_raw: str, back_raw: str,
     Opportunistic registry backfill — called from Calendar Edge whenever a
     user manually selects a strike/expiry pair and pulls its mark history.
     The Mission Control sweep only checks a fixed symmetric grid of offsets
-    (see _SWEEP_OFFSETS), so a genuinely asymmetric or off-grid combo can
+    (see SWEEP_OFFSETS), so a genuinely asymmetric or off-grid combo can
     show a real >= 5 crossing in its history without ever entering the
     registry through the automated scan. This catches it the moment someone
     actually looks — zero extra DB calls, since gap_df is already fetched
@@ -1068,7 +1068,7 @@ def _backfill_eligible_history(front_raw: str, back_raw: str,
     """
     if gap_df.empty or "gap" not in gap_df.columns:
         return
-    crossings = gap_df[gap_df["gap"] >= _TSCAN_THRESHOLD].copy()
+    crossings = gap_df[gap_df["gap"] >= TSCAN_THRESHOLD].copy()
     if crossings.empty:
         return
 
@@ -1118,8 +1118,8 @@ def _backfill_eligible_history(front_raw: str, back_raw: str,
 # Helper — unicode sparkline
 # ─────────────────────────────────────────────────────────────────────────────
 
-# _sparkline, _fmt_duration and _fmt_eta moved to core/format.py;
-# _banded_ratio_traces moved to core/charts.py (ADR-032).
+# sparkline, fmt_duration and fmt_eta moved to core/format.py;
+# banded_ratio_traces moved to core/charts.py (ADR-032).
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1197,10 +1197,10 @@ def _load_diagonal_hist(front: str, back: str, call_s: float, put_s: float,
 # The scanner itself is core/scanner.py. The memo stays HERE, because core/
 # cannot import streamlit — and it is load-bearing: this wrapper's saved
 # results are shared between the Scanner tab and the 21-offset Phase A sweep,
-# so every sweep after the first is nearly free. _scan_all_offsets is handed
+# so every sweep after the first is nearly free. scan_all_offsets is handed
 # this wrapper explicitly (see _compute_mc_core); left to its default it would
 # call the uncached function and recompute all 21 offsets on every rerun.
-_compute_transform_scanner = st.cache_data(
+compute_transform_scanner = st.cache_data(
     ttl=120, show_spinner=False, max_entries=8
 )(_compute_transform_scanner_pure)
 
@@ -1211,7 +1211,7 @@ _compute_transform_scanner = st.cache_data(
 # Two-phase design, kept cheap on purpose:
 #   Phase A (every refresh, every offset, all expiry pairs) — pure in-memory
 #     pandas against the chain already loaded. Classifies every combo as
-#     Eligible (gap >= 5), Approaching (gap in [_APPROACHING_LOW, 5)), or
+#     Eligible (gap >= 5), Approaching (gap in [APPROACHING_LOW, 5)), or
 #     neither. This is the only part that touches "thousands of rows."
 #   Phase B (every refresh, but ONLY for the small Eligible+Approaching set —
 #     typically tens of rows, capped at _MC_HISTORY_CAP) — pulls per-combo
@@ -1221,8 +1221,8 @@ _compute_transform_scanner = st.cache_data(
 # cost proportional to "things that matter," not "things that exist."
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# The Phase A thresholds (_TSCAN_THRESHOLD, _APPROACHING_LOW, _SWEEP_OFFSETS)
-# and _scan_all_offsets itself moved to core/scanner.py. _MC_HISTORY_CAP stays
+# The Phase A thresholds (TSCAN_THRESHOLD, APPROACHING_LOW, SWEEP_OFFSETS)
+# and scan_all_offsets itself moved to core/scanner.py. _MC_HISTORY_CAP stays
 # here: it caps how much DATABASE work Phase B does, which is not a core/
 # concern and moves with the data layer.
 _MC_HISTORY_CAP   = 20    # max candidates per tier to run Phase B history on
@@ -1274,7 +1274,7 @@ def _candidate_signals(front_raw: str, back_raw: str,
         return None
 
     # Duration active — trailing contiguous streak where gap >= 5, ending now
-    flag = (df["gap"] >= _TSCAN_THRESHOLD).tolist()
+    flag = (df["gap"] >= TSCAN_THRESHOLD).tolist()
     duration = None
     if flag and flag[-1]:
         i = len(flag) - 1
@@ -1302,16 +1302,16 @@ def _candidate_signals(front_raw: str, back_raw: str,
                 slope = None
             if slope is not None:
                 current_gap = float(y_gap[-1])
-                if slope > 0.01 and current_gap < _TSCAN_THRESHOLD:
-                    eta_minutes = (_TSCAN_THRESHOLD - current_gap) / slope
+                if slope > 0.01 and current_gap < TSCAN_THRESHOLD:
+                    eta_minutes = (TSCAN_THRESHOLD - current_gap) / slope
 
-    spark = _sparkline(df["gap"].tail(12).tolist())
+    spark = sparkline(df["gap"].tail(12).tolist())
     trend_up = bool(df["gap"].tail(3).is_monotonic_increasing) if len(df) >= 3 else False
 
     return dict(duration=duration, eta_minutes=eta_minutes, spark=spark, trend_up=trend_up)
 
 
-# _rank_for_panel and _card_key moved to core/ranking.py (ADR-032).
+# rank_for_panel and card_key moved to core/ranking.py (ADR-032).
 
 
 @st.cache_data(ttl=120, show_spinner="Scanning transform opportunities…", max_entries=3)
@@ -1335,8 +1335,8 @@ def _compute_mc_core(_chain_df: pd.DataFrame, spx_price: float,
     # compute= is not optional here in production: it hands the sweep the
     # memoised scanner so the 21 offsets share saved results with the Scanner
     # tab. Without it every rerun recomputes all 21. See core/scanner.py.
-    all_combos = _scan_all_offsets(chain_df, spx_price, snapshot_id,
-                                   compute=_compute_transform_scanner)
+    all_combos = scan_all_offsets(chain_df, spx_price, snapshot_id,
+                                   compute=compute_transform_scanner)
     if all_combos.empty:
         return dict(approaching_cards=[], likely_next=[], n_approaching=0,
                      non_atm_current=pd.DataFrame(), registry={})
@@ -1345,15 +1345,15 @@ def _compute_mc_core(_chain_df: pd.DataFrame, spx_price: float,
     registry = _update_eligible_history(non_atm_current, snapshot_ts)
 
     approaching_df = all_combos[
-        (all_combos["Transform Diff"] >= _APPROACHING_LOW)
-        & (all_combos["Transform Diff"] < _TSCAN_THRESHOLD)
+        (all_combos["Transform Diff"] >= APPROACHING_LOW)
+        & (all_combos["Transform Diff"] < TSCAN_THRESHOLD)
     ].copy()
     n_approaching = len(approaching_df)
 
     # Rank for the panel BEFORE capping — otherwise asymmetric opportunities
     # sitting just below the top-by-raw-gap rows would get starved out of
     # the (necessarily limited, for cost reasons) Phase B history treatment.
-    approaching_df = _rank_for_panel(approaching_df)
+    approaching_df = rank_for_panel(approaching_df)
 
     def _build_cards(df: pd.DataFrame, cap: int) -> list[dict]:
         cards = []
@@ -1406,7 +1406,7 @@ def _build_non_atm_panel(non_atm_current: pd.DataFrame, registry: dict,
     right now).
 
     Ranking — a transparent, inspectable multi-key sort, not a blended
-    score (same principle as _rank_for_panel above):
+    score (same principle as rank_for_panel above):
       Tier 1 — currently live (>= 5 right now) outranks historical-only;
                an opportunity you can act on today beats a past one.
       Tier 2 — rank_gap descending: current gap for live combos, peak gap
@@ -1443,7 +1443,7 @@ def _build_non_atm_panel(non_atm_current: pd.DataFrame, registry: dict,
     def _card_from_entry(key: str, entry: dict, last_seen_ts: pd.Timestamp,
                           outside_lookback: bool) -> dict:
         cur = current_lookup.get(key)
-        is_live  = cur is not None and cur["gap"] >= _TSCAN_THRESHOLD
+        is_live  = cur is not None and cur["gap"] >= TSCAN_THRESHOLD
         rank_gap = cur["gap"] if is_live else entry["max_gap"]
         front_raw, back_raw = entry["front_raw"], entry["back_raw"]
         # One table, checked and looked up. Before ADR-034 the guard read the
@@ -1453,7 +1453,7 @@ def _build_non_atm_panel(non_atm_current: pd.DataFrame, registry: dict,
         back_label  = (_exp_label(back_raw, dte_by_expiry)
                        if back_raw in dte_by_expiry else back_raw)
         try:
-            ago_str = _fmt_duration(pd.Timestamp(snapshot_ts) - last_seen_ts) + " ago"
+            ago_str = fmt_duration(pd.Timestamp(snapshot_ts) - last_seen_ts) + " ago"
         except (ValueError, TypeError):
             ago_str = "—"
         return dict(
@@ -1540,7 +1540,7 @@ def _run_mission_control(chain_df: pd.DataFrame, spx_price: float,
         lookback_days, snapshot_ts,
     )
 
-    current_keys = {_card_key(c) for c in non_atm_panel if c["is_live"]}
+    current_keys = {card_key(c) for c in non_atm_panel if c["is_live"]}
 
     # Only advance the "previous" comparison set when a NEW snapshot has
     # actually landed — otherwise every widget-triggered rerun within the
@@ -1556,14 +1556,14 @@ def _run_mission_control(chain_df: pd.DataFrame, spx_price: float,
         new_keys = st.session_state.get("mc_new_keys", set())
 
     for c in non_atm_panel:
-        c["is_new"] = c["is_live"] and (_card_key(c) in new_keys)
+        c["is_new"] = c["is_live"] and (card_key(c) in new_keys)
     for c in core["approaching_cards"]:
         c["is_new"] = False
     for c in core["likely_next"]:
         c["is_new"] = False
 
     n_live_non_atm = (
-        int((core["non_atm_current"]["Transform Diff"] >= _TSCAN_THRESHOLD).sum())
+        int((core["non_atm_current"]["Transform Diff"] >= TSCAN_THRESHOLD).sum())
         if not core["non_atm_current"].empty else 0
     )
     best = next((c for c in non_atm_panel if c["is_live"]),
@@ -1977,7 +1977,7 @@ components.html(
 if MC["best"] is not None:
     _b = MC["best"]
     if _b["is_live"]:
-        _best_status = f'Active {_fmt_duration(_b["duration"])}'
+        _best_status = f'Active {fmt_duration(_b["duration"])}'
     else:
         _best_status = f'Peak · seen {_b["last_seen_ago"]}'
     _attn_html = (
@@ -2120,17 +2120,11 @@ if "call_strike_select" in st.session_state and st.session_state["call_strike_se
     del st.session_state["call_strike_select"]
 
 
-def _nearest_idx(strikes: list, target: float) -> int:
-    if not strikes:
-        return 0
-    return min(range(len(strikes)), key=lambda i: abs(strikes[i] - target))
-
-
 with c3:
     if _put_strikes:
         _ps_kwargs = (
             {} if "put_strike_select" in st.session_state
-            else {"index": _nearest_idx(_put_strikes, spx_price - 100)}
+            else {"index": nearest_idx(_put_strikes, spx_price - 100)}
         )
         put_strike = st.selectbox(
             "Put Strike",
@@ -2148,7 +2142,7 @@ with c4:
     if _call_strikes:
         _cs_kwargs = (
             {} if "call_strike_select" in st.session_state
-            else {"index": _nearest_idx(_call_strikes, spx_price)}
+            else {"index": nearest_idx(_call_strikes, spx_price)}
         )
         call_strike = st.selectbox(
             "Call Strike",
@@ -2278,7 +2272,7 @@ def _render_mc_section(cards: list[dict], section: str, title: str, icon: str,
                     if show_duration and _is_live:
                         _metrics += (
                             f'<div><span class="mc-metric-l">Active</span>'
-                            f'<span class="mc-metric-v">{_fmt_duration(card["duration"])}</span></div>'
+                            f'<span class="mc-metric-v">{fmt_duration(card["duration"])}</span></div>'
                         )
                     elif show_live_badge and not _is_live:
                         _metrics += (
@@ -2296,7 +2290,7 @@ def _render_mc_section(cards: list[dict], section: str, title: str, icon: str,
                             f'<span class="mc-metric-v">{card["iv_ratio"]:.4f}</span></div>'
                         )
                     _eta_html = (
-                        f'<div class="mc-eta">ETA {_fmt_eta(card["eta_minutes"])}</div>'
+                        f'<div class="mc-eta">ETA {fmt_eta(card["eta_minutes"])}</div>'
                         if card.get("eta_minutes") is not None else ""
                     )
                     # No sparkline row: the gap's shape over time is what "View
@@ -2389,7 +2383,7 @@ VIEW_CTX = ViewContext(
     load_latest_atm_iv=_load_latest_atm_iv,
     load_contract_hist=_load_contract_hist,
     load_transform_marks=_load_transform_marks,
-    compute_transform_scanner=_compute_transform_scanner,
+    compute_transform_scanner=compute_transform_scanner,
     mc=MC,
     sc_max_rows=sc_max_rows,
     render_mc_section=_render_mc_section,

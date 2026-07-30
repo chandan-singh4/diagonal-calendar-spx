@@ -3,11 +3,11 @@
 Pure pandas against a chain that is already in memory: no database, no page.
 Pinned by tests/test_scanner_golden.py and tests/test_mc_pipeline_golden.py.
 
-ON MEMOISATION (M2, ADR-032). In app.py `_compute_transform_scanner` carries
+ON MEMOISATION (M2, ADR-032). In app.py `compute_transform_scanner` carries
 `@st.cache_data`, and two callers share those saved results: this module's
-`_scan_all_offsets` sweep and the Scanner tab. Streamlit cannot be imported
+`scan_all_offsets` sweep and the Scanner tab. Streamlit cannot be imported
 here, so the decorator stays in app.py wrapping this function, and
-`_scan_all_offsets` accepts the wrapped version through its `compute` argument.
+`scan_all_offsets` accepts the wrapped version through its `compute` argument.
 Left to default it calls the uncached function directly — correct, and what the
 golden tests exercise, but do NOT let production take that path: every sweep
 would recompute all 21 offsets on every rerun.
@@ -18,9 +18,9 @@ import pandas as pd
 
 import iv_engine
 
-_TSCAN_THRESHOLD  = 5.0
-_APPROACHING_LOW  = 4.0   # gap in [4, 5) counts as "Approaching" (within 1 pt)
-_SWEEP_OFFSETS    = list(range(0, 105, 5))   # symmetric put/call offsets, every 5 pts to 100
+TSCAN_THRESHOLD  = 5.0
+APPROACHING_LOW  = 4.0   # gap in [4, 5) counts as "Approaching" (within 1 pt)
+SWEEP_OFFSETS    = list(range(0, 105, 5))   # symmetric put/call offsets, every 5 pts to 100
 # Note: each offset is its own cache entry (keyed on snapshot_id + offset),
 # so widening this list only adds cost the FIRST time each offset is hit for
 # a given snapshot — it doesn't reintroduce per-interaction lag. Still bounded
@@ -29,7 +29,7 @@ _SWEEP_OFFSETS    = list(range(0, 105, 5))   # symmetric put/call offsets, every
 # Calendar Edge backfill catches those the moment you investigate one manually.
 
 
-def _compute_transform_scanner(
+def compute_transform_scanner(
     _chain_df: pd.DataFrame,
     spx_price: float,
     snapshot_id: int,
@@ -184,11 +184,11 @@ def _compute_transform_scanner(
     )
 
 
-def _scan_all_offsets(
+def scan_all_offsets(
     chain_df: pd.DataFrame,
     spx_price: float,
     snapshot_id: int,
-    offsets: list[int] = _SWEEP_OFFSETS,
+    offsets: list[int] = SWEEP_OFFSETS,
     max_rows_per_offset: int = 500,
     *,
     compute=None,
@@ -201,14 +201,14 @@ def _scan_all_offsets(
     Returns the union of all combos found, deduped on
     (Front Expiry, Back Expiry, Put Strike, Call Strike), sorted by
     Transform Diff descending. Front/Back Expiry columns retain the
-    "YYYY-MM-DD (Nd)" format from _compute_transform_scanner — callers that
+    "YYYY-MM-DD (Nd)" format from compute_transform_scanner — callers that
     need the raw date use .split(" ")[0].
 
     `compute` — the per-offset scanner to call. Production passes app.py's
     memoised wrapper so the 21 sweeps share saved results with the Scanner
     tab; see the module docstring. Defaults to the uncached function.
     """
-    _compute = compute if compute is not None else _compute_transform_scanner
+    _compute = compute if compute is not None else compute_transform_scanner
     frames = []
     for o in offsets:
         df = _compute(

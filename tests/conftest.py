@@ -450,7 +450,7 @@ def make_transform_history(db_path, gaps, *, interval_minutes=5,
         gaps:                the gap ($) each snapshot should exhibit, oldest first.
         interval_minutes:    spacing between snapshots. Raise it above 60 to
                              simulate a collector outage, which is what
-                             _break_sessions keys off.
+                             break_sessions keys off.
         end_minutes_ago:     how long ago the LAST snapshot was taken. Non-zero
                              lets a test place history entirely in the past.
         incomplete_indices:  these snapshots are finalized 'PARTIAL' instead of

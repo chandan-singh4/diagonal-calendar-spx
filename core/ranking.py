@@ -1,6 +1,6 @@
 """Ranking and identity — the ORDER cards appear in, and what makes a card itself.
 
-Pinned by tests/test_display_golden.py. The sort in _rank_for_panel is the most
+Pinned by tests/test_display_golden.py. The sort in rank_for_panel is the most
 consequential few lines in the display layer: reversed, the asymmetric setups
 this trader actually takes drop below the degenerate symmetric ones and fall off
 the end of the panel (DEBT-026).
@@ -10,7 +10,7 @@ from __future__ import annotations
 import pandas as pd
 
 
-def _rank_for_panel(df: pd.DataFrame) -> pd.DataFrame:
+def rank_for_panel(df: pd.DataFrame) -> pd.DataFrame:
     """
     Tiered ranking for the Mission Control panel — deliberately NOT a single
     blended score (composite 0-100 scores were already rejected for this
@@ -39,5 +39,27 @@ def _rank_for_panel(df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def _card_key(card: dict) -> str:
+def card_key(card: dict) -> str:
     return f"{card['front_raw']}|{card['back_raw']}|{int(card['put_strike'])}|{int(card['call_strike'])}"
+
+
+def nearest_idx(strikes: list, target: float) -> int:
+    """Index of the strike closest to `target`; 0 when there are none.
+
+    Moved here from app.py in DEBT-028 — four pure lines that had been left
+    behind in the page because their callers are the strike selectboxes, and
+    the selectboxes are not a tab. It picks which strike each dropdown lands
+    on by default, so it decides what a fresh page load shows.
+
+    Ties go to the LOWER index, which for a sorted strike list means the
+    lower strike. That falls out of `min` returning the first minimum rather
+    than being chosen, and a target exactly between two strikes is ordinary
+    (SPX at 7405 between 7400 and 7410), so it is pinned by a test.
+
+    Returning 0 for an empty list is deliberate: the callers pass it straight
+    to a Streamlit `index=`, where None would raise and 0 is ignored anyway
+    because an empty list renders no widget.
+    """
+    if not strikes:
+        return 0
+    return min(range(len(strikes)), key=lambda i: abs(strikes[i] - target))

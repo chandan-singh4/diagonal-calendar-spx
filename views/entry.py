@@ -16,26 +16,21 @@ from views.context import ViewContext
 def render(ctx: ViewContext) -> None:
     """Draw the tab.
 
-    A verbatim move of app.py's Entry Analysis body — see views/historical.py
-    for why the body is untouched and only the rebinds below are new.
+    Moved out of app.py in M2 step 2.4, then de-scaffolded in DEBT-028. The
+    move itself was verbatim — same statements, same order, same indentation
+    — and each body was proved byte-identical to app.py's before anything
+    here was renamed. That evidence is now spent: this file reads `ctx.` in
+    place of the rebind preamble the move needed, so the comparison that
+    justified it no longer applies and the before/after RENDER comparison is
+    what stands behind this file instead (ADR-038).
 
     Carried across unchanged, and NOT fixed here: the two `_ic_signal > 5`
     tests and the local `_THRESHOLD = 5.0` are three hardcoded copies of a
-    threshold that `core/scanner.py` already defines as `_TSCAN_THRESHOLD`,
+    threshold that `core/scanner.py` already defines as `TSCAN_THRESHOLD`,
     and one of them uses `>` where everything else uses `>=`. That is a real
     defect and it is DEBT-031. It is not this commit's, because a move that
     silently changes a trading threshold is not a move.
     """
-    strikes_set = ctx.strikes_set
-    _diag_mark = ctx.diag_mark
-    _norm_deb = ctx.norm_deb
-    _straddle = ctx.straddle
-    _theta_diff = ctx.theta_diff
-    _ic_mark = ctx.ic_mark
-    _iv_pct = ctx.iv_pct
-    _liquidity = ctx.liquidity
-
-
     st.markdown(
         '<div class="sh"><span class="sh-ico">📊</span>'
         '<span class="sh-ttl">Entry Analysis</span></div>',
@@ -46,11 +41,11 @@ def render(ctx: ViewContext) -> None:
     r1a, r1b, r1c, r1d = st.columns(4)
 
     with r1a:
-        if _diag_mark is not None:
-            _diag_dollar = int(round(_diag_mark * 100))
+        if ctx.diag_mark is not None:
+            _diag_dollar = int(round(ctx.diag_mark * 100))
             st.metric(
                 "Diagonal Mark",
-                f"{_diag_mark:.2f} pts  ·  ${_diag_dollar:,}",
+                f"{ctx.diag_mark:.2f} pts  ·  ${_diag_dollar:,}",
                 help="Per-share mark price of the diagonal × 100 = dollar cost per contract.",
             )
         else:
@@ -60,7 +55,7 @@ def render(ctx: ViewContext) -> None:
     with r1b:
         st.metric(
             "ATM Straddle",
-            f"${_straddle:.2f}" if _straddle else "—",
+            f"${ctx.straddle:.2f}" if ctx.straddle else "—",
             help="S × σ × √(2·DTE/365·π). The market's expected ±1σ move by front expiry.",
         )
         st.caption("How big a move the market expects by front expiry.")
@@ -68,18 +63,18 @@ def render(ctx: ViewContext) -> None:
     with r1c:
         st.metric(
             "Normalized Debit",
-            f"{_norm_deb:.4f}" if _norm_deb is not None else "— (set strikes)",
+            f"{ctx.norm_deb:.4f}" if ctx.norm_deb is not None else "— (set strikes)",
             help="Diagonal Mark ÷ ATM Straddle. Removes SPX price-level and vol-regime "
                  "effects so entry cost is comparable across different dates. HYPOTHESIS.",
         )
         st.caption("Is this cheap or expensive relative to expected market movement?")
 
     with r1d:
-        if _theta_diff is not None and _theta_diff.available:
+        if ctx.theta_diff is not None and ctx.theta_diff.available:
             _net_ct_s = (
-                f"+${_theta_diff.net_daily_theta_ct:.2f}"
-                if _theta_diff.net_daily_theta_ct >= 0
-                else f"−${abs(_theta_diff.net_daily_theta_ct):.2f}"
+                f"+${ctx.theta_diff.net_daily_theta_ct:.2f}"
+                if ctx.theta_diff.net_daily_theta_ct >= 0
+                else f"−${abs(ctx.theta_diff.net_daily_theta_ct):.2f}"
             )
             st.metric(
                 "Net Daily θ / contract",
@@ -89,14 +84,14 @@ def render(ctx: ViewContext) -> None:
                      "HYPOTHESIS — not yet validated as entry predictor.",
             )
             st.caption(
-                f"Front θ {_theta_diff.front_sum:+.3f} · "
-                f"Back θ {_theta_diff.back_sum:+.3f} · "
-                f"Net {_theta_diff.net_daily_theta:+.3f} /sh/day"
+                f"Front θ {ctx.theta_diff.front_sum:+.3f} · "
+                f"Back θ {ctx.theta_diff.back_sum:+.3f} · "
+                f"Net {ctx.theta_diff.net_daily_theta:+.3f} /sh/day"
             )
         else:
             st.metric(
                 "Net Daily θ / contract",
-                "— (set strikes)" if not strikes_set else "— (Greeks N/A)",
+                "— (set strikes)" if not ctx.strikes_set else "— (Greeks N/A)",
             )
             st.caption("How much time decay earns you each calendar day.")
 
@@ -106,13 +101,13 @@ def render(ctx: ViewContext) -> None:
     r2a, r2b, r2c, r2d = st.columns(4)
 
     with r2a:
-        if _ic_mark is not None and _diag_mark is not None:
-            _ic_signal = _ic_mark - _diag_mark
+        if ctx.ic_mark is not None and ctx.diag_mark is not None:
+            _ic_signal = ctx.ic_mark - ctx.diag_mark
             _ic_color  = "#10d4a3" if _ic_signal > 5 else "#dde6f1"
-            _ic_dollar = int(round(_ic_mark * 100))
+            _ic_dollar = int(round(ctx.ic_mark * 100))
             st.metric(
                 "Transform Order Mark",
-                f"{_ic_mark:.2f} pts  ·  ${_ic_dollar:,}",
+                f"{ctx.ic_mark:.2f} pts  ·  ${_ic_dollar:,}",
                 help="Credit value of the resulting IC after transformation: "
                      "short back legs minus long wings at ±5. "
                      "Green when IC Mark − Diagonal Mark > $5 (favorable to transform). "
@@ -126,14 +121,14 @@ def render(ctx: ViewContext) -> None:
                 unsafe_allow_html=True,
             )
         else:
-            st.metric("Transform Order Mark", "— (set strikes)" if not strikes_set
+            st.metric("Transform Order Mark", "— (set strikes)" if not ctx.strikes_set
                       else "— (wing strikes not in chain)")
             st.caption("Value of IC after transforming diagonal at these strikes.")
 
     with r2b:
         st.metric(
             "IV Ratio Percentile",
-            f"{_iv_pct:.0f}th" if _iv_pct is not None else "— (need history)",
+            f"{ctx.iv_pct:.0f}th" if ctx.iv_pct is not None else "— (need history)",
             help="Where today's IV ratio ranks within the last 90 days. "
                  "100th = front has never been this expensive relative to back.",
         )
@@ -142,7 +137,7 @@ def render(ctx: ViewContext) -> None:
     with r2c:
         st.metric(
             "Liquidity (ATM)",
-            f"{_liquidity:.0f} / 100",
+            f"{ctx.liquidity:.0f} / 100",
             help="Composite of ATM front-strike volume and open interest. "
                  "Higher = tighter bid/ask and easier fills. Below 50 = expect wider slippage.",
         )
@@ -150,8 +145,8 @@ def render(ctx: ViewContext) -> None:
 
     with r2d:
         _THRESHOLD = 5.0
-        if _ic_mark is not None and _diag_mark is not None:
-            _diff = _ic_mark - _diag_mark
+        if ctx.ic_mark is not None and ctx.diag_mark is not None:
+            _diff = ctx.ic_mark - ctx.diag_mark
             if _diff >= _THRESHOLD:
                 st.metric("Transform Difference", f"+{_diff:.2f}")
                 st.markdown(

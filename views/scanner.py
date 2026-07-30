@@ -8,15 +8,20 @@ from __future__ import annotations
 
 import streamlit as st
 
-from core.scanner import _TSCAN_THRESHOLD
+from core.scanner import TSCAN_THRESHOLD
 from views.context import ViewContext
 
 
 def render(ctx: ViewContext) -> None:
     """Draw the tab.
 
-    A verbatim move of app.py's Scanner body — see views/historical.py for
-    why the body is untouched and only the rebinds below are new.
+    Moved out of app.py in M2 step 2.4, then de-scaffolded in DEBT-028. The
+    move itself was verbatim — same statements, same order, same indentation
+    — and each body was proved byte-identical to app.py's before anything
+    here was renamed. That evidence is now spent: this file reads `ctx.` in
+    place of the rebind preamble the move needed, so the comparison that
+    justified it no longer applies and the before/after RENDER comparison is
+    what stands behind this file instead (ADR-038).
 
     `_render_mc_section` is INJECTED rather than moved here with the rest.
     It reads `snap_ts_str` and `spx_price` from app.py's module namespace, so
@@ -28,21 +33,12 @@ def render(ctx: ViewContext) -> None:
     Carried across unchanged: `use_container_width` (DEBT-029), and the
     hardcoded threshold comparisons the table shares with DEBT-031.
     """
-    snapshot_id = ctx.snapshot_id
-    spx_price = ctx.spx_price
-    chain_df = ctx.chain_df
-    MC = ctx.mc
-    sc_max_rows = ctx.sc_max_rows
-    _render_mc_section = ctx.render_mc_section
-    _compute_transform_scanner = ctx.compute_transform_scanner
-
-
     # ── Mission Control ─────────────────────────────────────────────────────
     st.markdown(
         '<div class="sh" style="margin-top:.2rem">'
         '<span class="sh-ico">🔥</span>'
         '<span class="sh-ttl">Transform Opportunities</span>'
-        f'<span class="sh-bdg g">{MC["n_eligible"]} Live</span>'
+        f'<span class="sh-bdg g">{ctx.mc["n_eligible"]} Live</span>'
         '</div>',
         unsafe_allow_html=True,
     )
@@ -52,35 +48,35 @@ def render(ctx: ViewContext) -> None:
     if "mc_lookback_select" not in st.session_state:
         st.session_state["mc_lookback_select"] = "Today"
 
-    if not MC["non_atm"] and MC["n_approaching"] == 0:
+    if not ctx.mc["non_atm"] and ctx.mc["n_approaching"] == 0:
         st.caption(
             "No non-ATM transform opportunities have ever crossed the threshold yet — "
             "this fills in automatically as the registry accumulates history. "
             "Scanning continues every refresh."
         )
     else:
-        if MC["non_atm"]:
+        if ctx.mc["non_atm"]:
             _lb_label = st.session_state["mc_lookback_select"]
-            _render_mc_section(
-                MC["non_atm"][:6], "natm",
+            ctx.render_mc_section(
+                ctx.mc["non_atm"][:6], "natm",
                 f"Non-ATM Opportunities — live or active within {_lb_label}", "🟢",
                 show_live_badge=True,
             )
             _caption_bits = []
-            if MC["n_non_atm_total"] > 6:
+            if ctx.mc["n_non_atm_total"] > 6:
                 _caption_bits.append(
-                    f"Showing top 6 of {MC['n_non_atm_total']} in the {_lb_label} window."
+                    f"Showing top 6 of {ctx.mc['n_non_atm_total']} in the {_lb_label} window."
                 )
-            if MC["n_fallback_used"] > 0:
+            if ctx.mc["n_fallback_used"] > 0:
                 _caption_bits.append(
-                    f"{MC['n_fallback_used']} shown above fell outside the {_lb_label} "
+                    f"{ctx.mc['n_fallback_used']} shown above fell outside the {_lb_label} "
                     "window — included so this panel is never empty, marked PAST."
                 )
             if _caption_bits:
                 st.caption(" ".join(_caption_bits))
 
-        _render_mc_section(
-            MC["likely_next"][:3], "likely",
+        ctx.render_mc_section(
+            ctx.mc["likely_next"][:3], "likely",
             "Likely Next — gap rising, sorted by soonest ETA", "⏱",
             show_duration=False,
         )
@@ -138,18 +134,18 @@ def render(ctx: ViewContext) -> None:
         # in the app. With caching, repeat calls with the same offset/snapshot
         # are a near-instant cache hit.
         with st.spinner("Scanning combinations…"):
-            _ts_df = _compute_transform_scanner(
-                _chain_df    = chain_df,
-                spx_price    = spx_price,
-                snapshot_id  = snapshot_id,
+            _ts_df = ctx.compute_transform_scanner(
+                _chain_df    = ctx.chain_df,
+                spx_price    = ctx.spx_price,
+                snapshot_id  = ctx.snapshot_id,
                 put_offset   = int(sc_put_offset),
                 call_offset  = int(sc_call_offset),
-                max_rows     = int(sc_max_rows),
+                max_rows     = int(ctx.sc_max_rows),
             )
 
         # ── KPI cards ─────────────────────────────────────────────────────────────
         if not _ts_df.empty:
-            _ready_count  = int((_ts_df["Transform Diff"] >= _TSCAN_THRESHOLD).sum())
+            _ready_count  = int((_ts_df["Transform Diff"] >= TSCAN_THRESHOLD).sum())
             _best_diff    = float(_ts_df["Transform Diff"].max())
             _best_row     = _ts_df.iloc[0]
             _best_label   = f"Put {int(_best_row['Put Strike'])} / Call {int(_best_row['Call Strike'])}"
@@ -165,7 +161,7 @@ def render(ctx: ViewContext) -> None:
             _avg_ratio_str  = f"{_avg_iv_ratio:.4f}" if _avg_iv_ratio else "—"
 
             # KPI 1 highlight check
-            _kpi1_hl = " kpi-hl" if _best_diff >= _TSCAN_THRESHOLD else ""
+            _kpi1_hl = " kpi-hl" if _best_diff >= TSCAN_THRESHOLD else ""
             _kpi2_hl = " kpi-hl" if _ready_count > 0 else ""
 
             kpi_html = f"""
@@ -178,7 +174,7 @@ def render(ctx: ViewContext) -> None:
       <div class="kpi-card{_kpi2_hl}">
         <span class="kpi-icon">🎯</span>
         <span class="kpi-v{'  c-green' if _ready_count > 0 else ''}">{_ready_count}</span>
-        <span class="kpi-l">Diff &gt; {_TSCAN_THRESHOLD:.0f}</span>
+        <span class="kpi-l">Diff &gt; {TSCAN_THRESHOLD:.0f}</span>
       </div>
       <div class="kpi-card{_kpi1_hl}">
         <span class="kpi-icon">✦</span>
@@ -198,7 +194,7 @@ def render(ctx: ViewContext) -> None:
             st.markdown(
                 f'<div class="ready-badge"><span class="rdot"></span>'
                 f'{_ready_count} combination{"s" if _ready_count > 1 else ""} ready to transform'
-                f'&nbsp;·&nbsp;Transform Diff ≥ {_TSCAN_THRESHOLD:.0f}</div>',
+                f'&nbsp;·&nbsp;Transform Diff ≥ {TSCAN_THRESHOLD:.0f}</div>',
                 unsafe_allow_html=True,
             )
 
@@ -221,7 +217,7 @@ def render(ctx: ViewContext) -> None:
             )
 
             def _ts_row_style(row):
-                if row["Transform Diff"] >= _TSCAN_THRESHOLD:
+                if row["Transform Diff"] >= TSCAN_THRESHOLD:
                     return ["background-color: #0a1d14; color: #10d4a3"] * len(row)
                 elif row["Transform Diff"] < 0:
                     return ["color: #f05252"] * len(row)

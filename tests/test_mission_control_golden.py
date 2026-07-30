@@ -201,7 +201,7 @@ def test_duration_spans_the_whole_window_when_always_eligible(mc_db, signals):
 
 
 def test_the_threshold_is_inclusive(mc_db, signals):
-    """Exactly $5.00 counts as active (`gap >= _TSCAN_THRESHOLD`).
+    """Exactly $5.00 counts as active (`gap >= TSCAN_THRESHOLD`).
 
     Pinned because it is a boundary someone could flip to `>` while tidying, and
     it decides whether a card appears at all.
@@ -220,7 +220,7 @@ def test_duration_survives_a_collector_outage_in_the_streak(mc_db, signals):
     had been observed holding throughout. It was not observed at all.
 
     Frozen rather than fixed because the alternative (break the streak on a time
-    gap, as _break_sessions does for charts) is a judgment call about what
+    gap, as break_sessions does for charts) is a judgment call about what
     "active" should mean, and it belongs to whoever owns that decision — not to a
     refactor. If someone changes it, this test goes red and they read this note.
     """

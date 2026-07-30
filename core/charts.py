@@ -17,19 +17,19 @@ import plotly.graph_objects as go
 # moment a holiday falls inside the viewed window (first hit: 2026-07-03).
 # Only the weekday-name and hour-pattern bounds below are safe. A holiday
 # therefore shows as one session-width of honest blank space, with the line
-# cleanly broken across it by _break_sessions().
-_SESSION_RANGEBREAKS = [
+# cleanly broken across it by break_sessions().
+SESSION_RANGEBREAKS = [
     dict(bounds=["sat", "mon"]),
     dict(bounds=[16, 9.5], pattern="hour"),
 ]
 
 
-def _break_sessions(df: pd.DataFrame, ts_col: str = "timestamp",
+def break_sessions(df: pd.DataFrame, ts_col: str = "timestamp",
                      max_gap_minutes: int = 60) -> pd.DataFrame:
     """Insert a NaN row wherever consecutive points gap more than
     max_gap_minutes, so Plotly breaks the line instead of drawing a
     connector across holidays/weekends/collector outages. Rangebreaks
-    (_SESSION_RANGEBREAKS) collapse the empty axis SPACE; this handles the
+    (SESSION_RANGEBREAKS) collapse the empty axis SPACE; this handles the
     LINE across it -- they're complementary, not redundant."""
     if df.empty or len(df) < 2 or ts_col not in df.columns:
         return df
@@ -53,7 +53,7 @@ _RATIO_BANDS = [
 ]
 
 
-def _banded_ratio_traces(x, y) -> list:
+def banded_ratio_traces(x, y) -> list:
     """Build a continuous multicolor line for the IV ratio, colored by regime."""
     xs, ys = list(x), list(y)
     ax, ay = [], []

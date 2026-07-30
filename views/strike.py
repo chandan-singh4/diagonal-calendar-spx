@@ -11,35 +11,25 @@ import plotly.graph_objects as go
 import streamlit as st
 
 import iv_engine
-from core.charts import _SESSION_RANGEBREAKS, _break_sessions
+from core.charts import SESSION_RANGEBREAKS, break_sessions
 from views.context import ViewContext
 
 
 def render(ctx: ViewContext) -> None:
     """Draw the tab.
 
-    A verbatim move of app.py's Strike Detail body — see views/historical.py
-    for why the body is untouched and only the rebinds below are new.
+    Moved out of app.py in M2 step 2.4, then de-scaffolded in DEBT-028. The
+    move itself was verbatim — same statements, same order, same indentation
+    — and each body was proved byte-identical to app.py's before anything
+    here was renamed. That evidence is now spent: this file reads `ctx.` in
+    place of the rebind preamble the move needed, so the comparison that
+    justified it no longer applies and the before/after RENDER comparison is
+    what stands behind this file instead (ADR-038).
 
     Carried across unchanged: `use_container_width` on the chart (DEBT-029),
     and the naive wall-clock x-axis the rangebreaks below require (DEBT-030,
     two of its ten chart sites are in this file).
     """
-    front_expiry = ctx.front_expiry
-    back_expiry = ctx.back_expiry
-    front_dte = ctx.front_dte
-    back_dte = ctx.back_dte
-    call_strike = ctx.call_strike
-    put_strike = ctx.put_strike
-    strikes_set = ctx.strikes_set
-    snapshot_id = ctx.snapshot_id
-    session_date = ctx.session_date
-    chain_df = ctx.chain_df
-    CHART_COLORS = ctx.chart_colors
-    _load_latest_atm_iv = ctx.load_latest_atm_iv
-    _load_contract_hist = ctx.load_contract_hist
-
-
     st.markdown(
         '<div class="sh"><span class="sh-ico">🎯</span>'
         '<span class="sh-ttl">Strike Detail</span></div>',
@@ -59,10 +49,10 @@ def render(ctx: ViewContext) -> None:
     with sd_left:
         st.markdown('<div class="sh"><span class="sh-ttl">Expiry Detail</span></div>', unsafe_allow_html=True)
         for exp_label_s, exp_date, dte_val in [
-            ("Front", front_expiry, front_dte),
-            ("Back",  back_expiry,  back_dte),
+            ("Front", ctx.front_expiry, ctx.front_dte),
+            ("Back",  ctx.back_expiry,  ctx.back_dte),
         ]:
-            exp_rows = _load_latest_atm_iv(exp_date, snapshot_id, n=2)
+            exp_rows = ctx.load_latest_atm_iv(exp_date, ctx.snapshot_id, n=2)
             if exp_rows:
                 atm_now = exp_rows[0]["atm_avg_iv"] * 100
                 atm_chg = (
@@ -91,15 +81,15 @@ def render(ctx: ViewContext) -> None:
         st.markdown("<hr style='margin:8px 0;opacity:0.1;'>", unsafe_allow_html=True)
         st.markdown('<div class="sh"><span class="sh-ttl">Strike Detail</span></div>', unsafe_allow_html=True)
 
-        if strikes_set:
-            fc_call = iv_engine.strike_contract(chain_df, front_expiry, call_strike, "CALL")
-            bc_call = iv_engine.strike_contract(chain_df, back_expiry,  call_strike, "CALL")
-            fc_put  = iv_engine.strike_contract(chain_df, front_expiry, put_strike,  "PUT")
-            bc_put  = iv_engine.strike_contract(chain_df, back_expiry,  put_strike,  "PUT")
+        if ctx.strikes_set:
+            fc_call = iv_engine.strike_contract(ctx.chain_df, ctx.front_expiry, ctx.call_strike, "CALL")
+            bc_call = iv_engine.strike_contract(ctx.chain_df, ctx.back_expiry,  ctx.call_strike, "CALL")
+            fc_put  = iv_engine.strike_contract(ctx.chain_df, ctx.front_expiry, ctx.put_strike,  "PUT")
+            bc_put  = iv_engine.strike_contract(ctx.chain_df, ctx.back_expiry,  ctx.put_strike,  "PUT")
 
             for leg_label, fc, bc in [
-                (f"Put  {put_strike:.0f}",  fc_put,  bc_put),
-                (f"Call {call_strike:.0f}", fc_call, bc_call),
+                (f"Put  {ctx.put_strike:.0f}",  fc_put,  bc_put),
+                (f"Call {ctx.call_strike:.0f}", fc_call, bc_call),
             ]:
                 ratio_str = f"{fc.iv / bc.iv:.4f}" if (fc.iv and bc.iv) else "N/A"
                 f_iv_str  = f"{fc.iv:.2f}%"   if fc.iv   else "N/A"
@@ -124,11 +114,11 @@ def render(ctx: ViewContext) -> None:
         st.markdown('<div class="sh"><span class="sh-ttl">Selected-Strike IV</span></div>', unsafe_allow_html=True)
         st.caption("Front vs back IV at your trade strikes — ratio on right axis.")
 
-        if strikes_set:
-            fch = _load_contract_hist(front_expiry, call_strike, "CALL", sd_period_days)
-            bch = _load_contract_hist(back_expiry,  call_strike, "CALL", sd_period_days)
-            fph = _load_contract_hist(front_expiry, put_strike,  "PUT",  sd_period_days)
-            bph = _load_contract_hist(back_expiry,  put_strike,  "PUT",  sd_period_days)
+        if ctx.strikes_set:
+            fch = ctx.load_contract_hist(ctx.front_expiry, ctx.call_strike, "CALL", sd_period_days)
+            bch = ctx.load_contract_hist(ctx.back_expiry,  ctx.call_strike, "CALL", sd_period_days)
+            fph = ctx.load_contract_hist(ctx.front_expiry, ctx.put_strike,  "PUT",  sd_period_days)
+            bph = ctx.load_contract_hist(ctx.back_expiry,  ctx.put_strike,  "PUT",  sd_period_days)
 
             call_ready = not fch.empty and not bch.empty
             put_ready  = not fph.empty and not bph.empty
@@ -147,15 +137,15 @@ def render(ctx: ViewContext) -> None:
                     # outages, inventing IV movement that never happened. Must
                     # come AFTER call_ratio is computed so the inserted breaker
                     # rows carry NaN in the ratio column too. (ADR-006)
-                    cm = _break_sessions(cm)
+                    cm = break_sessions(cm)
                     fig_str.add_trace(go.Scatter(
                         x=cm["timestamp"], y=cm["f_call"],
-                        name=f"Front {call_strike:.0f}C",
-                        line=dict(color=CHART_COLORS["front_iv"], width=1.5), yaxis="y1"))
+                        name=f"Front {ctx.call_strike:.0f}C",
+                        line=dict(color=ctx.chart_colors["front_iv"], width=1.5), yaxis="y1"))
                     fig_str.add_trace(go.Scatter(
                         x=cm["timestamp"], y=cm["b_call"],
-                        name=f"Back  {call_strike:.0f}C",
-                        line=dict(color=CHART_COLORS["back_iv"], width=1.5), yaxis="y1"))
+                        name=f"Back  {ctx.call_strike:.0f}C",
+                        line=dict(color=ctx.chart_colors["back_iv"], width=1.5), yaxis="y1"))
                     fig_str.add_trace(go.Scatter(
                         x=cm["timestamp"], y=cm["call_ratio"],
                         name="Call Ratio (F/B)",
@@ -167,24 +157,24 @@ def render(ctx: ViewContext) -> None:
                         on="timestamp", how="inner",
                     )
                     pm["put_ratio"] = pm["f_put"] / pm["b_put"]
-                    pm = _break_sessions(pm)      # BUG-002, as above
+                    pm = break_sessions(pm)      # BUG-002, as above
                     fig_str.add_trace(go.Scatter(
                         x=pm["timestamp"], y=pm["f_put"],
-                        name=f"Front {put_strike:.0f}P",
-                        line=dict(color=CHART_COLORS["front_iv"], width=1.5, dash="dot"), yaxis="y1"))
+                        name=f"Front {ctx.put_strike:.0f}P",
+                        line=dict(color=ctx.chart_colors["front_iv"], width=1.5, dash="dot"), yaxis="y1"))
                     fig_str.add_trace(go.Scatter(
                         x=pm["timestamp"], y=pm["b_put"],
-                        name=f"Back  {put_strike:.0f}P",
-                        line=dict(color=CHART_COLORS["back_iv"], width=1.5, dash="dot"), yaxis="y1"))
+                        name=f"Back  {ctx.put_strike:.0f}P",
+                        line=dict(color=ctx.chart_colors["back_iv"], width=1.5, dash="dot"), yaxis="y1"))
                     fig_str.add_trace(go.Scatter(
                         x=pm["timestamp"], y=pm["put_ratio"],
                         name="Put Ratio (F/B)",
                         line=dict(color="#f05252", width=1.5, dash="dot"), yaxis="y2"))
                 _sd_xaxis = (
-                    dict(range=[f"{session_date} 09:30", f"{session_date} 16:15"],
-                         rangebreaks=_SESSION_RANGEBREAKS, gridcolor="#0c1928")
+                    dict(range=[f"{ctx.session_date} 09:30", f"{ctx.session_date} 16:15"],
+                         rangebreaks=SESSION_RANGEBREAKS, gridcolor="#0c1928")
                     if sd_period_label == "Today"
-                    else dict(rangebreaks=_SESSION_RANGEBREAKS, gridcolor="#0c1928")
+                    else dict(rangebreaks=SESSION_RANGEBREAKS, gridcolor="#0c1928")
                 )
                 fig_str.update_layout(
                     height=420,
@@ -204,7 +194,7 @@ def render(ctx: ViewContext) -> None:
                 st.plotly_chart(fig_str, use_container_width=True)
             else:
                 st.info(
-                    f"No per-strike history for {call_strike:.0f}C / {put_strike:.0f}P "
+                    f"No per-strike history for {ctx.call_strike:.0f}C / {ctx.put_strike:.0f}P "
                     f"in the selected range. Try 'Today'."
                 )
         else:

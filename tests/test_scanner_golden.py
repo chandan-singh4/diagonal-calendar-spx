@@ -78,7 +78,7 @@ def test_scanner_output_is_unchanged(tag):
     chain, golden, meta = _load(tag)
     scanner = load_scanner_functions()
 
-    actual = scanner["_compute_transform_scanner"](
+    actual = scanner["compute_transform_scanner"](
         chain,
         float(meta["underlying_price"]),
         int(meta["snapshot_id"]),
@@ -118,9 +118,9 @@ def test_scanner_is_deterministic(tag):
     scanner = load_scanner_functions()
     args = (chain, float(meta["underlying_price"]), int(meta["snapshot_id"]))
 
-    first = scanner["_compute_transform_scanner"](*args, put_offset=0, call_offset=0,
+    first = scanner["compute_transform_scanner"](*args, put_offset=0, call_offset=0,
                                                   max_rows=50).reset_index(drop=True)
-    second = scanner["_compute_transform_scanner"](*args, put_offset=0, call_offset=0,
+    second = scanner["compute_transform_scanner"](*args, put_offset=0, call_offset=0,
                                                    max_rows=50).reset_index(drop=True)
     pd.testing.assert_frame_equal(first, second)
 
@@ -137,7 +137,7 @@ def test_scanner_does_not_mutate_its_input(tag):
     before = chain.copy(deep=True)
     scanner = load_scanner_functions()
 
-    scanner["_compute_transform_scanner"](
+    scanner["compute_transform_scanner"](
         chain, float(meta["underlying_price"]), int(meta["snapshot_id"]),
         put_offset=0, call_offset=0, max_rows=50,
     )
@@ -148,7 +148,7 @@ def test_scanner_does_not_mutate_its_input(tag):
 def test_scanner_respects_max_rows(tag):
     chain, _, meta = _load(tag)
     scanner = load_scanner_functions()
-    out = scanner["_compute_transform_scanner"](
+    out = scanner["compute_transform_scanner"](
         chain, float(meta["underlying_price"]), int(meta["snapshot_id"]),
         put_offset=0, call_offset=0, max_rows=5,
     )
@@ -157,13 +157,13 @@ def test_scanner_respects_max_rows(tag):
 
 def test_scanner_handles_an_empty_chain():
     scanner = load_scanner_functions()
-    out = scanner["_compute_transform_scanner"](pd.DataFrame(), 7400.0, 1)
+    out = scanner["compute_transform_scanner"](pd.DataFrame(), 7400.0, 1)
     assert out.empty
 
 
 @pytest.mark.parametrize("tag", SNAPSHOTS[:1])
 def test_sweep_across_offsets_returns_a_superset_of_a_single_offset(tag):
-    """_scan_all_offsets sweeps offsets so opportunities are not missed.
+    """scan_all_offsets sweeps offsets so opportunities are not missed.
 
     Its whole justification is finding pairs that a single selected offset would
     hide, so the sweep must return at least as many distinct pairs as offset 0
@@ -174,8 +174,8 @@ def test_sweep_across_offsets_returns_a_superset_of_a_single_offset(tag):
     scanner = load_scanner_functions()
     spx, sid = float(meta["underlying_price"]), int(meta["snapshot_id"])
 
-    single = scanner["_compute_transform_scanner"](chain, spx, sid, 0, 0, max_rows=500)
-    swept = scanner["_scan_all_offsets"](chain, spx, sid, max_rows_per_offset=500)
+    single = scanner["compute_transform_scanner"](chain, spx, sid, 0, 0, max_rows=500)
+    swept = scanner["scan_all_offsets"](chain, spx, sid, max_rows_per_offset=500)
 
     assert len(swept) >= len(single)
 
@@ -184,7 +184,7 @@ def test_sweep_across_offsets_returns_a_superset_of_a_single_offset(tag):
 # The bid/ask midpoint fallback (DEBT-014, closed 2026-07-26)
 #
 # THE HOLE THIS FILLS. Mutation-testing the golden net on 2026-07-26 found that
-# altering the midpoint formula inside _compute_transform_scanner changed
+# altering the midpoint formula inside compute_transform_scanner changed
 # nothing — the net did not protect that branch at all. Both captured snapshots
 # DO contain NULL-`mark` rows (77 of 3,096 in snapshot 2608), but none of them
 # reach the top-50 output: the branch runs and its result is discarded. A
@@ -237,7 +237,7 @@ def _synthetic_chain(*, front_mark, front_bid, front_ask,
 
 
 def _scan(chain):
-    return load_scanner_functions()["_compute_transform_scanner"](
+    return load_scanner_functions()["compute_transform_scanner"](
         chain, SPOT, 1, put_offset=0, call_offset=0, max_rows=50)
 
 
@@ -361,5 +361,5 @@ def test_scanner_needs_no_database_or_streamlit():
     when the temptation to reach straight for db.* is highest.
     """
     scanner = load_scanner_functions()
-    assert callable(scanner["_compute_transform_scanner"])
-    assert callable(scanner["_scan_all_offsets"])
+    assert callable(scanner["compute_transform_scanner"])
+    assert callable(scanner["scan_all_offsets"])

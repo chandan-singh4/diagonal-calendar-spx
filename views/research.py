@@ -17,27 +17,19 @@ from views.context import ViewContext
 def render(ctx: ViewContext) -> None:
     """Draw the tab.
 
-    A verbatim move of app.py lines 3794-3906 — see the note in
-    views/historical.py for why the body is untouched and only the rebinds
-    below are new.
+    Moved out of app.py in M2 step 2.4, then de-scaffolded in DEBT-028. The
+    move itself was verbatim — same statements, same order, same indentation
+    — and each body was proved byte-identical to app.py's before anything
+    here was renamed. That evidence is now spent: this file reads `ctx.` in
+    place of the rebind preamble the move needed, so the comparison that
+    justified it no longer applies and the before/after RENDER comparison is
+    what stands behind this file instead (ADR-038).
 
     Carried across unchanged, and NOT fixed here: `use_container_width` on
     the chart below is DEBT-029, a Streamlit argument whose removal date has
     already passed. It is one of 34 call sites and they want doing in a
     single pass, not smuggled into a move that is supposed to change nothing.
     """
-    strikes_set = ctx.strikes_set
-    front_expiry = ctx.front_expiry
-    back_expiry = ctx.back_expiry
-    call_strike = ctx.call_strike
-    put_strike = ctx.put_strike
-    snapshot_id = ctx.snapshot_id
-    spx_price = ctx.spx_price
-    ts_now = ctx.ts_now
-    _diag_mark = ctx.diag_mark
-    _norm_deb = ctx.norm_deb
-    _load_diagonal_hist = ctx.load_diagonal_hist
-
     st.markdown(
         '<div class="sh"><span class="sh-ico">🔬</span>'
         '<span class="sh-ttl">Research — IV Ratio vs. Normalized Debit</span>'
@@ -50,12 +42,12 @@ def render(ctx: ViewContext) -> None:
         "Amber diamond = current observation. No predictive claim is made."
     )
 
-    if not strikes_set:
+    if not ctx.strikes_set:
         st.info("Set call and put strikes in Controls to populate the scatter.")
     else:
-        _hist = _load_diagonal_hist(
-            front_expiry, back_expiry, call_strike, put_strike,
-            90, snapshot_id,
+        _hist = ctx.load_diagonal_hist(
+            ctx.front_expiry, ctx.back_expiry, ctx.call_strike, ctx.put_strike,
+            90, ctx.snapshot_id,
         )
         if not _hist.empty:
             _hist["net_debit"] = (
@@ -96,17 +88,17 @@ def render(ctx: ViewContext) -> None:
                     showlegend=True, name="OLS trend (descriptive)", hoverinfo="skip",
                 ))
 
-        if _norm_deb is not None and ts_now.ratio is not None:
+        if ctx.norm_deb is not None and ctx.ts_now.ratio is not None:
             fig_sc.add_trace(go.Scatter(
-                x=[ts_now.ratio], y=[_norm_deb], mode="markers",
+                x=[ctx.ts_now.ratio], y=[ctx.norm_deb], mode="markers",
                 marker=dict(symbol="diamond", color="#f0a429", size=14,
                             line=dict(color="#78350f", width=1.5)),
                 showlegend=True, name="Current",
                 hovertemplate=(
                     "<b>Current observation</b><br>"
-                    f"SPX: {spx_price:.0f}<br>"
+                    f"SPX: {ctx.spx_price:.0f}<br>"
                     "IV Ratio: %{x:.4f}<br>Norm. Debit: %{y:.4f}<br>"
-                    + (f"Diagonal Mark: ${_diag_mark:.2f}" if _diag_mark else "")
+                    + (f"Diagonal Mark: ${ctx.diag_mark:.2f}" if ctx.diag_mark else "")
                     + "<extra></extra>"
                 ),
             ))
@@ -117,7 +109,7 @@ def render(ctx: ViewContext) -> None:
             annotation_font=dict(color="#2f4459", size=10),
             annotation_position="top right",
         )
-        if not _has_data and _norm_deb is None:
+        if not _has_data and ctx.norm_deb is None:
             fig_sc.add_annotation(
                 x=0.5, y=0.5, xref="paper", yref="paper",
                 text="No data yet — scatter populates as snapshots accumulate.",

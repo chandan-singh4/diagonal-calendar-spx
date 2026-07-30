@@ -12,7 +12,7 @@ this loader searches core/ FIRST, then app.py. Two consequences worth knowing:
     passing across the move, which is the whole point of having written them
     before it.
   * app.py may legitimately hold a same-named BINDING that wraps the core
-    function in a Streamlit memo (`_compute_transform_scanner`). That is an
+    function in a Streamlit memo (`compute_transform_scanner`). That is an
     assignment, not a definition, so it is never picked up — the tests measure
     the real function, not the wrapper.
 
@@ -75,35 +75,35 @@ SOURCES: tuple[Path, ...] = (*sorted(CORE_DIR.glob("*.py")), APP_PATH)
 # Decorators that are safe to strip because they cannot change a return value.
 _PURE_MEMOISERS = ("st.cache_data", "st.cache_resource")
 
-_WANTED_FUNCS = ("_compute_transform_scanner", "_scan_all_offsets", "_break_sessions")
+_WANTED_FUNCS = ("compute_transform_scanner", "scan_all_offsets", "break_sessions")
 
-# Module-level constants the scanner reads (e.g. _SWEEP_OFFSETS default).
-_WANTED_CONSTS = ("_SWEEP_OFFSETS",)
+# Module-level constants the scanner reads (e.g. SWEEP_OFFSETS default).
+_WANTED_CONSTS = ("SWEEP_OFFSETS",)
 
 # The display layer: everything between a computed number and your eyes.
 _DISPLAY_FUNCS = (
-    "_rank_for_panel",        # the ORDER cards appear in
-    "_banded_ratio_traces",   # the multicolor IV-ratio line's geometry
-    "_sparkline",             # the ▁▂▃ trend glyph on every card
-    "_fmt_duration",          # "2h 12m"
-    "_fmt_eta",               # "~18 min"
-    "_card_key",              # a card's identity across reruns
+    "rank_for_panel",        # the ORDER cards appear in
+    "banded_ratio_traces",   # the multicolor IV-ratio line's geometry
+    "sparkline",             # the ▁▂▃ trend glyph on every card
+    "fmt_duration",          # "2h 12m"
+    "fmt_eta",               # "~18 min"
+    "card_key",              # a card's identity across reruns
 )
-_DISPLAY_CONSTS = ("_SPARK_BARS", "_RATIO_THRESHOLDS", "_RATIO_BANDS")
+_DISPLAY_CONSTS = ("SPARK_BARS", "_RATIO_THRESHOLDS", "_RATIO_BANDS")
 
 # The Mission Control layer — reads the database, so unlike the two above it
 # needs db and config in its namespace. See DEBT-026 / ADR-030.
-_MC_FUNCS = ("_candidate_signals", "_sparkline")
-_MC_CONSTS = ("_SPARK_BARS", "_TSCAN_THRESHOLD")
+_MC_FUNCS = ("_candidate_signals", "sparkline")
+_MC_CONSTS = ("SPARK_BARS", "TSCAN_THRESHOLD")
 
 # The FULL Mission Control pipeline plus the query wrappers — everything left in
 # DEBT-026 after _candidate_signals. Needs db, config, json, Path and a
 # session_state stand-in. See ADR-031.
 _PIPELINE_FUNCS = (
-    # scanner, because _scan_all_offsets is a real collaborator of the core
-    "_compute_transform_scanner", "_scan_all_offsets",
+    # scanner, because scan_all_offsets is a real collaborator of the core
+    "compute_transform_scanner", "scan_all_offsets",
     # display helpers the pipeline calls directly
-    "_rank_for_panel", "_card_key", "_sparkline", "_fmt_duration", "_exp_label",
+    "rank_for_panel", "card_key", "sparkline", "fmt_duration", "_exp_label",
     # signals
     "_candidate_signals",
     # the persisted eligibility registry
@@ -116,8 +116,8 @@ _PIPELINE_FUNCS = (
     "_load_latest_atm_iv", "_load_diagonal_hist",
 )
 _PIPELINE_CONSTS = (
-    "_SWEEP_OFFSETS", "_TSCAN_THRESHOLD", "_APPROACHING_LOW", "_MC_HISTORY_CAP",
-    "_SPARK_BARS", "_ELIGIBLE_HISTORY_RETENTION_DAYS",
+    "SWEEP_OFFSETS", "TSCAN_THRESHOLD", "APPROACHING_LOW", "_MC_HISTORY_CAP",
+    "SPARK_BARS", "_ELIGIBLE_HISTORY_RETENTION_DAYS",
     # _ELIGIBLE_HISTORY_PATH is gone: the registry's location is config.STATE_DIR
     # plus a filename in state/eligible_history.py as of ADR-035.
 )
@@ -268,7 +268,7 @@ def load_display_functions() -> dict:
     """Return {name: obj} for the display layer and its constants.
 
     plotly IS supplied here, unlike the scanner namespace, because
-    _banded_ratio_traces legitimately builds Scatter objects — that is the thing
+    banded_ratio_traces legitimately builds Scatter objects — that is the thing
     under test. Still deliberately absent: streamlit, db, config. Anything in
     this layer that reaches for the database or the page is misplaced, and a
     NameError here is the finding.

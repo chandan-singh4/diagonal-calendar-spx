@@ -355,13 +355,13 @@ def _calls_to(func_name: str) -> list[ast.Call]:
 
 
 def test_the_offset_sweep_is_handed_the_memoised_scanner():
-    calls = _calls_to("_scan_all_offsets")
-    assert calls, "app.py no longer calls _scan_all_offsets — re-point this test"
+    calls = _calls_to("scan_all_offsets")
+    assert calls, "app.py no longer calls scan_all_offsets — re-point this test"
     for call in calls:
         assert any(kw.arg == "compute" for kw in call.keywords), (
-            "_scan_all_offsets() called without compute= — Phase A would fall "
+            "scan_all_offsets() called without compute= — Phase A would fall "
             "back to the UNCACHED scanner and recompute 21 offsets on every "
-            "rerun. Pass the memoised wrapper: compute=_compute_transform_scanner"
+            "rerun. Pass the memoised wrapper: compute=compute_transform_scanner"
         )
 
 
