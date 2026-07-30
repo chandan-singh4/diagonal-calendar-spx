@@ -5,6 +5,72 @@ what broke, and what remains.
 
 ---
 
+## 2026-07-29 (session 8) — M2 begins: `core/` is out, and `app.py` shrinks for the first time
+
+### Completed
+
+**Step 2.1 of the decomposition: `core/` exists.** Eight functions and six constants left `app.py`
+for four new modules — `format.py` (the on-card formatters), `charts.py` (session breaks and the
+IV-ratio colour bands), `ranking.py` (card order and identity), `scanner.py` (Phase A maths and its
+thresholds). **`app.py`: 4,283 → 3,991 lines**, the first reduction since the audit; it had only
+grown until now.
+
+**The rule for what moved: only code the tests already pin.** All eight functions are covered by
+the 88 characterization tests written last session, so every move is verifiable rather than
+hopeful. `_nearest_idx` was left behind for exactly this reason — four obviously-pure lines, but
+untested, and untested code is where a silent break hides. It goes with `views/` (DEBT-028).
+
+**549 tests passed unchanged.** That is the evidence the move altered nothing: not one existing
+test was edited to accommodate it. Total is now **560**.
+
+### What was harder than it looked
+
+**The memo could not come along, and moving it naively would have made the dashboard slower.**
+`_compute_transform_scanner` carries a Streamlit cache, and two callers share those saved results —
+the Scanner tab and the 21-offset sweep. `core/` cannot import Streamlit. Moving the function
+without thinking would have left the sweep calling an uncached copy: **identical numbers, every
+test green, and 21 recomputations on every single rerun.** The cache therefore stays in `app.py`
+wrapping the imported function, and the sweep is handed it explicitly. See ADR-032 for the
+alternatives and why each was rejected.
+
+**That seam then survived the injection run** — dropping the one keyword broke nothing any test
+could see. It now has its own guard asserted against `app.py`'s syntax tree, the same shape as the
+BUG-002 wiring test. **Third time on this project that a missing *call*, not a wrong calculation,
+was the defect worth guarding.**
+
+**Last session's tripwire fired exactly as designed.** `test_app_still_defines_break_sessions_
+where_the_loader_expects_it` was written against this move and failed the moment it happened. It
+was repointed, not deleted — and strengthened to assert the function has exactly *one* home, which
+also catches a copy left behind in `app.py`.
+
+### Discovered
+
+**A number in the docs was wrong, and it was mine.** I measured `app.py` with a PowerShell command
+that silently ignores blank lines and reported 3,891 where the true count was 4,283 — the figure
+the backlog already carried. Corrected in `plan.md`, `decisions.md` and `backlog.md`; the real
+before/after is 4,283 → 3,991.
+
+**The collector holds `.collector.lock` open**, which is why a naive `robocopy` of the repo hangs:
+its default is a million retries at 30 seconds each. Worth knowing before the next rehearsal copy —
+skip the lock and the 1.57 GB `data/` directory (which also holds `token.json`).
+
+### Verified
+
+549 pre-existing tests pass with no edits; 11 new; **560 total**. Mutation-verified on a throwaway
+copy: **5 faults injected, 4 caught, 1 survivor which produced the 560th test, then re-injected and
+caught.** The survivor is described above.
+
+**Not verified: the dashboard was not opened.** Nothing here proves the page still renders. `app.py`
+parses and imports cleanly and no page code was touched, but that is an argument, not a check.
+
+### Remains
+
+Steps 2.2–2.5: `data/`, `state/` (fix the relative-path defect), `views/`, then `app.py` under 400
+lines. DEBT-028 opened for the deferred rename. Still blocked on Chandan: BUG-001's symptom, the
+6 practice trades, and the break-even question.
+
+---
+
 ## 2026-07-29 (session 7) — a safety net under the screen, before M2 touches it
 
 ### Completed

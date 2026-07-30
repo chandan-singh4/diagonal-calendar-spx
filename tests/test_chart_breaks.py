@@ -23,12 +23,9 @@ importing app.py runs a Streamlit page against the production database.
 """
 from __future__ import annotations
 
-import ast
-from pathlib import Path
-
 import pandas as pd
 import pytest
-from app_loader import APP_PATH, load_scanner_functions
+from app_loader import APP_PATH, definition_sources, load_scanner_functions
 
 
 @pytest.fixture(scope="module")
@@ -199,9 +196,14 @@ def test_the_statistics_frame_is_deliberately_not_broken():
     )
 
 
-def test_app_still_defines_break_sessions_where_the_loader_expects_it():
-    """Guards the AST loader: if _break_sessions moves during the M2
-    extraction, fail here with a clear reason rather than mysteriously."""
-    tree = ast.parse(Path(APP_PATH).read_text(encoding="utf-8"))
-    names = {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
-    assert "_break_sessions" in names
+def test_break_sessions_is_defined_once_where_the_loader_expects_it():
+    """Guards the AST loader: if _break_sessions moves again, fail here with a
+    clear reason rather than mysteriously.
+
+    REPOINTED in M2 (ADR-032). It used to assert app.py defined the function;
+    the extraction moved it to core/charts.py and this test did its job by
+    failing. Asserting exactly one home also catches the worse case — a copy
+    left behind in app.py, where the dashboard would run one version and the
+    golden tests would measure the other.
+    """
+    assert definition_sources("_break_sessions") == ["core/charts.py"]

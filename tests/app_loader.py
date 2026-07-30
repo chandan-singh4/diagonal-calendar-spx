@@ -1,9 +1,30 @@
 """
-Load pure functions out of app.py without running the dashboard.
+Load pure functions out of app.py and core/ without running the dashboard.
 
 Same technique and same reasoning as tests/journal_loader.py: app.py is a
-~4,300-line Streamlit script whose module level queries the database and renders
-six tabs. We want its arithmetic, not the page.
+Streamlit script whose module level queries the database and renders six tabs.
+We want its arithmetic, not the page.
+
+TWO SOURCES SINCE M2 (ADR-032). The pure calculations now live in core/, and
+this loader searches core/ FIRST, then app.py. Two consequences worth knowing:
+
+  * A name that moved to core/ needs no change here — the golden tests keep
+    passing across the move, which is the whole point of having written them
+    before it.
+  * app.py may legitimately hold a same-named BINDING that wraps the core
+    function in a Streamlit memo (`_compute_transform_scanner`). That is an
+    assignment, not a definition, so it is never picked up — the tests measure
+    the real function, not the wrapper.
+
+A name DEFINED in two sources is rejected outright: that is a half-finished
+move, and silently preferring core/ would let the tests pass against code the
+dashboard no longer runs.
+
+Loading through the AST rather than importing core/ directly is deliberate and
+still earns its keep: each caller supplies its own namespace, so a core
+function that starts reaching for the database or the page raises NameError
+here instead of passing quietly. tests/test_core_layering.py enforces the same
+rule from the other side, on the import list.
 
 TWO ENTRY POINTS, both built on _load_from_app():
 
@@ -41,7 +62,13 @@ import config
 import db
 import iv_engine
 
-APP_PATH = Path(__file__).resolve().parent.parent / "app.py"
+REPO_ROOT = Path(__file__).resolve().parent.parent
+APP_PATH = REPO_ROOT / "app.py"
+CORE_DIR = REPO_ROOT / "core"
+
+# core/ first — see the module docstring. Sorted so the search order is stable
+# and a failure message names the same file every run.
+SOURCES: tuple[Path, ...] = (*sorted(CORE_DIR.glob("*.py")), APP_PATH)
 
 # Decorators that are safe to strip because they cannot change a return value.
 _PURE_MEMOISERS = ("st.cache_data", "st.cache_resource")
@@ -120,26 +147,68 @@ def _decorator_is_pure(node: ast.expr) -> bool:
     return any(text.startswith(m) for m in _PURE_MEMOISERS)
 
 
+def _definitions(funcs: set[str], consts: set[str]) -> dict[str, list[tuple[Path, ast.stmt]]]:
+    """Every top-level definition of a wanted name, across every source.
+
+    Returns name -> [(source, node), ...]. More than one entry for a name is a
+    half-finished move, and the caller rejects it. Assignments only count for
+    `consts`, which is what lets app.py keep a memo-wrapping binding under the
+    same name as a core function without shadowing it here.
+    """
+    found: dict[str, list[tuple[Path, ast.stmt]]] = {}
+
+    for src in SOURCES:
+        tree = ast.parse(src.read_text(encoding="utf-8"), filename=str(src))
+        for node in tree.body:
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id in consts:
+                        found.setdefault(target.id, []).append((src, node))
+            elif isinstance(node, ast.FunctionDef) and node.name in funcs:
+                found.setdefault(node.name, []).append((src, node))
+
+    return found
+
+
+def _rel(path: Path) -> str:
+    return path.relative_to(REPO_ROOT).as_posix()
+
+
 def _load_from_app(funcs: tuple[str, ...], consts: tuple[str, ...],
                    namespace: dict, *, what: str) -> dict:
-    """Extract `funcs` and `consts` from app.py and exec them in `namespace`.
+    """Extract `funcs` and `consts` from core/ + app.py and exec in `namespace`.
 
     `what` names the caller in failure messages, so a missing function tells you
     which test to go and repoint rather than just which name vanished.
     """
-    tree = ast.parse(APP_PATH.read_text(encoding="utf-8"), filename=str(APP_PATH))
-
     wanted_f, wanted_c = set(funcs), set(consts)
-    picked: list[ast.stmt] = []
+    found = _definitions(wanted_f, wanted_c)
 
-    for node in tree.body:
-        if isinstance(node, ast.Assign):
-            names = {t.id for t in node.targets if isinstance(t, ast.Name)}
-            if names & wanted_c:
-                picked.append(node)
-                wanted_c -= names
+    missing = sorted((wanted_f | wanted_c) - found.keys())
+    if missing:
+        raise AssertionError(
+            f"No source in {[_rel(s) for s in SOURCES]} defines: {missing}. If "
+            f"the {what} moved (M2 extraction), point the golden test at its new "
+            f"home — do NOT delete the test, its whole purpose is to survive "
+            f"that move."
+        )
 
-        elif isinstance(node, ast.FunctionDef) and node.name in wanted_f:
+    duplicated = {n: [_rel(s) for s, _ in hits] for n, hits in found.items() if len(hits) > 1}
+    if duplicated:
+        raise AssertionError(
+            f"Defined in more than one place: {duplicated}. That is a "
+            f"half-finished extraction — the dashboard runs one copy and this "
+            f"loader would silently test the other. Delete the stale one."
+        )
+
+    picked: list[tuple[Path, ast.stmt]] = []
+    seen: set[int] = set()
+    for name in (*consts, *funcs):
+        src, node = found[name][0]
+        if id(node) in seen:      # one `a = b = ...` can define two wanted names
+            continue
+        seen.add(id(node))
+        if isinstance(node, ast.FunctionDef):
             for dec in node.decorator_list:
                 if not _decorator_is_pure(dec):
                     raise AssertionError(
@@ -148,25 +217,29 @@ def _load_from_app(funcs: tuple[str, ...], consts: tuple[str, ...],
                         f"Review tests/app_loader.py before proceeding."
                     )
             node.decorator_list = []  # safe: memoisation only
-            picked.append(node)
-            wanted_f.discard(node.name)
-
-    missing = sorted(wanted_f | wanted_c)
-    if missing:
-        raise AssertionError(
-            f"app.py no longer defines: {missing}. If the {what} moved (M2 "
-            f"extraction), point the golden test at its new home — do NOT delete "
-            f"the test, its whole purpose is to survive that move."
-        )
+        picked.append((src, node))
 
     # Constants must be defined before the functions that default to them.
-    picked.sort(key=lambda n: 0 if isinstance(n, ast.Assign) else 1)
+    picked.sort(key=lambda pair: 0 if isinstance(pair[1], ast.Assign) else 1)
 
-    module = ast.Module(body=picked, type_ignores=[])
-    ast.fix_missing_locations(module)
-    exec(compile(module, filename=str(APP_PATH), mode="exec"), namespace)
+    # Compiled one node at a time, each against its own filename, so a traceback
+    # from inside an extracted function points at the file it really came from.
+    for src, node in picked:
+        module = ast.Module(body=[node], type_ignores=[])
+        ast.fix_missing_locations(module)
+        exec(compile(module, filename=str(src), mode="exec"), namespace)
 
     return {n: namespace[n] for n in (*funcs, *consts)}
+
+
+def definition_sources(name: str) -> list[str]:
+    """Which source files define `name` at the top level, as repo-relative paths.
+
+    Exposed so a test can assert WHERE something lives without duplicating the
+    AST walk — see test_chart_breaks.py.
+    """
+    hits = _definitions({name}, {name})
+    return [_rel(src) for src, _ in hits.get(name, [])]
 
 
 def load_scanner_functions() -> dict:

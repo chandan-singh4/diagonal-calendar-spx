@@ -1,7 +1,7 @@
 # plan.md — Current Implementation Plan
 
 **Last updated:** 2026-07-29
-**Current milestone:** M2 — Architecture Refactor *(pre-work COMPLETE; no code moved yet)*
+**Current milestone:** M2 — Architecture Refactor *(pre-work COMPLETE; step 1 of 5 done — `core/` extracted)*
 **Status:** M0 ✅ and M1 ✅ both COMPLETE and merged to `main`. **549 tests**, run automatically on
 every commit. **80% coverage of non-UI code** against a ~70% target; `iv_engine`, `db.py`,
 `schwab_client.py` and `config.py` at 100%. Every module was mutation-verified rather than
@@ -13,8 +13,11 @@ closed.** 88 characterization tests now cover what reaches the screen: card orde
 geometry, the on-card formatters, the Mission Control pipeline end to end, the persisted
 eligibility registry, and all nine query wrappers. A refactor that reorders the opportunity
 cards, mis-draws the IV-ratio line, discards the asymmetric combos before ranking, or shifts
-every chart by four hours now fails a test instead of reaching the screen. **The decomposition
-itself (steps 1–5 below) is the next work.**
+every chart by four hours now fails a test instead of reaching the screen. **Step 1 of the
+decomposition is now done:** `core/` exists — 4 modules, 8 functions and 6 constants moved out
+of `app.py` (**4,283 → 3,991 lines**) with the 549 tests unchanged and still passing, plus 11 new
+ones enforcing that `core/` never imports the database, the config or Streamlit and that the
+memo seam stays wired. **Steps 2–5 are the remaining work.**
 **Reference:** [`AUDIT_2026-07-25.md`](AUDIT_2026-07-25.md) §10 for the full M0–M8 roadmap —
 a **frozen snapshot**, superseded by this file wherever they differ (see the banner at its head,
 and ADR-028 for the two M1 tasks settled differently).
@@ -149,14 +152,15 @@ silently changed screen.
 **Then the decomposition itself, in this order** — pure maths first, appearance last, because
 appearance is the part that cannot be tested and so should be the thinnest thing remaining:
 
-1. `core/` — pure functions, no DB and no Streamlit. Scanner maths, ranking, signals, formatters.
-2. `data/queries.py` — the eleven `_load_*` functions, returning data rather than display shapes.
-3. `state/` — the JSON-file persistence (entry locks, chart colours, eligibility registry),
-   currently read and written from inside render functions.
-4. `views/` — one module per tab. Mostly mechanical *once* 1–3 are out.
-5. `app.py` — page config, sidebar, tab dispatch. Target: under 400 lines.
+| # | Task | Status | Notes |
+|---|---|---|---|
+| 2.1 | `core/` — pure functions, no DB and no Streamlit | ✅ Done 2026-07-29 | 4 modules: `format.py` (`_sparkline`, `_fmt_duration`, `_fmt_eta`), `charts.py` (`_break_sessions`, `_banded_ratio_traces` + rangebreaks and ratio bands), `ranking.py` (`_rank_for_panel`, `_card_key`), `scanner.py` (`_compute_transform_scanner`, `_scan_all_offsets` + Phase A thresholds). `app.py` **4,283 → 3,991** lines. **Scope rule: only code the 549 tests already pinned** — moving unpinned code is where a silent break would hide. **The `@st.cache_data` memo stayed in `app.py`** wrapping the moved scanner, because two callers share those saved results and `core/` cannot import Streamlit; `_scan_all_offsets` takes the wrapper through a new `compute=` argument (ADR-032). Zero test edits beyond repointing `tests/app_loader.py` at two sources and the tripwire it was built with. **10 new tests** in `test_core_layering.py` enforce the layer rule on the import list. |
+| 2.2 | `data/queries.py` — the eleven `_load_*` functions | ☐ Next | Return data rather than display shapes. Fix DEBT-027 here: `_candidate_signals` takes `config.DB_PATH` from a module global instead of an argument. `_MC_HISTORY_CAP` moves with this layer. |
+| 2.3 | `state/` — the JSON-file persistence | ☐ | Entry locks, chart colours, eligibility registry, currently read and written from inside render functions. **Fix the relative-path defect here** (DEBT-011). |
+| 2.4 | `views/` — one module per tab | ☐ | Mostly mechanical *once* 2.1–2.3 are out. |
+| 2.5 | `app.py` — page config, sidebar, tab dispatch | ☐ | Target: under 400 lines. |
 
-Steps 1–3 carry the value. Step 4 looks like the work and is the least interesting part of it.
+Steps 2.1–2.3 carry the value. Step 2.4 looks like the work and is the least interesting part of it.
 
 ---
 
@@ -164,9 +168,9 @@ Steps 1–3 carry the value. Step 4 looks like the work and is the least interes
 
 1. **M1 is complete and DEBT-014 is closed — M2 is unblocked.** Every task 1.1–1.9 is
    done, the coverage target is exceeded, and the scanner net no longer has the hole
-   that would have let M2 change the midpoint fallback unnoticed. The next decision is
-   where M2 starts: `app.py` is 3,891 lines with appearance, calculations and data
-   access mixed together.
+   that would have let M2 change the midpoint fallback unnoticed. **M2 has now started:**
+   step 2.1 is done and `app.py` is down to 3,991 lines, with appearance, calculations
+   and data access still mixed together in what remains.
 2. **The 6 practice trades can now safely be discarded.** BUG-016 was the blocker — the
    next ID after a deletion collided with a live PRIMARY KEY and the save raised. Fixed
    2026-07-26 (ADR-023 §1) and covered by a test that runs exactly that sequence. Note the

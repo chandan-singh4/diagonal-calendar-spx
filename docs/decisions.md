@@ -7,6 +7,69 @@ it was recorded here.
 
 ---
 
+## ADR-032 — `core/` extracted: move only what is pinned, and keep the memo out of the pure layer
+**Date:** 2026-07-29 · **Status:** ACCEPTED · **Completes:** M2 task 2.1
+
+**Decision.** Create `core/` — pure calculation, no database, no page, no files — and move eight
+functions and six constants into it from `app.py` (**4,283 → 3,991 lines**): `format.py`
+(`_sparkline`, `_fmt_duration`, `_fmt_eta`), `charts.py` (`_break_sessions`,
+`_banded_ratio_traces`), `ranking.py` (`_rank_for_panel`, `_card_key`), `scanner.py`
+(`_compute_transform_scanner`, `_scan_all_offsets`).
+
+**Scope rule: only move what the tests already pin.** Every function moved is covered by the 88
+characterization tests written in 2.0a/2.0b, so the move is verifiable rather than hopeful. The
+one obvious candidate left behind is `_nearest_idx` — four pure lines, but untested, and untested
+code is exactly where a silent break hides. It moves with `views/` (DEBT-028).
+
+**The memo stays in `app.py`, and that is not a compromise.** `_compute_transform_scanner` carries
+`@st.cache_data(ttl=120, max_entries=8)`, and **two callers share those saved results**: the Scanner
+tab and the 21-offset Phase A sweep. `core/` cannot import Streamlit, so moving the function
+naively would have left the sweep calling an uncached function — identical numbers, and every
+existing test still green, while the dashboard recomputed 21 offsets on every rerun. The decorator
+therefore stays in `app.py` wrapping the imported pure function, and `_scan_all_offsets` gained a
+keyword-only `compute=` argument that production supplies.
+
+*Alternatives rejected.* (a) Move the decorator into `core/` behind an import guard — defeats the
+purpose of the layer. (b) Have `app.py` rebind `core.scanner._compute_transform_scanner` after
+import — works, via late global lookup, but action at a distance: nothing at the call site would
+say the sweep's speed depends on a line in another file. (c) Accept the slowdown — no; "slowness"
+was a withdrawn symptom report this week (ADR-031), and knowingly introducing real slowness while
+that question is open would be indefensible.
+
+**The seam has a cost, and the mutation run found it.** Dropping `compute=` is invisible: numbers
+identical, all 559 tests green. It **survived** the injection run, so it now has its own guard —
+`test_the_offset_sweep_is_handed_the_memoised_scanner`, asserted against `app.py`'s AST, the same
+shape as the BUG-002 wiring test. This is the third time on this project that a *missing call*, not
+a wrong calculation, has been the defect worth guarding; the pattern is now explicit.
+
+**Names keep their leading underscores, for now.** `core.scanner._scan_all_offsets` reads oddly —
+an underscore means "private to this module", which is wrong for a package API. Renaming was
+deliberately deferred so that this step is a **pure move**: every one of the 549 existing tests
+passes unchanged, which is the evidence that nothing was altered in transit. Renaming touches every
+call site and deserves its own verifiable step (DEBT-028).
+
+**The test loader now reads two sources, and rejects a half-move.** `tests/app_loader.py` searches
+`core/` first, then `app.py`. A name defined in *both* is now an error rather than a silent
+preference for `core/` — that state means the dashboard runs one copy while the tests measure the
+other. Assignments only count for constants, which is what lets `app.py` keep the memo-wrapping
+binding under the same name as the core function without shadowing it. Extraction through the AST
+was kept rather than switching to plain imports: each caller still supplies its own namespace, so a
+core function reaching for the database raises `NameError` at load. `tests/test_core_layering.py`
+(11 tests) enforces the same rule from the import side, with a per-module reason for every banned
+name.
+
+**The tripwire worked.** `test_app_still_defines_break_sessions_where_the_loader_expects_it`, added
+last session against exactly this move, failed as designed and was repointed — now asserting the
+function has *exactly one* home, `core/charts.py`.
+
+**Verified.** 549 pre-existing tests pass unchanged; 11 new; 560 total. Mutation-verified on a
+copy: **5 faults injected, 4 caught immediately, 1 survivor** (the memo seam) **which produced the
+560th test — then re-injected and caught.** Deliberately *not* verified: the dashboard has not been
+opened, so nothing here proves the page still renders. `app.py` parses and imports cleanly, and the
+extraction touched no page code, but that is an argument, not a check.
+
+---
+
 ## ADR-031 — DEBT-026 closed: the whole Mission Control pipeline is pinned, and what that surfaced
 **Date:** 2026-07-29 · **Status:** ACCEPTED · **Closes:** DEBT-026 · **Completes:** M2 task 2.0b
 

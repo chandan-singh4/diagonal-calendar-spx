@@ -53,6 +53,16 @@ import db
 import iv_engine
 import schwab_client
 
+# ─── core/ — pure calculation, extracted from this file in M2 (ADR-032) ───────
+# Imported by name rather than qualified (core_format._sparkline etc.) so the
+# extraction stayed a pure move with no call-site churn. The names keep their
+# leading underscores for the same reason; both are transitional — see ADR-032.
+from core.charts import _SESSION_RANGEBREAKS, _banded_ratio_traces, _break_sessions
+from core.format import _fmt_duration, _fmt_eta, _sparkline
+from core.ranking import _card_key, _rank_for_panel
+from core.scanner import _APPROACHING_LOW, _TSCAN_THRESHOLD, _scan_all_offsets
+from core.scanner import _compute_transform_scanner as _compute_transform_scanner_pure
+
 logger = logging.getLogger(__name__)
 
 # ─── Page config ──────────────────────────────────────────────────────────────
@@ -831,49 +841,9 @@ div[class*="st-key-chartcard_"]:hover {
 """, unsafe_allow_html=True)
 
 # ─── Constants ────────────────────────────────────────────────────────────────
-_SPARK_BARS = "▁▂▃▄▅▆▇█"
-
-# NOTE (2026-07-07): Holidays are deliberately NOT collapsed by rangebreaks.
-# Empirically isolated by toggling breaks one at a time: ANY per-date
-# rangebreak -- `values=[dates]` AND per-day `bounds=[date, date]` variants
-# were both tested -- corrupts Plotly's point positioning for all data after
-# the break (ghost/duplicate lines, out-of-order hover, dead tooltips) the
-# moment a holiday falls inside the viewed window (first hit: 2026-07-03).
-# Only the weekday-name and hour-pattern bounds below are safe. A holiday
-# therefore shows as one session-width of honest blank space, with the line
-# cleanly broken across it by _break_sessions().
-_SESSION_RANGEBREAKS = [
-    dict(bounds=["sat", "mon"]),
-    dict(bounds=[16, 9.5], pattern="hour"),
-]
-
-
-def _break_sessions(df: pd.DataFrame, ts_col: str = "timestamp",
-                     max_gap_minutes: int = 60) -> pd.DataFrame:
-    """Insert a NaN row wherever consecutive points gap more than
-    max_gap_minutes, so Plotly breaks the line instead of drawing a
-    connector across holidays/weekends/collector outages. Rangebreaks
-    (_SESSION_RANGEBREAKS) collapse the empty axis SPACE; this handles the
-    LINE across it -- they're complementary, not redundant."""
-    if df.empty or len(df) < 2 or ts_col not in df.columns:
-        return df
-    ts = df[ts_col]
-    gap = ts.diff() > pd.Timedelta(minutes=max_gap_minutes)
-    if not gap.any():
-        return df
-    breakers = df.loc[gap, [ts_col]].copy()
-    breakers[ts_col] = ts.shift(1)[gap] + pd.Timedelta(minutes=1)
-    return (pd.concat([df, breakers], ignore_index=True)
-            .sort_values(ts_col, kind="stable")
-            .reset_index(drop=True))
-
-_RATIO_THRESHOLDS = [0.70, 1.00, 1.30]
-_RATIO_BANDS = [
-    (1.30, float("inf"), "#1abc9c", "Strong backwardation (≥1.30)"),
-    (1.00, 1.30,         "#2ecc71", "Backwardation 1.00–1.30 (front rich)"),
-    (0.70, 1.00,         "#8e9bb5", "Contango 0.70–1.00 (normal)"),
-    (float("-inf"), 0.70, "#d98841", "Deep contango <0.70 (likely 0DTE/EOD)"),
-]
+# _SPARK_BARS, the session rangebreaks and _break_sessions, and the IV-ratio
+# bands now live in core/format.py and core/charts.py — imported at the top of
+# this file. Only page-bound state stays here.
 
 # ─── Chart Appearance — user-customizable line colors ─────────────────────────
 # Persisted to a small JSON file (same pattern as pinned_pairs.json — this is
@@ -1213,76 +1183,13 @@ def _backfill_eligible_history(front_raw: str, back_raw: str,
 # Helper — unicode sparkline
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _sparkline(values: list[float], width: int = 10) -> str:
-    if not values:
-        return "─"
-    step = max(1, len(values) // width)
-    sampled = values[::step][-width:]
-    mn, mx = min(sampled), max(sampled)
-    if mx == mn:
-        return _SPARK_BARS[3] * len(sampled)
-    return "".join(
-        _SPARK_BARS[int((v - mn) / (mx - mn) * 7)] for v in sampled
-    )
-
-
-def _fmt_duration(td) -> str:
-    """Format a pandas/python timedelta as '2h 12m' / '47m' / '8m'."""
-    if td is None or pd.isna(td):
-        return "—"
-    total_min = int(td.total_seconds() // 60)
-    if total_min < 1:
-        return "<1m"
-    h, m = divmod(total_min, 60)
-    return f"{h}h {m}m" if h else f"{m}m"
-
-
-def _fmt_eta(minutes: float | None) -> str:
-    if minutes is None:
-        return "—"
-    if minutes < 1:
-        return "<1 min"
-    if minutes < 60:
-        return f"~{int(round(minutes))} min"
-    h = minutes / 60.0
-    return f"~{h:.1f} hr"
+# _sparkline, _fmt_duration and _fmt_eta moved to core/format.py;
+# _banded_ratio_traces moved to core/charts.py (ADR-032).
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper — ATM IV history
 # ─────────────────────────────────────────────────────────────────────────────
-
-def _banded_ratio_traces(x, y) -> list:
-    """Build a continuous multicolor line for the IV ratio, colored by regime."""
-    xs, ys = list(x), list(y)
-    ax, ay = [], []
-    for i in range(len(xs)):
-        ax.append(xs[i])
-        ay.append(ys[i])
-        if i + 1 < len(xs):
-            y0, y1, x0, x1 = ys[i], ys[i + 1], xs[i], xs[i + 1]
-            if pd.isna(y0) or pd.isna(y1) or y0 == y1:
-                continue
-            crossed = [t for t in _RATIO_THRESHOLDS
-                       if (y0 < t < y1) or (y1 < t < y0)]
-            crossed.sort(reverse=(y0 > y1))
-            for t in crossed:
-                frac = (t - y0) / (y1 - y0)
-                ax.append(x0 + (x1 - x0) * frac)
-                ay.append(t)
-    traces = []
-    for low, high, color, label in _RATIO_BANDS:
-        yb = [v if (v is not None and not pd.isna(v) and low <= v <= high)
-              else None for v in ay]
-        if any(v is not None for v in yb):
-            traces.append(go.Scatter(
-                x=ax, y=yb, mode="lines", name=label,
-                line=dict(color=color, width=2), connectgaps=False,
-                legendgroup=label,
-                hovertemplate="R=%{y:.4f}<extra></extra>",
-            ))
-    return traces
-
 
 @st.cache_data(ttl=55, show_spinner=False, max_entries=48)
 def _load_atm_hist(expiry: str, days: int) -> pd.DataFrame:
@@ -1403,158 +1310,15 @@ def _load_diagonal_hist(front: str, back: str, call_s: float, put_s: float,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-@st.cache_data(ttl=120, show_spinner=False, max_entries=8)
-def _compute_transform_scanner(
-    _chain_df: pd.DataFrame,
-    spx_price: float,
-    snapshot_id: int,
-    put_offset: int = 0,
-    call_offset: int = 0,
-    max_rows: int = 50,
-) -> pd.DataFrame:
-    """
-    Batch version of Entry Analysis.
-
-    For every valid expiry pair (back_DTE > front_DTE) find the nearest
-    available strike to (ATM - put_offset) and (ATM + call_offset) that
-    exists in BOTH expiries simultaneously, then compute:
-        Diagonal Mark   = (back_call + back_put) - (front_call + front_put)
-        Transform Mark  = (back_call + back_put) - (front_wing_call + front_wing_put)
-        Transform Diff  = Transform Mark - Diagonal Mark
-
-    Cached on (snapshot_id, put_offset, call_offset, max_rows) — the leading
-    underscore on _chain_df tells Streamlit to skip hashing the DataFrame
-    itself (expensive) and rely on snapshot_id as the real cache key, since
-    snapshot_id fully determines chain_df's contents. Result only gets
-    recomputed when a new snapshot actually lands, not on every tab click,
-    widget interaction, or color-picker change.
-    """
-    import bisect
-
-    chain_df = _chain_df
-    if chain_df.empty:
-        return pd.DataFrame()
-
-    expiries   = sorted(chain_df["expiry"].unique())
-    dte_by_exp = chain_df.groupby("expiry")["dte"].first().to_dict()
-
-    _cache: dict[tuple, tuple] = {}
-    for (expiry, side), grp in chain_df.groupby(["expiry", "side"]):
-        pairs = []
-        for row in grp.itertuples(index=False):
-            m = getattr(row, "mark", None)
-            if m is None or (isinstance(m, float) and pd.isna(m)):
-                bid = getattr(row, "bid", None)
-                ask = getattr(row, "ask", None)
-                if bid is not None and ask is not None:
-                    try:
-                        m = (float(bid) + float(ask)) / 2.0
-                    except (TypeError, ValueError):
-                        m = None
-            if m is not None:
-                try:
-                    pairs.append((float(row.strike), float(m)))
-                except (TypeError, ValueError):
-                    pass
-        if pairs:
-            pairs.sort()
-            _cache[(expiry, side)] = (
-                [p[0] for p in pairs],
-                [p[1] for p in pairs],
-            )
-
-    def _exact_mark(expiry: str, target: float, side: str):
-        key = (expiry, side)
-        if key not in _cache:
-            return None
-        strikes, marks = _cache[key]
-        idx = bisect.bisect_left(strikes, target)
-        if idx < len(strikes) and strikes[idx] == target:
-            return marks[idx]
-        return None
-
-    def _nearest_common(exp1: str, exp2: str, target: float, side: str):
-        key1, key2 = (exp1, side), (exp2, side)
-        if key1 not in _cache or key2 not in _cache:
-            return None, None, None
-        common = sorted(set(_cache[key1][0]) & set(_cache[key2][0]))
-        if not common:
-            return None, None, None
-        idx = bisect.bisect_left(common, target)
-        if idx == 0:
-            actual = common[0]
-        elif idx == len(common):
-            actual = common[-1]
-        else:
-            b, a = common[idx - 1], common[idx]
-            actual = b if (target - b) <= (a - target) else a
-        m1 = _exact_mark(exp1, actual, side)
-        m2 = _exact_mark(exp2, actual, side)
-        return actual, m1, m2
-
-    atm_iv_cache: dict[str, float | None] = {
-        exp: iv_engine.atm_iv(chain_df, exp, spx_price)
-        for exp in expiries
-    }
-
-    atm_rounded  = round(spx_price / 5) * 5
-    target_put   = float(atm_rounded - put_offset)
-    target_call  = float(atm_rounded + call_offset)
-
-    results = []
-
-    for i, front in enumerate(expiries):
-        front_dte = int(dte_by_exp.get(front, 0))
-        if front_dte < 0:
-            continue
-        front_iv = atm_iv_cache.get(front)
-
-        for back in expiries[i + 1:]:
-            back_dte = int(dte_by_exp.get(back, 0))
-            if back_dte <= front_dte:
-                continue
-            back_iv  = atm_iv_cache.get(back)
-            iv_ratio = (
-                round(front_iv / back_iv, 4)
-                if (front_iv and back_iv and back_iv != 0) else None
-            )
-
-            put_s,  fp, bp = _nearest_common(front, back, target_put,  "PUT")
-            call_s, fc, bc = _nearest_common(front, back, target_call, "CALL")
-
-            if any(v is None for v in (put_s, call_s, fp, bp, fc, bc)):
-                continue
-
-            diag_mark = (bc + bp) - (fc + fp)
-
-            wc = _exact_mark(front, call_s + 5, "CALL")
-            wp = _exact_mark(front, put_s  - 5, "PUT")
-            if wc is None or wp is None:
-                continue
-
-            transform_mark = (bc + bp) - (wc + wp)
-            transform_diff = transform_mark - diag_mark
-
-            results.append({
-                "Front Expiry":   f"{front} ({front_dte}d)",
-                "Back Expiry":    f"{back} ({back_dte}d)",
-                "Put Strike":     int(put_s),
-                "Call Strike":    int(call_s),
-                "Diagonal Mark":  round(diag_mark,      2),
-                "Transform Mark": round(transform_mark, 2),
-                "Transform Diff": round(transform_diff, 2),
-                "IV Ratio":       iv_ratio,
-            })
-
-    if not results:
-        return pd.DataFrame()
-
-    return (
-        pd.DataFrame(results)
-        .sort_values("Transform Diff", ascending=False)
-        .head(max_rows)
-        .reset_index(drop=True)
-    )
+# The scanner itself is core/scanner.py. The memo stays HERE, because core/
+# cannot import streamlit — and it is load-bearing: this wrapper's saved
+# results are shared between the Scanner tab and the 21-offset Phase A sweep,
+# so every sweep after the first is nearly free. _scan_all_offsets is handed
+# this wrapper explicitly (see _compute_mc_core); left to its default it would
+# call the uncached function and recompute all 21 offsets on every rerun.
+_compute_transform_scanner = st.cache_data(
+    ttl=120, show_spinner=False, max_entries=8
+)(_compute_transform_scanner_pure)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1573,52 +1337,11 @@ def _compute_transform_scanner(
 # cost proportional to "things that matter," not "things that exist."
 # ═══════════════════════════════════════════════════════════════════════════════
 
-_TSCAN_THRESHOLD  = 5.0
-_APPROACHING_LOW  = 4.0   # gap in [4, 5) counts as "Approaching" (within 1 pt)
-_SWEEP_OFFSETS    = list(range(0, 105, 5))   # symmetric put/call offsets, every 5 pts to 100
-# Note: each offset is its own cache entry (keyed on snapshot_id + offset),
-# so widening this list only adds cost the FIRST time each offset is hit for
-# a given snapshot — it doesn't reintroduce per-interaction lag. Still bounded
-# to symmetric (put_offset == call_offset) sweeps; a genuinely asymmetric
-# combo (e.g. put -20 / call +45) can still fall outside this grid. The
-# Calendar Edge backfill below catches those the moment you investigate one
-# manually.
+# The Phase A thresholds (_TSCAN_THRESHOLD, _APPROACHING_LOW, _SWEEP_OFFSETS)
+# and _scan_all_offsets itself moved to core/scanner.py. _MC_HISTORY_CAP stays
+# here: it caps how much DATABASE work Phase B does, which is not a core/
+# concern and moves with the data layer.
 _MC_HISTORY_CAP   = 20    # max candidates per tier to run Phase B history on
-
-
-def _scan_all_offsets(
-    chain_df: pd.DataFrame,
-    spx_price: float,
-    snapshot_id: int,
-    offsets: list[int] = _SWEEP_OFFSETS,
-    max_rows_per_offset: int = 500,
-) -> pd.DataFrame:
-    """
-    Phase A — sweep a small set of symmetric put/call offsets across every
-    valid expiry pair so opportunities aren't missed just because they sit
-    outside whatever single offset is selected in the Scanner filter panel.
-
-    Returns the union of all combos found, deduped on
-    (Front Expiry, Back Expiry, Put Strike, Call Strike), sorted by
-    Transform Diff descending. Front/Back Expiry columns retain the
-    "YYYY-MM-DD (Nd)" format from _compute_transform_scanner — callers that
-    need the raw date use .split(" ")[0].
-    """
-    frames = []
-    for o in offsets:
-        df = _compute_transform_scanner(
-            _chain_df=chain_df, spx_price=spx_price, snapshot_id=snapshot_id,
-            put_offset=o, call_offset=o, max_rows=max_rows_per_offset,
-        )
-        if not df.empty:
-            frames.append(df)
-    if not frames:
-        return pd.DataFrame()
-    combined = pd.concat(frames, ignore_index=True)
-    combined = combined.drop_duplicates(
-        subset=["Front Expiry", "Back Expiry", "Put Strike", "Call Strike"]
-    )
-    return combined.sort_values("Transform Diff", ascending=False).reset_index(drop=True)
 
 
 @st.cache_data(ttl=60, show_spinner=False, max_entries=64)
@@ -1698,37 +1421,7 @@ def _candidate_signals(front_raw: str, back_raw: str,
     return dict(duration=duration, eta_minutes=eta_minutes, spark=spark, trend_up=trend_up)
 
 
-def _rank_for_panel(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Tiered ranking for the Mission Control panel — deliberately NOT a single
-    blended score (composite 0-100 scores were already rejected for this
-    project; this stays as a transparent, inspectable multi-key sort):
-
-      Tier 1 — asymmetric strikes (Put Strike != Call Strike) bubble above
-               symmetric/ATM ones. An offset=0 sweep produces put==call,
-               which is a degenerate straddle, not this trader's actual
-               strangle-diagonal structure — those aren't false positives,
-               just real combos that don't represent a tradeable setup here.
-      Tier 2 — Transform Diff (the gap), descending — the core economic
-               value of the opportunity.
-
-    Duration Active and Trend stay visible on every card as supporting
-    context rather than folded into this sort, so the trader can apply
-    their own judgment rather than trust a hidden weighting.
-    """
-    if df.empty:
-        return df
-    d = df.copy()
-    d["_asymmetric"] = d["Put Strike"] != d["Call Strike"]
-    return (
-        d.sort_values(["_asymmetric", "Transform Diff"], ascending=[False, False])
-        .drop(columns="_asymmetric")
-        .reset_index(drop=True)
-    )
-
-
-def _card_key(card: dict) -> str:
-    return f"{card['front_raw']}|{card['back_raw']}|{int(card['put_strike'])}|{int(card['call_strike'])}"
+# _rank_for_panel and _card_key moved to core/ranking.py (ADR-032).
 
 
 @st.cache_data(ttl=120, show_spinner="Scanning transform opportunities…", max_entries=3)
@@ -1749,7 +1442,11 @@ def _compute_mc_core(_chain_df: pd.DataFrame, spx_price: float,
     NEW snapshot rather than on every rerun.
     """
     chain_df = _chain_df
-    all_combos = _scan_all_offsets(chain_df, spx_price, snapshot_id)
+    # compute= is not optional here in production: it hands the sweep the
+    # memoised scanner so the 21 offsets share saved results with the Scanner
+    # tab. Without it every rerun recomputes all 21. See core/scanner.py.
+    all_combos = _scan_all_offsets(chain_df, spx_price, snapshot_id,
+                                   compute=_compute_transform_scanner)
     if all_combos.empty:
         return dict(approaching_cards=[], likely_next=[], n_approaching=0,
                      non_atm_current=pd.DataFrame(), registry={})
