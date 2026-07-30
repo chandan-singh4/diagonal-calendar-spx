@@ -905,10 +905,6 @@ def _load_entry_locks() -> dict:
     return entry_locks.load(config.STATE_DIR)
 
 
-def _save_entry_locks(locks: dict) -> None:
-    entry_locks.save(config.STATE_DIR, locks)
-
-
 def _create_entry_lock(front_expiry: str, back_expiry: str, put_strike: float,
                         call_strike: float, diagonal_mark: float, mode: str) -> dict:
     return entry_locks.create(
