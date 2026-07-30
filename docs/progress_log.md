@@ -60,8 +60,19 @@ skip the lock and the 1.57 GB `data/` directory (which also holds `token.json`).
 copy: **5 faults injected, 4 caught, 1 survivor which produced the 560th test, then re-injected and
 caught.** The survivor is described above.
 
-**Not verified: the dashboard was not opened.** Nothing here proves the page still renders. `app.py`
-parses and imports cleanly and no page code was touched, but that is an argument, not a check.
+**The dashboard was then opened, and it renders.** Committed first (`e6ce849`, branch
+`m2-core-extraction`, not pushed; the pre-commit hook ran all 560 tests itself), then verified two
+ways. `AppTest` executes `app.py` the way Streamlit does — a plain HTTP fetch proves nothing, since
+Streamlit only runs the script when a client connects. **All six tabs execute with no exception and
+no error on the page.** Running every tab mattered: the tabs are custom buttons rather than
+`st.tabs`, so a single run only renders the active one, and the extracted chart and formatting code
+lives in the tab bodies. The real server was then started and serves (health 200).
+
+**Found while doing that, unrelated to the extraction: two Streamlit APIs are past their removal
+dates.** `use_container_width` (33 uses) was due for removal after 2025-12-31 and
+`st.components.v1.html` (1 use) after 2026-06-01. Both dates have passed; the dashboard works only
+because the compatibility shims have outlived their notice, which means **the Streamlit version is
+now effectively pinned whether or not anyone decided that.** Opened as DEBT-029.
 
 ### Remains
 
