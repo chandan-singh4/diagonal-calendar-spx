@@ -3,7 +3,67 @@
 Newest first. Every session appends an entry: what was completed, what was discovered,
 what broke, and what remains.
 
----
+----
+
+## 2026-07-30 (session 9, continued) — clearing the debt the safe moves left behind
+
+### Completed
+
+**Three leftover items cleared, all created deliberately by the way the tabs were moved.** Each one
+existed because moving code and tidying it at the same time destroys the only evidence that the move
+changed nothing. That evidence has now been collected, so the tidying is due.
+
+**The labels match the building again (DEBT-028).** Fourteen names in the calculation folder carried
+a mark meaning "internal, don't call from outside" while being called from outside constantly — 168
+references corrected. The 63 translation lines added so each tab could be moved without altering a
+character are gone; the tabs read their inputs directly. And a small four-line calculation that had
+been stranded in the big file finally moved, **with the six tests it never had** — it decides which
+strike each dropdown lands on, so it decides what position a fresh page shows.
+
+**Times stopped losing their labels too early (DEBT-030).** The part that fetches data was handing
+out a bare "14:30" with nothing saying which city, because that is what the charts wanted. It now
+hands over the full unambiguous time, and each chart strips it at the last moment. Nothing on screen
+moved — that was checked, tab by tab.
+
+### Found
+
+**A month-old accident, nearly made permanent (BUG-019).** One item was recorded as dead code to
+delete. Reading its history first showed it is not dead: it is a **feature that was accidentally
+switched off on 29 June**. The commit that did it removed two of six summary cards, carefully
+re-fitted the layout to the four that remained, *and* deleted the line that puts them on screen. You
+do not carefully re-fit a layout for four cards in the same breath as deleting all of them. So the
+Scanner has been missing four figures for a month while the calculations behind them kept running.
+**Deleting was the option nobody could spot by looking at the screen** — it is left for Chandan to
+decide.
+
+**A hidden dependency, found by breaking it.** Two different pieces of code happened to share a
+name, and one of the test tools silently relied on that coincidence. Renaming one broke seventeen
+checks at once. The names match again, on purpose this time, and the reason is written down.
+
+### Mistakes in my own work
+
+**A tab broke and 623 checks stayed green.** One file used a setting it had never imported. Every
+check passed; the tab raised the moment it was opened. Caught by the script that actually opens each
+tab — which exists because this exact thing happened once before, in almost the same words.
+
+**A test too weak to fail, for the third time.** The check written to protect the trickiest part of
+the timezone change could not detect the fault it was written for: its example data sat inside a
+single day, where the right and wrong answers agree. Rewritten to straddle the boundary deliberately.
+**Two rewrites of a bulk edit were also wrong** — one turned a function's argument name into a broken
+assignment, the other measured character positions in the wrong units. Both failed loudly and
+immediately rather than quietly; the first refused to parse, the second tripped a guard before
+anything was written.
+
+**A difference that was not one.** A count on one tab read 126 before and 125 after. The cause was
+the clock, not the change — that view asks for "the last 24 hours", so rows drop out as time passes.
+Running the comparison in the reverse order produced identical output, which is what separated the
+two.
+
+**623 checks, 10 new.** Every new one proved by deliberately breaking the code on a copy: **6 faults
+injected, 6 caught** — five of them before the weak test above was strengthened, which is how the
+sixth was found.
+
+--
 
 ## 2026-07-30 (session 9, continued) — step 2.4 finished: all six tabs out
 

@@ -1,26 +1,20 @@
 # plan.md — Current Implementation Plan
 
-**Last updated:** 2026-07-29
-**Current milestone:** M2 — Architecture Refactor *(pre-work COMPLETE; steps 1–2 of 5 done — `core/` and `dataaccess/` extracted)*
-**Status:** M0 ✅ and M1 ✅ both COMPLETE and merged to `main`. **549 tests**, run automatically on
-every commit. **80% coverage of non-UI code** against a ~70% target; `iv_engine`, `db.py`,
-`schwab_client.py` and `config.py` at 100%. Every module was mutation-verified rather than
-assumed: **56 injected faults across M1, 54 caught, 2 proven equivalent** (plus 7 in the
-2026-07-28 `check_db.py` work — 6 caught, 1 proven equivalent, ADR-027 — 9 in the
-2026-07-29 display-layer pinning, 9 caught, ADR-029 — and 43 across the Mission Control pinning,
-40 caught, 3 proven equivalent, ADR-030/031). **M2's pre-work is COMPLETE and DEBT-026 is
-closed.** 88 characterization tests now cover what reaches the screen: card ordering, chart
-geometry, the on-card formatters, the Mission Control pipeline end to end, the persisted
-eligibility registry, and all nine query wrappers. A refactor that reorders the opportunity
-cards, mis-draws the IV-ratio line, discards the asymmetric combos before ranking, or shifts
-every chart by four hours now fails a test instead of reaching the screen. **Step 1 of the
-decomposition is now done:** `core/` exists — 4 modules, 8 functions and 6 constants moved out
-of `app.py` with the 549 tests unchanged and still passing, plus new ones enforcing that `core/`
-never imports the database, the config or Streamlit and that the memo seam stays wired.
-**Step 2 followed:** `dataaccess/` now holds the nine database reads, each taking the database
-location as an argument rather than assuming it — which closes the half of DEBT-027 that made
-every Mission Control test overwrite a global to get near the code. **`app.py`: 4,283 → 3,936
-lines** across both steps. **564 tests. Steps 3–5 are the remaining work.**
+**Last updated:** 2026-07-30
+**Current milestone:** M2 — Architecture Refactor *(pre-work COMPLETE; steps 1–4 of 5 done — `core/`, `dataaccess/`, `state/` and `views/` all extracted)*
+**Status:** M0 ✅ and M1 ✅ COMPLETE and merged to `main`. **623 tests**, run automatically on every
+commit. **80% coverage of non-UI code** against a ~70% target; `iv_engine`, `db.py`,
+`schwab_client.py` and `config.py` at 100%. Every module mutation-verified rather than assumed —
+**56 injected across M1, 54 caught, 2 proven equivalent**, plus 7 in the `check_db.py` work, 9 in
+the display pinning (ADR-029), 43 across the Mission Control pinning (ADR-030/031), 7 + 10 across
+the `views/` extraction (ADR-036/037) and 6 clearing the debt behind it (ADR-038).
+**M2's pre-work is COMPLETE and DEBT-026 is closed.** 88 characterization tests cover what reaches
+the screen. **Steps 2.1–2.4 are done: `app.py` is 4,283 → 2,480 lines,** down 42% and no longer the
+largest file in the repo. All six tabs live in `views/`, and every one of the six bodies was proved
+byte-identical to the version it replaced before anything was renamed. **The debt those safe moves
+deliberately left behind is now cleared too** — DEBT-028, DEBT-030 and DEBT-032, all closed
+2026-07-30 (ADR-038). **Step 2.5 is the remaining work**, targeting `app.py` under 400 lines; of
+what is left, 757 lines are the CSS block and 115 are `_render_mc_section`.
 **Reference:** [`AUDIT_2026-07-25.md`](AUDIT_2026-07-25.md) §10 for the full M0–M8 roadmap —
 a **frozen snapshot**, superseded by this file wherever they differ (see the banner at its head,
 and ADR-028 for the two M1 tasks settled differently).
@@ -164,6 +158,15 @@ appearance is the part that cannot be tested and so should be the thinnest thing
 | 2.5 | `app.py` — page config, sidebar, tab dispatch | ☐ | Target: under 400 lines. |
 
 Steps 2.1–2.3 carry the value. Step 2.4 looks like the work and is the least interesting part of it.
+
+**Debt cleared straight after 2.4, before starting 2.5** (ADR-038). Three rows that had been waiting
+on the decomposition, all closed 2026-07-30. **DEBT-028:** `core/`'s 14 public names lost their
+leading underscores, the 63 `ctx.` rebind lines that made each tab move provable were removed, and
+`nearest_idx` finally moved to `core/` with the six tests the backlog said it lacked. **DEBT-030:**
+`dataaccess/` now returns zoned UTC and `core.charts.to_display_time` converts at draw time — the
+tripwire tests from ADR-034 failed on cue, which is what forced every chart site to be handled in
+the same change. **DEBT-032:** half was dead code and was deleted; the other half turned out not to
+be dead at all and is now **BUG-019**.
 
 **The before/after check that 2.4 actually rests on.** `scripts/render_check.py` proves a tab does
 not raise; it counts elements, and a count cannot see a lost decimal or a reordered panel. So each

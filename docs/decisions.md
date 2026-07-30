@@ -7,6 +7,84 @@ it was recorded here.
 
 ---
 
+## ADR-038 — Clearing the debris the safe moves left: names, scaffolding, and the clock
+**Date:** 2026-07-30 · **Status:** ACCEPTED · **Closes DEBT-028, DEBT-030, DEBT-032** · **Opens BUG-019**
+
+Three rows that existed because M2's moves were done in a way that could be *proved*. Each was
+created or preserved on purpose; each is now due, and none could have been done earlier without
+destroying the evidence that made the moves safe.
+
+**DEBT-028 — the labels now match the building.** 14 of `core/`'s 16 module-level names dropped
+their leading underscore across 168 references. The convention means "internal, do not call from
+outside", and every one of these is called from outside. `_RATIO_BANDS` and `_RATIO_THRESHOLDS`
+stay private: only `charts.py` calls them, and `tests/app_loader.py` names them because it
+*rebuilds the module namespace* to exec a function in a synthetic scope — simulating being inside
+the module, not consuming an API.
+
+**A hidden coupling, found by breaking it.** app.py's memoised wrapper and core's pure function
+were both called `_compute_transform_scanner`. Renaming only core's broke 17 tests: `app_loader`
+execs app.py's source in a namespace built from `core/`, so it had silently depended on the two
+names being identical. They match again deliberately, and the dependency is now written down.
+
+**The 63 rebind lines are gone,** and with them the byte-identical property. That was the whole
+point of collecting it first: move, prove, *then* rename. **The first attempt was wrong and Python
+rejected it** — a ``-anchored regex turned `spx_price=spx_price` into
+`ctx.spx_price = ctx.spx_price`, because a keyword argument's NAME looks exactly like a variable.
+It failed to parse, so it failed loudly; the same class of mistake on a name that stayed
+syntactically valid would not have. Redone against the parse tree, rewriting only `ast.Name` nodes
+in Load context. **The second attempt was also wrong,** and an assertion caught it before anything
+was written: `ast` reports column offsets in UTF-8 *bytes*, and these files are full of
+box-drawing rules.
+
+**DEBT-030 — the read layer stops deciding what the charts see.** `dataaccess/` returned a bare
+"14:30" with nothing saying where. It now returns zoned UTC, and `core.charts.to_display_time`
+strips the zone at the point of drawing, which is where Plotly's rangebreaks requirement actually
+lives. Applied at every consumer that previously received naive Eastern — **including the two that
+draw no time axis**, because converting them too costs nothing and makes "nothing downstream
+changed" true rather than merely likely.
+
+**The trap, caught before writing.** `load_contract_hist(days=1)` keeps the last calendar date, and
+that date is a *trading-session* question. A 20:05 New York row is already tomorrow in UTC, so
+letting the filter follow the column would split one evening session in two and keep only its tail.
+The filter converts locally now and does not write it back.
+
+**ADR-034's tripwire fired exactly as designed** and is the reason this was survivable. Four
+assertions failed the moment the fix landed; all four were updated deliberately, and the protection
+moved one step down the pipeline rather than being removed — *what a chart receives must still be
+New York wall-clock*. A new structural guard covers the failure mode that has no symptom at all:
+miss one chart site and its x-axis moves four hours, every session break lands wrong, and the
+picture still looks entirely plausible. No golden test can see that (the fixtures would simply be
+recaptured against the shifted values) and neither can the render comparison, since `AppTest`
+cannot read inside a chart.
+
+**DEBT-032 — the row was half wrong, and the wrong half mattered more.** It recorded two pieces of
+dead code. `_save_entry_locks` was dead and is deleted. `kpi_html` was **not dead — it is a dropped
+feature**, and following the row as written would have made a month-old accident permanent. Commit
+`b782ec3` removed two of six KPI cards, re-fitted the grid to `repeat(4,1fr)` for the four
+remaining, *and* deleted the line that renders them. Nobody re-fits a grid to four columns in the
+same commit in which they mean to delete the row. The Scanner has been missing four summary figures
+since 29 June. Now **BUG-019**, and the decision — restore or delete — is Chandan's, because
+deleting is the option nobody can spot by looking at the screen.
+
+**Two of my own mistakes, neither caught by the suite.** `views/strike.py` used
+`config.DISPLAY_TIMEZONE` without importing `config`: 623 tests passed and the tab raised on load,
+found by `render_check.py` — the ADR-034 scenario repeated almost to the letter. And the first
+today-filter test wrote rows five minutes apart at whatever time the suite ran, which sit on one UTC
+date almost always, so the broken and correct filters agreed and **the mutation survived**. Third
+time an example has been too simple to exhibit the fault it was written for (ADR-029, ADR-030, this).
+
+**A measurement caveat worth keeping.** The before/after render comparison showed the Calendar Edge
+observation count dropping 126 → 125. That is not the change: `days=1` is a **rolling 24-hour
+window**, not a calendar day, so rows age out between two runs minutes apart. Re-running the pair in
+the reverse order produced identical output, which is what separates the clock from the code.
+
+**Verified.** 623 tests (10 new). Mutation-verified on an isolated copy: 6 injected, 6 caught — 5
+before the today-filter test was strengthened, which is how the sixth was found. Lint back to
+baseline 93 after each step. All six tabs render, and all six produce identical rendered text across
+both DEBT-028 and DEBT-030.
+
+---
+
 ## ADR-037 — Finishing `views/`: what a view is allowed to be handed, and the one import that survived
 **Date:** 2026-07-30 · **Status:** ACCEPTED · **Completes:** M2 task 2.4 · **Opens DEBT-032**
 
