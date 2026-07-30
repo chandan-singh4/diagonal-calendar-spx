@@ -30,6 +30,11 @@ class ViewContext:
     # ── The snapshot being displayed ──────────────────────────────────────
     snapshot_id: int
     spx_price: float
+    session_date: str
+    # The whole option chain for this snapshot. Handed over rather than
+    # re-read: it is one DataFrame that app.py has already loaded through a
+    # memo, and every tab that needs it needs the SAME one.
+    chain_df: pd.DataFrame
 
     # ── The current selection, from the Position Controls bar ─────────────
     front_expiry: str
@@ -67,3 +72,55 @@ class ViewContext:
     # every rerun with no visible symptom.
     load_atm_hist_fb: Callable[..., pd.DataFrame]
     load_diagonal_hist: Callable[..., pd.DataFrame]
+    load_latest_atm_iv: Callable[..., list]
+    load_contract_hist: Callable[..., pd.DataFrame]
+    load_transform_marks: Callable[..., pd.DataFrame]
+    # Not a database read but the same seam and the same hazard: this is the
+    # MEMOISED scanner. core/scanner.py holds the pure one, and calling that
+    # by mistake returns identical rows while re-running 21 offset sweeps on
+    # every rerun (ADR-032).
+    compute_transform_scanner: Callable[..., pd.DataFrame]
+
+    # ── Mission Control, computed once per script run ─────────────────────
+    # `mc` is the dict _run_mission_control returns. It is built in app.py
+    # regardless of which tab is active, because the header strip needs it
+    # too, so it is a result to pass on rather than work for a view to do.
+    mc: dict
+    sc_max_rows: int
+
+    # ── Injected renderer ─────────────────────────────────────────────────
+    # The Mission Control card renderer, still defined in app.py. It reads
+    # two of the prelude's globals (`snap_ts_str`, `spx_price`), so relocating
+    # it into views/scanner.py means turning those into parameters — a
+    # signature change, which is the *rename* phase, not the move phase, and
+    # deserves its own step where the call sites can be checked (the lesson
+    # of ADR-034). Injected here so this move stays a move. It is 115 lines
+    # of app.py that step 2.5 must still deal with to reach its 400-line
+    # target.
+    render_mc_section: Callable[..., None]
+
+    # ── Entry-lock and registry actions, injected ─────────────────────────
+    # These are app.py's thin wrappers over state/, and each one binds
+    # config.STATE_DIR. Injecting them is what keeps views/ free of BOTH
+    # config and state: a view that imported state.entry_locks would still
+    # need to be told which directory, and reaching for config.STATE_DIR to
+    # answer that is the hidden global the state/ layer rule was written to
+    # prevent (DEBT-011, ADR-035).
+    #
+    # These WRITE — locks are created and cleared, the registry is
+    # backfilled. That is the one place a view does more than draw, and it
+    # is deliberate: the writes are user actions behind buttons, not a side
+    # effect of rendering.
+    entry_lock_key: Callable[..., str]
+    create_entry_lock: Callable[..., None]
+    clear_entry_lock: Callable[..., None]
+    get_entry_lock: Callable[..., dict | None]
+    render_all_locks_popover: Callable[..., None]
+    backfill_eligible_history: Callable[..., None]
+
+    # ── User settings that live in a JSON sidecar ─────────────────────────
+    # Passed as a plain dict for the same reason as the loaders: the file is
+    # read and written by app.py through state/, and a view that reached for
+    # it directly would need config.STATE_DIR — the hidden global that
+    # DEBT-011 and the state/ layer rule exist to prevent.
+    chart_colors: dict[str, str]

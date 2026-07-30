@@ -7,6 +7,63 @@ it was recorded here.
 
 ---
 
+## ADR-037 — Finishing `views/`: what a view is allowed to be handed, and the one import that survived
+**Date:** 2026-07-30 · **Status:** ACCEPTED · **Completes:** M2 task 2.4 · **Opens DEBT-032**
+
+Extends ADR-036, which set the method on the first three tabs. The last three — Strike Detail,
+Scanner and Calendar Edge — raised three questions the easy tabs never did.
+
+**1. Helpers the tab calls: move, or inject?** The rule that fell out is *what does it touch?*
+`_render_note` touches nothing but `st` — no file, no directory, no configuration — and the edge tab
+is its only caller, so it moved. Everything else app.py hands the edge tab is a thin wrapper that
+binds `config.STATE_DIR` — the entry-lock actions, the registry backfill, the locks popover — and
+those are **injected as callables**. The alternative, importing `state.entry_locks` inside the view,
+only relocates the problem: the view would then need to know which directory, and reaching for
+`config.STATE_DIR` to answer that is the exact hidden global ADR-035 removed.
+
+**This is where a view stops being read-only, and it is deliberate.** The edge tab creates locks,
+clears them and backfills the registry. Those are user actions behind buttons, not a side effect of
+drawing, and routing them through injected callables keeps the writing visible in the context's type
+list rather than buried in a chart function.
+
+**2. `_render_mc_section` is injected, not moved,** and that is a compromise worth naming. It is 115
+lines of card renderer used only by the Scanner tab, so it plainly belongs in `views/scanner.py`. It
+also reads `snap_ts_str` and `spx_price` straight from app.py's namespace, so moving it means turning
+two globals into parameters — a signature change. **ADR-034 is the record of what a missed call site
+costs:** 569 tests green and every tab raising `TypeError`. So it stays, injected, and step 2.5 must
+move it with its call sites checked. app.py cannot reach its 400-line target without doing so.
+
+**3. One view imports `config`, and it is fenced rather than forbidden.** `views/edge.py` needs
+`config.DISPLAY_TIMEZONE` on a single line. Rebinding it through the context would have meant editing
+the moved body — the one thing this step does not do. So the import stays, and
+`test_a_view_never_reaches_for_the_configured_database` names the two attributes that would make it
+dangerous: `DB_PATH` and `STATE_DIR`. A view that can find the database can query it, and the memo it
+would bypass has no symptom when it goes missing. Same shape as the rule `dataaccess/` already has.
+
+**A copy left behind, found and then guarded against.** `_render_note` was moved into `views/edge.py`
+and the original stayed in `app.py`, called by nothing. Two definitions of one function is worse than
+either mistake alone — the page runs one, anything reading app.py's source measures the other, and
+nothing raises. It is precisely the case
+`test_break_sessions_is_defined_once_where_the_loader_expects_it` was written for in ADR-032, so the
+guard is now generalised: `test_no_view_helper_is_also_left_behind_in_app`.
+
+**The extraction made a linter useful.** Lint finished +1 against baseline, and the one addition is
+`kpi_html` in `views/scanner.py` — dead since long before this step, and **unreportable until now**,
+because an unused module-level variable is not an error while an unused local is. The only thing that
+changed is that the code acquired a boundary. Six unused imports in app.py were removed as part of
+the same accounting; both dead pieces that remain are DEBT-032, left alone because deleting a line
+inside a body ends the byte-identical property that this step's evidence rests on.
+
+**Verified.** 613 tests, 22 new. Mutation-verified on an isolated copy: **10 injected, 10 caught** —
+including a view reading `config.DB_PATH`, a helper left behind as a copy, a dropped `_break_sessions`
+call and a dropped dispatch. All six tabs render, and all six produce **byte-identical rendered text**
+against a worktree of the previous commit on the same live database. `test_chart_breaks.py` was
+re-pointed a second time, again on its own anchor; its 4,000-character window was deliberately **kept**
+rather than widened to the whole module, since widening it would make every assertion in it easier to
+satisfy, and a re-point is not the place to loosen a check.
+
+---
+
 ## ADR-036 — `views/` extracted as *provable* moves, because this layer cannot be tested
 **Date:** 2026-07-30 · **Status:** ACCEPTED · **Advances:** M2 task 2.4 (3 of 6 tabs) · **Opens DEBT-031, BUG-018**
 

@@ -141,8 +141,22 @@ def test_the_gap_threshold_is_configurable(break_sessions):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _selected_strike_source() -> str:
-    """The source of the Selected-Strike IV chart block."""
-    src = APP_PATH.read_text(encoding="utf-8")
+    """The source of the Selected-Strike IV chart block.
+
+    REPOINTED in M2 step 2.4 — from app.py to views/strike.py. The docstring
+    below said extracting this block was M2 work; it has now happened, and
+    these tests failed on the missing anchor, which is what the anchor is
+    for.
+
+    The 4,000-character window is KEPT rather than widened to the whole
+    module, even though the module is now just this one tab. Widening it
+    would make every assertion here easier to satisfy — `in src` searches a
+    larger haystack, and the ordering test's `.index()` could match a
+    different occurrence — and a re-point is not the place to loosen a
+    check. All four anchors were verified unique in the new file, and absent
+    from app.py, before this was changed.
+    """
+    src = (APP_PATH.parent / "views" / "strike.py").read_text(encoding="utf-8")
     start = src.index('<span class="sh-ttl">Selected-Strike IV</span>')
     return src[start:start + 4000]
 

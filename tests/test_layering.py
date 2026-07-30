@@ -262,6 +262,55 @@ def test_a_view_draws_nothing_at_import_time(path: Path):
     )
 
 
+@pytest.mark.parametrize("path", view_modules(), ids=_rel)
+def test_a_view_never_reaches_for_the_configured_database(path: Path):
+    """`config` is allowed in views/, but only just.
+
+    views/edge.py imports it for one line — `config.DISPLAY_TIMEZONE`, a
+    genuine display setting. Rebinding it through the context would have
+    meant editing the moved body, and not editing the body is the whole
+    basis of step 2.4. So the import stays and the dangerous attribute is
+    named instead: the same rule dataaccess/ has, for the same reason. A
+    view that can find the database is a view that can query it, and the
+    memo it would bypass is invisible when it goes missing.
+    """
+    hits = [
+        node for node in ast.walk(_tree(path))
+        if isinstance(node, ast.Attribute) and node.attr in {"DB_PATH", "STATE_DIR"}
+        and isinstance(node.value, ast.Name) and node.value.id == "config"
+    ]
+    assert not hits, (
+        f"{_rel(path)} reads config.{hits[0].attr}. A view is handed its data "
+        f"and its files; knowing where they live is how it starts fetching "
+        f"them itself."
+    )
+
+
+def test_no_view_helper_is_also_left_behind_in_app():
+    """The failure mode is a COPY, not a move.
+
+    Found for real during step 2.4: `_render_note` was moved into
+    views/edge.py and the original stayed in app.py, called by nothing. Two
+    definitions of one function is the worst of both — the page runs one,
+    anything reading app.py's source measures the other, and neither is
+    wrong enough to raise. It is the same hazard
+    test_break_sessions_is_defined_once_where_the_loader_expects_it guards
+    for core/, generalised to every view.
+    """
+    app_tree = ast.parse(APP_PATH.read_text(encoding="utf-8"), filename=str(APP_PATH))
+    in_app = {n.name for n in app_tree.body if isinstance(n, ast.FunctionDef)}
+
+    duplicated = []
+    for path in view_modules():
+        for node in _tree(path).body:
+            if isinstance(node, ast.FunctionDef) and node.name in in_app:
+                duplicated.append(f"{node.name} — in app.py AND {_rel(path)}")
+    assert not duplicated, (
+        "these are defined twice; the extraction copied instead of moving:\n  "
+        + "\n  ".join(duplicated)
+    )
+
+
 def test_the_extracted_tabs_are_dispatched_from_app():
     """app.py must actually call each view — an extracted tab that nothing
     invokes is a blank page, and no other test here would notice."""

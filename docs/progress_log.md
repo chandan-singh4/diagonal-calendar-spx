@@ -5,6 +5,50 @@ what broke, and what remains.
 
 ---
 
+## 2026-07-30 (session 9, continued) — step 2.4 finished: all six tabs out
+
+### Completed
+
+**The screen is no longer one file.** All six tabs now live in their own files. `app.py` has gone
+from **4,283 lines to 2,486** over the milestone — the first time it has ever shrunk by more than a
+rounding error. Calendar Edge alone was 747 lines, more than the other two remaining tabs together.
+
+**Nothing on the screen changed, and this time that is measured rather than hoped.** Every one of
+the six moved blocks is **character-for-character identical** to the version it replaced, checked by
+script against the commit where each was still in the old file. All six tabs were also run before
+and after against the same live database, and every word each one displays is identical.
+
+**Why nothing was tidied on the way past.** Three times the move went straight over something worth
+fixing — a threshold written out four times, a misleading message, a dead line of code. None were
+touched. The character-for-character comparison is the only real evidence this step has, and it
+survives exactly as long as nobody edits a body while moving it. They are all written down instead.
+
+### Found
+
+**A copy left behind — my own mistake, caught and then made impossible.** One small helper was
+*copied* into its new home rather than moved, leaving two definitions of the same function. That is
+worse than either forgetting or duplicating alone: the page runs one copy, anything inspecting the
+old file sees the other, and nothing breaks loudly enough to notice. Found by listing what the old
+file still defined but no longer used. There is now a check that fails if it ever happens again.
+
+**Splitting the file made a checker useful.** One dead line has been dead for weeks and no tool could
+say so, because an unused item in a big script is not an error while an unused item *inside a
+function* is. Nothing about the line changed — it simply now lives somewhere with a boundary. A small
+result, and the clearest single argument for the whole milestone. Recorded as DEBT-032, along with a
+second dead function found the same way.
+
+### Remaining in the old file
+
+A 115-line block that draws the opportunity cards is still there. It reads two values directly from
+the surrounding file, so moving it means changing what it asks for — and the last time a change like
+that was made, every tab broke while all 569 checks stayed green. It moves in the next step, with its
+callers checked.
+
+**613 checks, all passing.** 22 new, every one proved by deliberately breaking the code on a copy:
+**10 faults injected, 10 caught.**
+
+---
+
 ## 2026-07-30 (session 9) — step 2.4 begins: three tabs out, and two faults found by reading
 
 ### Completed
