@@ -31,10 +31,8 @@ IV SCALE NOTE
   Multiply by 100 at every data load boundary — nowhere else.
 """
 
-import json
 import logging
 import sys
-import uuid
 from datetime import UTC, datetime
 from datetime import time as dt_time
 from pathlib import Path
@@ -63,6 +61,7 @@ from core.ranking import _card_key, _rank_for_panel
 from core.scanner import _APPROACHING_LOW, _TSCAN_THRESHOLD, _scan_all_offsets
 from core.scanner import _compute_transform_scanner as _compute_transform_scanner_pure
 from dataaccess import queries
+from state import chart_colors, eligible_history, entry_locks
 
 logger = logging.getLogger(__name__)
 
@@ -855,34 +854,18 @@ div[class*="st-key-chartcard_"]:hover {
 # DEFAULT_CHART_COLORS with a (label, hex) tuple. The sidebar picker and the
 # reset button both iterate this dict automatically — no other code changes
 # needed beyond using CHART_COLORS["your_key"] in the relevant trace.
-_CHART_COLORS_PATH = Path("chart_colors.json")
-
-DEFAULT_CHART_COLORS: dict[str, tuple[str, str]] = {
-    "diagonal_mark":  ("Diagonal Mark",        "#5b9cff"),
-    "transform_mark": ("Transform Order Mark", "#f0a429"),
-    "front_iv":       ("Front IV %",           "#10d4a3"),
-    "back_iv":        ("Back IV %",            "#5b9cff"),
-}
+# The colours themselves and their persistence are state/chart_colors.py.
+# config.STATE_DIR is absolute, so these no longer depend on where the dashboard
+# was launched from (DEBT-011, ADR-035).
+DEFAULT_CHART_COLORS = chart_colors.DEFAULT_CHART_COLORS
 
 
 def _load_chart_colors() -> dict[str, str]:
-    """Load saved colors, filling in any missing/new keys with defaults."""
-    defaults = {k: v[1] for k, v in DEFAULT_CHART_COLORS.items()}
-    if _CHART_COLORS_PATH.exists():
-        try:
-            saved = json.loads(_CHART_COLORS_PATH.read_text())
-            if isinstance(saved, dict):
-                defaults.update({k: v for k, v in saved.items() if k in defaults})
-        except (json.JSONDecodeError, OSError):
-            pass
-    return defaults
+    return chart_colors.load(config.STATE_DIR)
 
 
 def _save_chart_colors(colors: dict[str, str]) -> None:
-    try:
-        _CHART_COLORS_PATH.write_text(json.dumps(colors, indent=2))
-    except OSError:
-        pass
+    chart_colors.save(config.STATE_DIR, colors)
 
 
 # ─── Entry Locks — post-entry position monitoring ─────────────────────────────
@@ -902,69 +885,38 @@ def _save_chart_colors(colors: dict[str, str]) -> None:
 # row and write its id back into this same lock record — the lock stays the
 # single source of truth for entry price/time either way, rather than the
 # Journal and this file drifting into two independent copies of the same fact.
-_ENTRY_LOCKS_PATH = Path("entry_locks.json")
-
+# Persistence and the lock record itself are state/entry_locks.py; these
+# wrappers only supply config.STATE_DIR (ADR-035).
 
 def _entry_lock_key(front_expiry: str, back_expiry: str, put_strike: float, call_strike: float) -> str:
-    return f"{front_expiry}|{back_expiry}|{put_strike:.0f}|{call_strike:.0f}"
+    return entry_locks.key(front_expiry, back_expiry, put_strike, call_strike)
 
 
 def _load_entry_locks() -> dict:
-    if _ENTRY_LOCKS_PATH.exists():
-        try:
-            data = json.loads(_ENTRY_LOCKS_PATH.read_text())
-            return data if isinstance(data, dict) else {}
-        except (json.JSONDecodeError, OSError):
-            return {}
-    return {}
+    return entry_locks.load(config.STATE_DIR)
 
 
 def _save_entry_locks(locks: dict) -> None:
-    try:
-        _ENTRY_LOCKS_PATH.write_text(json.dumps(locks, indent=2))
-    except OSError:
-        pass
+    entry_locks.save(config.STATE_DIR, locks)
 
 
 def _create_entry_lock(front_expiry: str, back_expiry: str, put_strike: float,
                         call_strike: float, diagonal_mark: float, mode: str) -> dict:
-    """mode is 'monitor_only' or 'monitor_and_log' (the latter is scaffolded
-    only — no Journal row is created yet, see module note above)."""
-    locks = _load_entry_locks()
-    key = _entry_lock_key(front_expiry, back_expiry, put_strike, call_strike)
-    record = {
-        "lock_id": str(uuid.uuid4()),
-        "front_expiry": front_expiry,
-        "back_expiry": back_expiry,
-        "put_strike": put_strike,
-        "call_strike": call_strike,
-        "entry_diagonal_mark": diagonal_mark,
-        "locked_at": pd.Timestamp.now(tz=config.DISPLAY_TIMEZONE).isoformat(),
-        "mode": mode,
-        "journal_trade_id": None,
-    }
-    locks[key] = record
-    _save_entry_locks(locks)
-    return record
+    return entry_locks.create(
+        config.STATE_DIR, front_expiry, back_expiry, put_strike, call_strike,
+        diagonal_mark=diagonal_mark, mode=mode,
+        display_tz=config.DISPLAY_TIMEZONE,
+    )
 
 
 def _clear_entry_lock(front_expiry: str, back_expiry: str, put_strike: float, call_strike: float) -> None:
-    locks = _load_entry_locks()
-    key = _entry_lock_key(front_expiry, back_expiry, put_strike, call_strike)
-    if key in locks:
-        del locks[key]
-        _save_entry_locks(locks)
+    entry_locks.clear(config.STATE_DIR, front_expiry, back_expiry, put_strike, call_strike)
 
 
 def _update_entry_lock_mark(front_expiry: str, back_expiry: str, put_strike: float,
                              call_strike: float, new_mark: float) -> None:
-    """Correct a locked entry price without disturbing lock_id/locked_at/mode —
-    this is a fix to a fat-fingered fill price, not a new entry."""
-    locks = _load_entry_locks()
-    key = _entry_lock_key(front_expiry, back_expiry, put_strike, call_strike)
-    if key in locks:
-        locks[key]["entry_diagonal_mark"] = new_mark
-        _save_entry_locks(locks)
+    entry_locks.update_mark(config.STATE_DIR, front_expiry, back_expiry,
+                             put_strike, call_strike, new_mark=new_mark)
 
 
 def _render_note(text: str, *, kind: str = "info", icon: str | None = None) -> None:
@@ -1054,25 +1006,18 @@ def _get_entry_lock(front_expiry: str, back_expiry: str, put_strike: float, call
 # retroactive backfill, since that would require replaying full historical
 # option chains, which is the expensive thing Mission Control caching was
 # built specifically to avoid.
-_ELIGIBLE_HISTORY_PATH            = Path("eligible_history.json")
-_ELIGIBLE_HISTORY_RETENTION_DAYS  = 30
+# Persistence is state/eligible_history.py. What BELONGS in the registry — the
+# upsert below and the retention window — is Mission Control's business logic
+# and stays here (ADR-035).
+_ELIGIBLE_HISTORY_RETENTION_DAYS  = eligible_history.RETENTION_DAYS
 
 
 def _load_eligible_history() -> dict:
-    if _ELIGIBLE_HISTORY_PATH.exists():
-        try:
-            data = json.loads(_ELIGIBLE_HISTORY_PATH.read_text())
-            return data if isinstance(data, dict) else {}
-        except (json.JSONDecodeError, OSError):
-            return {}
-    return {}
+    return eligible_history.load(config.STATE_DIR)
 
 
 def _save_eligible_history(registry: dict) -> None:
-    try:
-        _ELIGIBLE_HISTORY_PATH.write_text(json.dumps(registry, indent=2))
-    except OSError:
-        pass
+    eligible_history.save(config.STATE_DIR, registry)
 
 
 def _update_eligible_history(non_atm_df: pd.DataFrame, snapshot_ts: str) -> dict:

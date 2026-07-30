@@ -21,6 +21,20 @@ SCHWAB_TOKEN_PATH   = str(PROJECT_ROOT / os.environ.get("SCHWAB_TOKEN_PATH", "da
 
 DB_PATH      = str(PROJECT_ROOT / os.environ.get("DB_PATH", "data/dashboard.db"))
 
+# Where the small JSON sidecar files live: chart colours, entry locks, and the
+# eligibility registry. Anchored to the project root exactly as DB_PATH is —
+# which the database got right from the start and these files did not.
+#
+# DEBT-011 (fixed 2026-07-30, ADR-035): they were `Path("eligible_history.json")`
+# and friends, RELATIVE, so they resolved against whatever directory the
+# dashboard happened to be launched from. Started anywhere but the project root,
+# the app would find no registry, create an empty one there, and show a Mission
+# Control panel that had silently forgotten every past opportunity.
+#
+# .resolve() rather than PROJECT_ROOT alone so the value is absolute even if
+# Python ever hands us a relative __file__.
+STATE_DIR    = Path(os.environ.get("STATE_DIR", PROJECT_ROOT)).resolve()
+
 # NOTE: DEMO_MODE and DEMO_DB_PATH were removed 2026-07-25 (M0.11). Demo Mode
 # had been removed from the dashboard UI, leaving the config flag with zero
 # consumers and demo_data.py orphaned (it also still wrote to the pre-v2

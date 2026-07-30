@@ -68,7 +68,10 @@ def pipe(tmp_path, monkeypatch, temp_db):
     Returns the loaded namespace dict; `p["_st"].session_state` is the
     session-state stand-in and `p["_db"]` the database path.
     """
-    p = load_pipeline(eligible_history_path=tmp_path / "eligible_history.json")
+    # STATE_DIR first: load_pipeline refuses to run against the project root,
+    # because this pipeline WRITES eligible_history.json (ADR-035).
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+    p = load_pipeline()
     monkeypatch.setattr(config, "DB_PATH", temp_db)
     p["_db"] = temp_db
     p["_registry_path"] = tmp_path / "eligible_history.json"

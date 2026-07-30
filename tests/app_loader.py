@@ -62,6 +62,7 @@ import config
 import db
 import iv_engine
 from dataaccess import queries
+from state import eligible_history
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 APP_PATH = REPO_ROOT / "app.py"
@@ -116,7 +117,9 @@ _PIPELINE_FUNCS = (
 )
 _PIPELINE_CONSTS = (
     "_SWEEP_OFFSETS", "_TSCAN_THRESHOLD", "_APPROACHING_LOW", "_MC_HISTORY_CAP",
-    "_SPARK_BARS", "_ELIGIBLE_HISTORY_PATH", "_ELIGIBLE_HISTORY_RETENTION_DAYS",
+    "_SPARK_BARS", "_ELIGIBLE_HISTORY_RETENTION_DAYS",
+    # _ELIGIBLE_HISTORY_PATH is gone: the registry's location is config.STATE_DIR
+    # plus a filename in state/eligible_history.py as of ADR-035.
 )
 
 
@@ -302,15 +305,17 @@ def load_mission_control_functions() -> dict:
     return _load_from_app(_MC_FUNCS, _MC_CONSTS, namespace, what="Mission Control layer")
 
 
-def load_pipeline(*, eligible_history_path=None) -> dict:
+def load_pipeline() -> dict:
     """Return {name: obj} for the whole Mission Control pipeline.
 
-    `eligible_history_path` — `_ELIGIBLE_HISTORY_PATH` is `Path(
-    "eligible_history.json")`, a RELATIVE path resolved against the working
-    directory. Left alone, a test calling `_update_eligible_history()` would
-    overwrite the real 599 KB registry in the repo root. Pointing it at tmp_path
-    is mandatory, not tidiness. (It also means the production registry silently
-    depends on where the dashboard was launched from — noted under DEBT-011.)
+    THE CALLER MUST REDIRECT `config.STATE_DIR` FIRST, and this asserts it.
+    `_update_eligible_history()` writes the registry, so a test left pointing at
+    the project root would overwrite the real ~700 KB `eligible_history.json`.
+    That guard used to be the `eligible_history_path` argument, back when the
+    filename was a module constant; since ADR-035 the location comes from
+    `config.STATE_DIR`, so the guard moved here. Same protection, one fewer
+    mechanism — and it now covers all three sidecar files rather than only the
+    registry.
 
     There used to be a second argument, `dte_by_expiry`, because `_exp_label()`
     read a module global of that name. It takes the table as a parameter as of
@@ -321,6 +326,13 @@ def load_pipeline(*, eligible_history_path=None) -> dict:
     The returned dict also carries "_st" — the FakeStreamlit whose session_state
     the pipeline reads and writes — so a test can inspect or seed it.
     """
+    if Path(config.STATE_DIR).resolve() == Path(config.PROJECT_ROOT).resolve():
+        raise AssertionError(
+            "config.STATE_DIR still points at the project root. This pipeline "
+            "WRITES eligible_history.json — running against the real one would "
+            "overwrite it. monkeypatch config.STATE_DIR to tmp_path first."
+        )
+
     st = FakeStreamlit()
     namespace: dict = {
         "pd": pd, "np": np, "math": math, "bisect": bisect, "json": json,
@@ -329,17 +341,15 @@ def load_pipeline(*, eligible_history_path=None) -> dict:
         # call dataaccess.queries. Supplying the REAL module is the point — the
         # tests measure the actual reads, not a stand-in (M2 step 2.2).
         "queries": queries,
+        # Same reasoning as `queries`: the registry wrappers in app.py are now
+        # thin, and the real state module is what the tests should measure
+        # (M2 step 2.3).
+        "eligible_history": eligible_history,
         "st": st,
         "__builtins__": __builtins__,
     }
     loaded = _load_from_app(_PIPELINE_FUNCS, _PIPELINE_CONSTS, namespace,
                             what="Mission Control pipeline")
-
-    if eligible_history_path is not None:
-        # Rebind inside the namespace the functions actually close over, not in
-        # the returned dict — the readers resolve the name at call time.
-        namespace["_ELIGIBLE_HISTORY_PATH"] = Path(eligible_history_path)
-        loaded["_ELIGIBLE_HISTORY_PATH"] = namespace["_ELIGIBLE_HISTORY_PATH"]
 
     loaded["_st"] = st
     loaded["_namespace"] = namespace

@@ -5,6 +5,61 @@ what broke, and what remains.
 
 ---
 
+## 2026-07-30 (session 8, continued) — step 2.3: the file that would have quietly erased itself
+
+### Completed
+
+**`state/` exists, and three of DEBT-011's five faults are fixed** — the three that could lose data.
+The three small JSON files (your chart colours, entry locks, and the ~700 KB opportunity registry)
+now have one piece of code that reads and writes them, and it is told which folder to use.
+
+**The fix was already sitting in the same file.** `config.py` has always had a `PROJECT_ROOT`, and
+the database path was always built from it. The database got this right from day one; the JSON files
+just never followed. `STATE_DIR` uses the same convention, so **nothing moved** — the existing
+registry is found exactly where it always was.
+
+**The headline defect was not the dangerous one.** The known problem was the relative filename:
+start the dashboard from the wrong folder and it finds no history, creates an empty file there, and
+shows a panel that has forgotten everything. Real, but recoverable — your file was never touched.
+
+What I found while reading the code is worse. **If the registry ever failed to parse, the loader
+returned "empty" — and the next update wrote that empty registry back over the file.** One bad parse
+became permanent loss of 700 KB, with no copy anywhere, because all four sidecar files are excluded
+from version control. An unreadable file is now moved aside before anything else happens.
+
+**Writes are also atomic now** — written to a temporary file and renamed into place. The registry is
+rewritten in full roughly 126 times a trading day, so "interrupted mid-write" is not a theoretical
+concern.
+
+### What the checks caught
+
+**A real bug in my own quarantine code.** Two corruptions within the same second produced the same
+rescue filename, and the second copy silently overwrote the first — defeating the whole point of
+moving it aside. The check I wrote for exactly that failed on my first version.
+
+**And one of my own tests was weaker than I claimed.** I wrote a "failed write leaves the old file
+intact" check and described it as proving atomicity. It does not: an unserialisable payload fails
+*before* any bytes are written, so a plain non-atomic write passes it too. Replaced with one that
+asserts the temp-file-and-rename mechanism directly, and said plainly in the file why asserting a
+mechanism is justified here.
+
+### Verified
+
+569 pre-existing checks pass unchanged; 22 new; **591 total**. Mutation-verified on a copy: **6
+faults injected, 6 caught** — including reintroducing DEBT-011 itself. All six tabs render with no
+exception.
+
+**Your data:** backed up to `spx-dashboard-backups/state-20260730-091914` and verified by SHA256
+*before any code changed*. Afterwards, `entry_locks.json` and `chart_colors.json` are byte-identical
+to that backup; the registry grew 2,150 → 2,174 entries, which is the app doing its normal job. No
+stray or quarantined files anywhere.
+
+**One honest note on the render check:** the per-tab element counts differ from this morning's runs
+(the Scanner tab shows fewer cards). That is live market data and a registry that has moved on, not
+a code change — the structural counts are unchanged and nothing raised.
+
+---
+
 ## 2026-07-30 (session 8, continued) — 569 green checks, and a completely broken dashboard
 
 ### Completed

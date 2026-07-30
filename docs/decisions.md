@@ -7,6 +7,72 @@ it was recorded here.
 
 ---
 
+## ADR-035 — `state/` extracted and DEBT-011 closed: an absolute home, an atomic write, and a corrupt file that no longer erases itself
+**Date:** 2026-07-30 · **Status:** ACCEPTED · **Completes:** M2 task 2.3 · **Closes three of DEBT-011's five parts**
+
+**Scope note, so the claim is accurate.** DEBT-011 lists five faults: relative paths, no atomic
+write, no validation, no schema, no backup. This closes the first three — the ones that could lose
+data. **Still open: no formal schema** (the check is "is it an object", not "does it have the right
+shape") **and no scheduled backup** (which belongs with M3's backup work, not here). The row stays,
+reduced.
+
+**Decision.** Move the JSON sidecar persistence into `state/` — `store.py` (the primitives),
+`chart_colors.py`, `entry_locks.py`, `eligible_history.py` — and add `config.STATE_DIR`, absolute
+and anchored to the project root. Every function in the package takes `state_dir` as an argument.
+
+**The fix already existed in the same file.** `config.py` has had `PROJECT_ROOT` since the
+beginning, and `DB_PATH` was always built from it. The database got this right; the three JSON files
+were `Path("eligible_history.json")` and friends — **relative**, resolved against the working
+directory. `STATE_DIR` follows the convention that was already there, so no file moves and the
+existing ~700 KB registry is found exactly where it always was.
+
+**Three guarantees, in increasing order of how much they mattered.**
+
+1. *Absolute paths* — the headline of DEBT-011. Launched from anywhere but the project root, the
+   dashboard would find no registry, create an empty one there, and render a Mission Control panel
+   that had forgotten every past opportunity, with no error.
+
+2. *Atomic writes* — the registry is rewritten **in full on every new snapshot**, roughly 126 times
+   a trading day. Interrupt one and the old code left a half-written file. Now written to a
+   temporary file in the same directory and renamed into place.
+
+3. **An unreadable file is quarantined, not silently replaced — and this was the dangerous one.**
+   The old loaders caught `JSONDecodeError` and returned `{}`. That is not a failed read; it is
+   **data loss on a delay**: the empty dict comes back, Mission Control writes it out on the next
+   snapshot, and 700 KB of history is gone with no copy anywhere — all four files are gitignored.
+   `read_json` now moves the unreadable file to `<name>.corrupt-<timestamp>` first.
+
+**The tests found a real bug in the quarantine itself.** `os.replace` overwrites its target
+silently, so two corruptions within the same second produced the same filename and the second rescue
+copy destroyed the first — defeating the entire point. `test_quarantine_survives_a_second_bad_file`
+failed on the first version of the function. The name is now made unique before the move.
+
+**One test asserts a mechanism rather than a behaviour, deliberately.** Atomicity cannot be observed
+from outside — you cannot pull the power out mid-write from a test. And the obvious behavioural test
+is not enough: an unserialisable payload raises *before* any bytes are written, so a plain
+`write_text(json.dumps(...))` passes it too. `test_the_write_goes_via_a_temporary_file_and_a_rename`
+therefore spies on `os.replace`. Given the file has no copy in version control, the coupling is
+worth it.
+
+**The loader's guard changed shape and got stronger.** `load_pipeline(eligible_history_path=...)`
+existed so a test could not overwrite the real registry. With the location now coming from
+`config.STATE_DIR`, that argument is gone; instead `load_pipeline()` **refuses to run at all** if
+`STATE_DIR` still points at the project root. Same protection, one fewer mechanism, and it now
+covers all three sidecar files rather than only the registry.
+
+**`state/` may not import `config`.** Unusually strict, and achievable: it is handed its directory
+and, for entry locks, its timezone. Nothing in the package reads configuration of its own, which is
+what makes every function testable against `tmp_path` with nothing patched.
+
+**Verified.** 569 pre-existing tests pass unchanged; 22 new; **591 total.** Mutation-verified on a
+copy: **6 faults injected, 6 caught** — including reintroducing DEBT-011 itself, and removing the
+quarantine-collision fix. All six tabs render with no exception. **The real files were backed up to
+`spx-dashboard-backups/state-20260730-091914` and verified by SHA256 before any code changed**; after
+the full run, `entry_locks.json` and `chart_colors.json` are byte-identical to that backup and the
+registry has grown 2,150 → 2,174 entries, which is the app doing its normal job.
+
+---
+
 ## ADR-034 — DEBT-027 fully closed, DEBT-030 given a safety net — and the day 569 green tests hid a broken dashboard
 **Date:** 2026-07-30 · **Status:** ACCEPTED · **Closes:** DEBT-027 · **Guards:** DEBT-030
 

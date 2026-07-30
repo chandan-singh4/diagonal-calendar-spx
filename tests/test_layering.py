@@ -27,6 +27,7 @@ from app_loader import APP_PATH
 ROOT = Path(__file__).resolve().parent.parent
 CORE_DIR = ROOT / "core"
 DATAACCESS_DIR = ROOT / "dataaccess"
+STATE_DIR = ROOT / "state"
 
 # core/ computes. It is handed data and returns data.
 FORBIDDEN_CORE = {
@@ -46,9 +47,21 @@ FORBIDDEN_DATAACCESS = {
     "requests":       "network I/O",
 }
 
+# state/ persists the JSON sidecar files. It is told everything: which
+# directory, which timezone. It reads no configuration of its own.
+FORBIDDEN_STATE = {
+    "streamlit":      "the page. state/ persists; it does not render",
+    "config":         "state/ is HANDED its directory and timezone — that is the DEBT-011 fix",
+    "db":             "the database. These are JSON sidecar files, not market data",
+    "sqlite3":        "the database, one layer down",
+    "schwab_client":  "the broker",
+    "requests":       "network I/O",
+}
+
 LAYERS = [
     pytest.param(CORE_DIR, FORBIDDEN_CORE, id="core"),
     pytest.param(DATAACCESS_DIR, FORBIDDEN_DATAACCESS, id="dataaccess"),
+    pytest.param(STATE_DIR, FORBIDDEN_STATE, id="state"),
 ]
 
 
@@ -57,7 +70,7 @@ def modules_in(directory: Path) -> list[Path]:
 
 
 def all_modules() -> list[Path]:
-    return modules_in(CORE_DIR) + modules_in(DATAACCESS_DIR)
+    return modules_in(CORE_DIR) + modules_in(DATAACCESS_DIR) + modules_in(STATE_DIR)
 
 
 def _rel(path: Path) -> str:
@@ -147,6 +160,31 @@ def test_every_dataaccess_function_takes_db_path_first(path: Path):
     assert not offenders, (
         "these take the database location somewhere other than their first "
         "argument, or not at all:\n  " + "\n  ".join(offenders)
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# state/ — a filename with no directory is the DEBT-011 defect itself
+#
+# `Path("eligible_history.json")` resolves against the working directory. Launch
+# the dashboard from anywhere but the project root and it finds no registry,
+# creates an empty one there, and shows a panel that has forgotten everything —
+# with no error. Every path in this layer must be built from the state_dir it
+# was handed.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("path", modules_in(STATE_DIR), ids=_rel)
+def test_state_never_builds_a_path_from_a_bare_filename(path: Path):
+    offenders = [
+        ast.unparse(node) for node in ast.walk(_tree(path))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        and node.func.id == "Path" and node.args
+        and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)
+    ]
+    assert not offenders, (
+        f"{_rel(path)} builds a path from a literal string: {offenders}. That "
+        f"resolves against the working directory, which is DEBT-011 exactly. "
+        f"Build it from the state_dir the caller supplied."
     )
 
 
