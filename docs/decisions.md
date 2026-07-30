@@ -7,6 +7,130 @@ it was recorded here.
 
 ---
 
+## ADR-030 — Build the fixture database through `db.py`'s own writers, and let the fixture be the deliverable
+**Date:** 2026-07-29 · **Status:** ACCEPTED · **Extends:** ADR-029 · **Partially closes:** DEBT-026
+
+**Decision.** Pin `_candidate_signals` — the source of Duration Active, the ETA, the trend glyph
+and the trend arrow on every Mission Control card — against a small **real** SQLite database,
+built by calling `db.create_snapshot` / `insert_option_rows` / `finalize_snapshot`. 22 tests in
+`tests/test_mission_control_golden.py`, plus a reusable `mc_db` fixture and
+`make_transform_history()` writer in `conftest.py`.
+
+**Why the fixture goes through db.py rather than raw INSERTs.** Hand-written `INSERT` statements
+would be shorter and would not break when the schema changes — which is exactly the objection.
+A fixture that survives a schema change keeps testing a shape production no longer has, and
+reports green while the real pipeline is broken. Going through the writers means the fixture
+fails loudly the day the schema moves, which is the behaviour worth paying for.
+
+**Why the gap is engineered to equal one leg's mark.** The transform gap is
+`(front_call + front_put) − (wing_call + wing_put)` once the back legs cancel. Setting
+`front_put = 10` and both wings to `5` makes **gap == front call mark** exactly. So
+`write([4.0, 5.5])` means what it says, and a test about the `$5` threshold reads honestly
+instead of hiding the number behind six leg prices.
+
+**Two constraints that would have made the fixture rot silently, both written into it:**
+1. The query filters `snapshot_timestamp >= datetime('now', '-N days', 'utc')`, so timestamps
+   are computed **relative to now**. Hardcoded dates would pass today and quietly return zero
+   rows forever after — a test that decays into a no-op without ever going red.
+2. Any snapshot missing a computable mark on **any** of the six joined legs is excluded whole.
+   The fixture can produce that case on purpose (`missing_leg_indices`) because it is the
+   dangerous one: the snapshot is `COMPLETE` and looks healthy.
+
+**The correction this task produced — and it changes what we believe protects what.** I wrote
+that the headline M2 risk was `df.sort_values("timestamp")` being lost when the query splits out
+into `data/queries.py`. Injecting exactly that changed nothing; all 19 tests passed. Rather than
+bend a test to force it red, I checked: the pandas sort is genuinely **redundant**. The SQL ends
+in `ORDER BY s.snapshot_timestamp`, that clause *is* load-bearing — stripped, rows return in
+insertion order, verified directly — and it is **already pinned**, in
+`test_db.py::test_transform_mark_history_is_ordered_oldest_first`, which inserts snapshots 1, 3
+and 2 days back precisely so insertion order and time order disagree. So the protection was
+real and already existed; it simply lives in the query's tests. The useful M2 instruction is
+therefore different from the one I first wrote down: **when that query moves, its ordering test
+must move with it.** This is the third time the ADR-027 rule has paid: an injection that changes
+nothing is evidence about the code, not a dud test.
+
+**Second proven-equivalent mutant, with a small finding attached.** Removing
+`.dt.tz_convert(config.DISPLAY_TIMEZONE)` changes none of the four outputs — confirmed by running
+the real function under `America/New_York`, `Asia/Tokyo` and `UTC` and getting identical results.
+It cannot matter: every output is either a **difference** between timestamps (timezone-invariant)
+or derived from gap values alone, and the function returns no timestamp at all. The comment on
+that line reads *"naive wall-clock: required by Plotly rangebreaks"*, which is true where it was
+copied from and misleading here, since this function never plots. Harmless; noted so an M2
+tidy-up is an informed choice.
+
+**Also pinned deliberately: one arguably-wrong behaviour.** The eligibility streak is contiguous
+in **snapshots**, not in time. With a 90-minute hole between polls — a collector outage — the two
+readings either side count as one unbroken streak, so "Duration Active" spans a period during
+which nothing was observed. Frozen rather than fixed: the alternative (break the streak on a time
+gap, as `_break_sessions` does for charts) is a decision about what *active* should mean, and it
+belongs to whoever owns the strategy, not to a refactor.
+
+**Scope deliberately left open.** `_compute_mc_core`, `_build_non_atm_panel` and
+`_run_mission_control` are still unpinned; DEBT-026 stays open for them. `_candidate_signals` was
+taken first because it is self-contained and proves the fixture design before the composite
+functions depend on it.
+
+**Tally:** 11 injections, **9 caught, 2 proven equivalent.** Two of the nine only became catchable
+after fixing test *data* that could not express the fault — a 12-reading sparkline window cannot be
+tested with 8 readings, and a 3-reading trend window cannot be tested with a series where 2 and 3
+agree. Same lesson as ADR-029, now twice observed.
+
+---
+
+## ADR-029 — Pin the display layer before M2, and write assertions a fault can actually fail
+**Date:** 2026-07-29 · **Status:** ACCEPTED · **Extends:** ADR-025 · **Precedes:** M2
+
+**Decision.** Before M2 moves any code, add golden/characterization tests over the *display*
+layer of `app.py` — the part between a computed number and the screen: card ordering
+(`_rank_for_panel`), chart geometry (`_banded_ratio_traces`), the on-card formatters
+(`_sparkline`, `_fmt_duration`, `_fmt_eta`) and card identity (`_card_key`). 28 tests, in
+`tests/test_display_golden.py`.
+
+**Why this layer, and why now.** M1.4 pinned what the scanner *computes*. Nothing pinned what
+the screen *shows*. Those are different failures with very different visibility: a scanner
+that returns wrong numbers is at least checkable against the database, whereas a panel whose
+rows come back in a different order still looks entirely plausible. Ordering is not cosmetic —
+the top card is the one that gets traded. A refactor that reversed a sort key would be
+invisible until it had influenced real decisions for weeks.
+
+**Why not launch the app instead.** `streamlit.testing.v1.AppTest` exists and would be a truer
+end-to-end test. It was rejected *for now*: `app.py` queries the production database at module
+level, so an AppTest either points at the real 1.4 GB database — which `conftest.py` forbids
+outright — or needs a full snapshot fixture, which is a larger piece of work than the whole of
+this task. Pinning the pure layer costs almost nothing and covers the failure mode we actually
+fear. The DB-backed pipeline (`_compute_mc_core`, `_candidate_signals`, the eleven `_load_*`
+queries) remains **unpinned**, and is logged as DEBT-026 rather than quietly left out.
+
+**The reason `tests/app_loader.py` grew a second entry point rather than one wider namespace.**
+Each caller supplies its own execution namespace. The scanner is deliberately given no plotly
+and no `db`/`config`/`streamlit`, so a scanner that starts reaching for I/O or drawing fails
+loudly in the loader. The display layer legitimately needs plotly. Merging the two namespaces
+would have quietly destroyed the scanner's guarantee to save one function.
+
+**The lesson worth keeping — the sibling of ADR-025.** Nine faults were injected into a *copy*
+of `app.py` (never the real file; the dashboard is running and Streamlit hot-reloads). Seven
+were caught first time. The two survivors were both **weak assertions, not missing tests**:
+
+1. *"Ranking must not mutate its input."* The function copies its argument first, so the
+   scratch column could never reach the input. The assertion was checking something that
+   cannot break. The leak shows in the **return value** — a stray column on the panel.
+2. *"A long series must be downsampled, not truncated."* Fed `range(100)`, downsampling and
+   truncation produce the **identical** glyph, because a straight line looks the same however
+   you sample it. The fault only appears on a series that changes direction, so the test now
+   uses one that rises then falls — where truncation would report a peak as a climb.
+
+ADR-025 said a characterization test protects only what reaches its *output*. This adds:
+**an assertion protects only what its *input* can express.** Both failures looked like
+green tests. Choosing test data is part of writing the assertion, not a detail beneath it.
+
+**Also pinned deliberately: one arguably-wrong behaviour.** `_RATIO_BANDS` compares inclusively
+at both ends, so a ratio of exactly 1.00 is drawn in two overlapping bands. It is invisible in
+practice (a float never lands exactly on a boundary) and "fixing" it means deciding which band
+owns the edge — a real decision, not a typo. Frozen with the reasoning inline so a future
+change is made on purpose rather than by accident.
+
+---
+
 ## ADR-028 — The pre-commit hook stands in for CI; `docs/TESTING.md` is retired, not deferred
 **Date:** 2026-07-28 · **Status:** ACCEPTED · **Closes:** the two open items from `AUDIT` §10 M1.8 and M1.9
 

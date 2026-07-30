@@ -5,6 +5,179 @@ what broke, and what remains.
 
 ---
 
+## 2026-07-29 (session 7) — a safety net under the screen, before M2 touches it
+
+### Completed
+
+**Committed session 6's work — two commits, `dc86a21` and `597095e`.** The `check_db.py` fixes
+with their tests, then the documentation pass that settled the plan-vs-audit split and retired
+`docs/TESTING.md`. The pre-commit hook ran the full suite on the code commit as designed.
+
+**M2 pre-work 2.0a: the display layer is now pinned — 28 tests, 462 → 490.** M1 froze what the
+scanner *computes*. Nothing froze what the screen *shows*, and those fail differently. A scanner
+returning wrong numbers can at least be checked against the database; a panel whose rows come back
+in a different order looks completely normal. That matters because the ordering is not decoration —
+**the top card is the one that gets traded.** A refactor that reversed a sort key would have gone
+unnoticed for weeks while influencing real decisions.
+
+Covered: card ordering (`_rank_for_panel`), the geometry of the multicolour IV-ratio line
+(`_banded_ratio_traces`), the formatters behind every cell and glyph (`_sparkline`,
+`_fmt_duration`, `_fmt_eta`), and card identity across reruns (`_card_key`). Ordering is asserted
+against the **same real production snapshots** the scanner goldens replay, so the whole chain
+*snapshot → scanner → ranked panel* is pinned end to end rather than in pieces.
+
+**`tests/app_loader.py` gained a second entry point instead of a wider one.** The loader pulls
+functions out of `app.py` via AST so they can run without launching the dashboard. Adding plotly to
+the existing namespace would have been one line — and would have quietly destroyed the scanner's
+guarantee that it cannot reach for I/O or drawing, which is enforced precisely by *withholding*
+those names. Each caller now supplies its own namespace. See ADR-029.
+
+**The real `app.py` was never modified.** The nine fault injections ran against a copy in a
+scratch directory, with the loader pointed at it. The dashboard is running and Streamlit
+hot-reloads on save; mutating the live file to test it would have pushed nine deliberately broken
+versions of the app onto the screen.
+
+### Discovered
+
+**Two of my nine injections were not caught, and both were my assertions being wrong rather than
+tests being missing.** This is the finding of the session and it generalises, so it went into
+ADR-029 as the sibling of ADR-025:
+
+1. *"Ranking must not mutate its input."* The function copies its argument as its first act, so
+   the scratch column could **never** reach the input. I had asserted something that cannot break.
+   The leak actually shows up in the return value, as a stray column on the rendered panel.
+2. *"A long series must be downsampled, not truncated."* I fed it `range(100)` — and downsampling
+   and truncation give the **identical** glyph on a straight line, because a straight line looks
+   the same however you sample it. The fault only shows on a series that changes direction. The
+   test now rises then falls, where truncation would report a peak as a climb.
+
+ADR-025 established that a characterization test protects only what reaches its *output*. This
+adds: **an assertion protects only what its *input* can express.** Both of these were green tests
+protecting nothing. Choosing the test data is part of writing the assertion, not a detail below it.
+
+**`app.py` is 4,283 lines, not 3,891.** I had been repeating the 3,891 figure; the audit's own
+number was 4,230. It has grown ~50 lines since the audit measured it. Corrected in `backlog.md`
+DEBT-002, with the growth noted, because a monolith still accreting while we plan around it is the
+argument for M2 rather than a footnote to it. The audit's figures were left alone — it is a frozen
+snapshot and 4,230 is what was true when it was written.
+
+**One arguably-wrong behaviour was pinned deliberately rather than fixed.** `_RATIO_BANDS` compares
+inclusively at both ends, so a ratio of exactly 1.00 is drawn in two overlapping bands. Invisible
+in practice, and "fixing" it means deciding which band owns the edge — a real decision, not a typo.
+Frozen with the reasoning inline so that a future change is made on purpose.
+
+**Two symptoms Chandan mentioned were briefly logged as BUG-020 and BUG-021, then withdrawn the
+same session at his request** — dashboard slowness, and "sometimes the chart would look off". Each
+had been noticed once, without specifics. His reasoning was right and worth keeping: a backlog row
+whose content is three plausible theories is not a bug report, it is a standing invitation to
+optimise something that was never measured. Both are expected to resurface with real evidence once
+M2 testing starts, and can be logged properly then. `git log -S "BUG-020" -- docs/backlog.md`
+recovers the theories if they turn out to be useful.
+
+Worth restating from those notes, because it is a *fact* rather than a theory: `_compute_mc_core`
+is cached with `max_entries=3`. If that ever does become the slowness, it will be measurable, and
+measurement comes before any change.
+
+### Verified
+
+- 490 tests pass. The **scanner goldens still pass**, which is what proves the `app_loader`
+  refactor changed nothing — that suite is the control group for the change I made to its loader.
+- 9 faults injected into a copy of `app.py`; 9 caught, after the two weak assertions were fixed.
+  Re-ran both individually to confirm the fixes actually closed the gap rather than looking like it.
+- `ruff check` clean on both new/changed test files.
+- `git diff app.py` empty — the production file was untouched throughout.
+
+### Later the same day — 2.0b started: the fixture database exists
+
+**`_candidate_signals` is pinned — 22 tests, 490 → 511.** This is the function behind four things
+on every Mission Control card: **Duration Active**, the **ETA**, the **▁▂▃ sparkline**, and the
+**rising-trend arrow**. Unlike the morning's work it needs a real database, so it got a temporary
+one — built by calling `db.py`'s own writers, never touching the 1.4 GB production file.
+
+**The fixture is the actual deliverable, not the tests.** `make_transform_history()` and the
+`mc_db` fixture now live in `conftest.py`, so the remaining Mission Control functions cost tests
+rather than infrastructure. Three decisions in it are worth knowing:
+
+- **It goes through `db.create_snapshot` / `insert_option_rows` / `finalize_snapshot`** rather than
+  raw `INSERT` statements. Raw SQL would be shorter *and would survive a schema change* — which is
+  the objection, not the benefit. A fixture that survives a schema change keeps testing a shape
+  production no longer has and reports green while the pipeline is broken.
+- **The gap is engineered to equal one leg's price exactly.** With the back legs cancelling and
+  both wings at $5, the transform gap *is* the front call mark. So `write([4.0, 5.5])` means what
+  it says, and a test about the $5 threshold reads honestly instead of hiding the number behind
+  six leg prices.
+- **Timestamps are computed relative to now, never hardcoded.** The query filters on
+  `datetime('now', '-N days', 'utc')`. Fixed dates would pass today and silently return zero rows
+  forever after — a test that decays into a no-op without ever turning red.
+
+### Discovered — a correction that changes what we think protects what
+
+**The risk I named this morning as the headline M2 danger was not the danger.** I had written that
+the thing to fear was `df.sort_values("timestamp")` being dropped when the query splits out into
+`data/queries.py` — "the SQL already has an ORDER BY". Injecting exactly that changed nothing: all
+19 tests passed.
+
+Rather than bend a test until it went red, I checked. The pandas sort is genuinely **redundant**.
+The SQL's `ORDER BY s.snapshot_timestamp` *is* load-bearing — strip it and rows come back in
+insertion order, which I verified directly — and it is **already pinned**, in
+`test_db.py::test_transform_mark_history_is_ordered_oldest_first`, written months' worth of
+sessions ago and inserting snapshots 1, 3 and 2 days back precisely so that insertion order and
+time order disagree. The protection existed all along, one file over from where I was looking.
+
+So the M2 instruction is a different one from the one I first wrote down, and more useful:
+**when that query moves, its ordering test must move with it.**
+
+**A second injection also proved equivalent, with a small finding attached.** Removing the timezone
+conversion changes none of the four outputs — confirmed by running the real function under New York,
+Tokyo and UTC and getting identical answers. It *cannot* matter: every output is either a difference
+between two timestamps or derived from gap values alone, and the function returns no timestamp at
+all. The comment on that line says *"required by Plotly rangebreaks"*, which is true where it was
+copied from and misleading here, because this function never draws anything.
+
+**Two of the nine caught faults were only catchable after fixing the test data**, the same lesson as
+the morning, now twice in one day: a 12-reading sparkline window cannot be tested with 8 readings,
+and a 3-reading trend window cannot be tested on a series where 2 and 3 readings agree. Both tests
+passed against deliberately broken code until the data could express the fault.
+
+**DEBT-027 logged.** `_candidate_signals` takes its database path from `config.DB_PATH`, a module
+global, rather than as an argument — so no caller can point it elsewhere and every test must patch
+global state. Harmless in production, where there is only one database, but it is a hidden
+dependency that will follow the code into `core/` unless M2 turns it into a parameter.
+
+**One more arguably-wrong behaviour pinned rather than fixed.** The eligibility streak is contiguous
+in *snapshots*, not in time, so a 90-minute collector outage inside a streak is counted as though
+the gap had been observed holding throughout. It was not observed at all. Frozen with the reasoning
+inline, because what "active" should mean across an outage is a strategy decision, not a refactor's
+to make.
+
+### Verified (2.0b)
+
+- 511 tests pass. `git diff app.py db.py` empty — no production code was touched all day.
+- 11 faults injected into a copy of `app.py`: **9 caught, 2 proven equivalent** (the redundant sort
+  and the timezone conversion, both investigated rather than assumed).
+- The fixture is checked against itself first: one test asserts the engineered gaps come back as the
+  gaps requested, because if that arithmetic were wrong every other test in the file would be
+  meaningless while still passing.
+- `ruff check` clean on the new files. The remaining findings in `conftest.py` are the pre-existing
+  deferred-import family already parked under DEBT-025.
+
+### Still not done
+
+- **2.0b is partial.** `_compute_mc_core` — which holds the rank-*before*-cap decision that
+  determines which opportunities reach the screen at all — plus `_build_non_atm_panel`,
+  `_run_mission_control` and the eleven `_load_*` queries remain unpinned (DEBT-026). The fixture
+  now exists, so these are the cheap part.
+- No code has been decomposed. M2 proper has not started.
+
+### Housekeeping
+
+`.claude/skills/explain-simply/` added — Chandan wrote it after noticing he had asked four times for
+the same kind of plain-language explanation. It arrived as a zipped `.skill` bundle, which the
+loader cannot see; skills are discovered as `<name>/SKILL.md` directories, so it was unpacked in
+place.
+
+---
+
 ## 2026-07-28 (session 6) — the session-start health check stops lying to you, twice
 
 ### Completed

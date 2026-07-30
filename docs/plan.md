@@ -1,13 +1,19 @@
 # plan.md — Current Implementation Plan
 
-**Last updated:** 2026-07-28
-**Current milestone:** M2 — Architecture Refactor *(not yet started)*
-**Status:** M0 ✅ and M1 ✅ both COMPLETE and merged to `main`. **462 tests**, run automatically on
+**Last updated:** 2026-07-29
+**Current milestone:** M2 — Architecture Refactor *(pre-work in progress; no code moved yet)*
+**Status:** M0 ✅ and M1 ✅ both COMPLETE and merged to `main`. **511 tests**, run automatically on
 every commit. **80% coverage of non-UI code** against a ~70% target; `iv_engine`, `db.py`,
 `schwab_client.py` and `config.py` at 100%. Every module was mutation-verified rather than
-assumed: **56 injected faults across M1, 54 caught, 2 proven equivalent** (plus 7 more in the
-2026-07-28 `check_db.py` work — 6 caught, 1 proven equivalent, ADR-027). M2 is unblocked and is
-the next work.
+assumed: **56 injected faults across M1, 54 caught, 2 proven equivalent** (plus 7 in the
+2026-07-28 `check_db.py` work — 6 caught, 1 proven equivalent, ADR-027 — 9 in the
+2026-07-29 display-layer pinning, 9 caught, ADR-029 — and 11 in the Mission Control pinning,
+9 caught, 2 proven equivalent, ADR-030). M2 pre-work **2.0a is done**: a refactor that silently
+reorders the opportunity cards or mis-draws the IV-ratio line now fails a test instead of
+reaching the screen. **2.0b is partial**: `_candidate_signals` is pinned against a real
+temporary database and the fixture that made it possible is reusable, but `_compute_mc_core`,
+`_build_non_atm_panel`, `_run_mission_control` and the eleven `_load_*` queries remain unpinned
+(DEBT-026). Finish 2.0b before moving that pipeline.
 **Reference:** [`AUDIT_2026-07-25.md`](AUDIT_2026-07-25.md) §10 for the full M0–M8 roadmap —
 a **frozen snapshot**, superseded by this file wherever they differ (see the banner at its head,
 and ADR-028 for the two M1 tasks settled differently).
@@ -122,6 +128,30 @@ in **ADR-028**. The audit's exit criterion "≥70% coverage" was promoted to a t
 functions out of Streamlit scripts via AST so they can be tested without launching a page or
 touching the database. Both are **deleted at M2**, when the extracted modules can simply be
 imported. Both raise rather than guess if a target moves.
+
+---
+
+## M2 — Architecture Refactor · pre-work
+
+**Goal of the pre-work:** before anything moves, make a silent behaviour change impossible to
+miss. M1 pinned what the code *computes*; this pins what the screen *shows*.
+
+| # | Task | Status | Notes |
+|---|---|---|---|
+| 2.0a | Pin the pure display layer | ✅ Done 2026-07-29 | **28 tests** in `tests/test_display_golden.py` over card ordering (`_rank_for_panel`), IV-ratio chart geometry (`_banded_ratio_traces`), the on-card formatters (`_sparkline`, `_fmt_duration`, `_fmt_eta`) and card identity (`_card_key`). Ordering is asserted against the **same real production snapshots** the scanner goldens use, so the chain *snapshot → scanner → ranked panel* is pinned end to end. Mutation-verified: **9 faults injected into a copy of `app.py`, 9 caught** — but only after fixing 2 assertions that were too weak to fail (the lesson is ADR-029, and it is the one worth reading). `tests/app_loader.py` gained a second entry point, `load_display_functions()`, with its own namespace so the scanner's "no I/O, no drawing" guarantee survives intact. |
+| 2.0b | Pin the DB-backed Mission Control pipeline | 🔄 **Partial — `_candidate_signals` done** | **22 tests** in `tests/test_mission_control_golden.py` over Duration Active, the ETA projection, the sparkline and the trend arrow, driven against a **real temporary database** built through `db.py`'s own writers — never the production one. The reusable fixture (`mc_db` + `make_transform_history` in `conftest.py`) is the actual deliverable here; the remaining functions now cost tests, not infrastructure. Mutation-verified: **11 injections, 9 caught, 2 proven equivalent** — see ADR-030, including the correction that the pandas `sort_values` is redundant because the SQL `ORDER BY` is load-bearing *and already pinned in `test_db.py`*. **Still to do: `_compute_mc_core` (highest value — it holds the rank-before-cap decision), `_build_non_atm_panel`, `_run_mission_control`, the eleven `_load_*` queries.** Found DEBT-027. |
+
+**Then the decomposition itself, in this order** — pure maths first, appearance last, because
+appearance is the part that cannot be tested and so should be the thinnest thing remaining:
+
+1. `core/` — pure functions, no DB and no Streamlit. Scanner maths, ranking, signals, formatters.
+2. `data/queries.py` — the eleven `_load_*` functions, returning data rather than display shapes.
+3. `state/` — the JSON-file persistence (entry locks, chart colours, eligibility registry),
+   currently read and written from inside render functions.
+4. `views/` — one module per tab. Mostly mechanical *once* 1–3 are out.
+5. `app.py` — page config, sidebar, tab dispatch. Target: under 400 lines.
+
+Steps 1–3 carry the value. Step 4 looks like the work and is the least interesting part of it.
 
 ---
 
