@@ -373,3 +373,137 @@ def patch_schwab(monkeypatch):
         monkeypatch.setattr(collector.schwab_client, "get_option_chain", _get_chain)
 
     return configure
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Mission Control fixtures (DEBT-026 — the DB-backed half of the M2 safety net)
+#
+# _candidate_signals() and the wider Mission Control pipeline read real
+# snapshots through db.get_transform_mark_history(). Pinning them therefore
+# needs a database, and the suite is forbidden from touching the production one,
+# so these build a small real database through db.py's OWN writers. Hand-rolled
+# INSERTs were rejected: the fixture must break if the schema changes, otherwise
+# it would keep testing a shape production no longer has.
+#
+# TWO CONSTRAINTS THAT ARE EASY TO GET WRONG
+#
+# 1. The query filters `snapshot_timestamp >= datetime('now', '-N days', 'utc')`,
+#    so timestamps MUST be computed relative to now. Hardcoded dates would make
+#    every test here pass today and silently return zero rows tomorrow —
+#    the worst kind of test, one that decays into a no-op without failing.
+#
+# 2. The six legs are joined separately, and any snapshot missing a computable
+#    mark on ANY leg is excluded entirely. So a "gap" is only visible if all six
+#    legs are present, which is what make_transform_history writes.
+#
+# WHY THE GAP IS TRIVIAL TO CONTROL
+#   transform_mark = (back_c + back_p) - (wing_c + wing_p)
+#   diagonal_mark  = (back_c + back_p) - (front_c + front_p)
+#   gap            = transform_mark - diagonal_mark
+#                  = (front_c + front_p) - (wing_c + wing_p)
+# With front_put=10 and both wings=5, the back legs cancel and the gap is
+# exactly the front CALL mark. So `gaps=[4.0, 5.5]` means precisely what it
+# says, and a test asserting on a $5 threshold reads honestly.
+# ─────────────────────────────────────────────────────────────────────────────
+
+MC_FRONT_EXPIRY = "2026-08-07"
+MC_BACK_EXPIRY = "2026-08-21"
+MC_PUT_STRIKE = 5900.0
+MC_CALL_STRIKE = 6100.0
+
+_MC_FRONT_PUT = 10.0   # with the two wings at 5.0 each, these cancel out
+_MC_WING = 5.0
+_MC_BACK = 30.0
+
+
+def _mc_legs(snapshot_id: int, gap: float) -> list[dict]:
+    """The six option rows one snapshot needs, arranged so gap == front call."""
+    def row(expiry, dte, strike, right, mark):
+        return dict(
+            snapshot_id=snapshot_id, expiry_date=expiry, dte=dte,
+            strike=float(strike), right=right,
+            bid=mark - 0.5, ask=mark + 0.5, mark=mark, last=mark,
+            iv=0.184, delta=0.5, gamma=0.01, theta=-0.5, vega=0.2,
+            volume=100, open_interest=1000, intrinsic_value=0.0,
+            time_value=mark,
+        )
+
+    return [
+        row(MC_FRONT_EXPIRY, 7, MC_CALL_STRIKE, "C", gap),            # the lever
+        row(MC_FRONT_EXPIRY, 7, MC_PUT_STRIKE, "P", _MC_FRONT_PUT),
+        row(MC_BACK_EXPIRY, 21, MC_CALL_STRIKE, "C", _MC_BACK),
+        row(MC_BACK_EXPIRY, 21, MC_PUT_STRIKE, "P", _MC_BACK),
+        row(MC_FRONT_EXPIRY, 7, MC_CALL_STRIKE + 5, "C", _MC_WING),   # wings
+        row(MC_FRONT_EXPIRY, 7, MC_PUT_STRIKE - 5, "P", _MC_WING),
+    ]
+
+
+def make_transform_history(db_path, gaps, *, interval_minutes=5,
+                           end_minutes_ago=0, spx=6000.0,
+                           incomplete_indices=(), missing_leg_indices=()):
+    """Write one COMPLETE snapshot per entry in `gaps`, evenly spaced, ending
+    `end_minutes_ago` minutes before now. Returns the timestamps written.
+
+    Args:
+        gaps:                the gap ($) each snapshot should exhibit, oldest first.
+        interval_minutes:    spacing between snapshots. Raise it above 60 to
+                             simulate a collector outage, which is what
+                             _break_sessions keys off.
+        end_minutes_ago:     how long ago the LAST snapshot was taken. Non-zero
+                             lets a test place history entirely in the past.
+        incomplete_indices:  these snapshots are finalized 'PARTIAL' instead of
+                             'COMPLETE'. The query must exclude them.
+        missing_leg_indices: these snapshots omit the front wing call, so no
+                             transform mark is computable. The query must
+                             exclude these too — and this is the case that
+                             matters, because the row EXISTS and looks healthy.
+    """
+    import datetime as dt
+
+    import db
+
+    n = len(gaps)
+    now = dt.datetime.now(dt.UTC)
+    written = []
+
+    for i, gap in enumerate(gaps):
+        offset = end_minutes_ago + (n - 1 - i) * interval_minutes
+        ts = (now - dt.timedelta(minutes=offset)).strftime("%Y-%m-%d %H:%M:%S")
+
+        snapshot_id = db.create_snapshot(
+            db_path, snapshot_timestamp=ts, market_session="MIDDAY",
+            poll_interval_used=interval_minutes * 60, underlying_price=spx,
+            underlying_bid=spx - 1, underlying_ask=spx + 1, vix_value=18.5,
+        )
+
+        legs = _mc_legs(snapshot_id, gap)
+        if i in missing_leg_indices:
+            legs = [r for r in legs
+                    if not (r["strike"] == MC_CALL_STRIKE + 5 and r["right"] == "C")]
+        db.insert_option_rows(db_path, legs)
+
+        db.finalize_snapshot(
+            db_path, snapshot_id,
+            status="PARTIAL" if i in incomplete_indices else "COMPLETE",
+            strikes_fetched=len(legs), expiries_fetched=2,
+            collection_latency_ms=100,
+        )
+        written.append(ts)
+
+    return written
+
+
+@pytest.fixture
+def mc_db(temp_db):
+    """temp_db plus a writer for transform-mark history.
+
+    Returns (db_path, write) where write(gaps, **kw) delegates to
+    make_transform_history. Tests choose their own history shape rather than
+    sharing one fixed dataset, because the interesting cases (a rising gap, a
+    gap that peaked and fell back, an outage mid-series) are mutually exclusive
+    shapes and a single fixture serving all of them would serve none well.
+    """
+    def write(gaps, **kwargs):
+        return make_transform_history(temp_db, gaps, **kwargs)
+
+    return temp_db, write
