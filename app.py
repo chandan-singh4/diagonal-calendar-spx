@@ -1660,6 +1660,21 @@ if _fragment is not None:
             st.session_state["_active_snapshot_id"] = _latest_id
         elif (_latest_id is not None
                 and _latest_id != st.session_state["_active_snapshot_id"]):
+            # ADOPT IT HERE, BEFORE RERUNNING — BUG-020.
+            #
+            # The comment above describes this exact trap and guards only the
+            # first-run case. It applies just as much here, for a reason that
+            # is easy to miss: st.rerun() ABORTS the current script run on the
+            # spot, and the line that records which snapshot we are showing
+            # (`_active_snapshot_id = snapshot_id`) is ~100 lines further down.
+            # So it never ran. The next execution called this poller again,
+            # found the same stale value, and rerun again — forever, at 100%
+            # CPU, never reaching the point where anything is drawn.
+            #
+            # Recording it here is what makes the rerun happen exactly once
+            # per new snapshot. The assignment further down then becomes a
+            # harmless restatement of the same value.
+            st.session_state["_active_snapshot_id"] = _latest_id
             st.rerun()
 
     _live_refresh_poller()

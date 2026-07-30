@@ -428,3 +428,48 @@ def test_the_atm_history_fallback_is_handed_the_memoised_loader():
             "read would go to the database instead of reusing the memoised "
             "result. Pass load=_load_atm_hist."
         )
+
+
+def test_the_refresh_poller_adopts_the_snapshot_before_it_reruns():
+    """BUG-020. The freeze that made the dashboard unusable.
+
+    The live-refresh fragment reruns the app when a newer snapshot appears.
+    `st.rerun()` ABORTS the current script run where it stands — and the line
+    that records which snapshot is being shown sits ~100 lines further down,
+    so it never executed. The next run called the poller again, found the same
+    stale value, and rerun again: an infinite loop at 100% CPU that never
+    reached the point where anything is drawn. The page froze, charts stopped
+    responding to the controls, and clicks did nothing.
+
+    It needs one new snapshot to trigger, so the first page load always looks
+    fine — which is why this survived so long and read as "sometimes frozen".
+
+    Asserted on the source because there is no seam to call: the fragment is
+    defined and invoked inside app.py's module body, and no test can run it
+    (AppTest does not fire fragment timers at all, which is exactly why the
+    suite never saw this).
+    """
+    src = APP_PATH.read_text(encoding="utf-8")
+    start = src.index("def _live_refresh_poller()")
+    # The CALL site, not the def line — "_live_refresh_poller()" also matches
+    # inside "def _live_refresh_poller()", which silently sliced this down to
+    # the four characters "def " on the first attempt and made the assertion
+    # below fail for entirely the wrong reason.
+    block = src[start:src.index("\n    _live_refresh_poller()", start)]
+
+    adopt = 'st.session_state["_active_snapshot_id"] = _latest_id'
+    assert block.count(adopt) == 2, (
+        "the poller should record the snapshot in BOTH branches — the "
+        "first-run branch and the newer-snapshot branch"
+    )
+    # Match the STATEMENT, with its indentation — not the bare text, which
+    # also occurs in the comment explaining this very bug. The first version
+    # of this test matched the prose and failed against correct code.
+    rerun_at = block.index("\n            st.rerun()")
+    adopt_at = block.rindex("\n            " + adopt)
+    assert adopt_at < rerun_at, (
+        "st.rerun() is called BEFORE the poller records the snapshot it is "
+        "rerunning for. rerun() aborts the script, so the record never "
+        "happens, and the next run reruns for the same reason — forever. "
+        "That is BUG-020, and it froze the whole dashboard."
+    )
