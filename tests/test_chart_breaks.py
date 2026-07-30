@@ -185,12 +185,17 @@ def test_the_statistics_frame_is_deliberately_not_broken():
 
     Pinned so that a later 'consistency' cleanup does not helpfully add the
     call. The absence is the correct behaviour, and it is not obvious.
+
+    REPOINTED in M2 step 2.4, the same way ADR-032 repointed the test below:
+    the tab moved to views/historical.py and this failed on its own anchor,
+    which is what the anchor is for. The window search is gone with it — the
+    whole module is now that one tab, so the assertion covers the file rather
+    than 2,000 characters after a heading, and can no longer be satisfied by
+    a `_break_sessions` call sitting just past the cut-off.
     """
-    src = APP_PATH.read_text(encoding="utf-8")
-    start = src.index("Historical Statistics — ATM IV Ratio")
-    block = src[start:start + 2000]
-    assert 'pm["ratio"] = pm["f"] / pm["b"]' in block, "anchor moved; re-point this test"
-    assert "_break_sessions" not in block, (
+    src = (APP_PATH.parent / "views" / "historical.py").read_text(encoding="utf-8")
+    assert 'pm["ratio"] = pm["f"] / pm["b"]' in src, "anchor moved; re-point this test"
+    assert "_break_sessions" not in src, (
         "the statistics frame must NOT be broken -- NaN rows would corrupt "
         "range_stats() and percentile_rank()"
     )

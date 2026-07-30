@@ -63,6 +63,14 @@ from core.scanner import _compute_transform_scanner as _compute_transform_scanne
 from dataaccess import queries
 from state import chart_colors, eligible_history, entry_locks
 
+# ─── views/ — one module per tab, extracted in M2 step 2.4 ────────────────────
+# Qualified (views.historical.render) rather than imported by name, because
+# every tab exports the same `render`. Each is handed a ViewContext and reaches
+# for nothing else; the @st.cache_data wrappers stay here and travel on it.
+from views import historical as view_historical
+from views import research as view_research
+from views.context import ViewContext
+
 logger = logging.getLogger(__name__)
 
 # ─── Page config ──────────────────────────────────────────────────────────────
@@ -2239,6 +2247,37 @@ _iv_pct = (
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
+# What the extracted tabs are handed (M2 step 2.4)
+#
+# Built HERE, at the end of the prelude, because everything on it is computed
+# above and nothing below may change it — which is the whole reason it is
+# frozen. It grows a field per tab as the remaining tabs move out.
+#
+# The two loaders are passed as values, not imported by the views: they are
+# the memoised wrappers defined further up, and a view importing
+# dataaccess.queries directly would return identical numbers while re-querying
+# on every rerun. Same seam, and same silent failure mode, as `compute=` in
+# core/ and `load=` in dataaccess/ (ADR-032).
+# ─────────────────────────────────────────────────────────────────────────────
+
+VIEW_CTX = ViewContext(
+    snapshot_id=snapshot_id,
+    spx_price=spx_price,
+    front_expiry=front_expiry,
+    back_expiry=back_expiry,
+    front_dte=front_dte,
+    back_dte=back_dte,
+    call_strike=call_strike,
+    put_strike=put_strike,
+    strikes_set=strikes_set,
+    ts_now=ts_now,
+    diag_mark=_diag_mark,
+    norm_deb=_norm_deb,
+    load_atm_hist_fb=_load_atm_hist_fb,
+    load_diagonal_hist=_load_diagonal_hist,
+)
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Mission Control card renderer — used by the Scanner section below
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -3740,167 +3779,12 @@ if st.session_state["active_tab"] == "strike":
 # ═══════════════════════════════════════════════════════════════════════════════
 
 if st.session_state["active_tab"] == "hist":
-
-    st.markdown(
-        f'<div class="sh"><span class="sh-ico">📉</span>'
-        f'<span class="sh-ttl">Historical Statistics — ATM IV Ratio</span>'
-        f'<span class="sh-bdg">{front_expiry} ({front_dte}d) / {back_expiry} ({back_dte}d)</span>'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
-
-    stat_cols = st.columns(4)
-    for col, (label, days) in zip(
-        stat_cols,
-        [("Today", 1), ("5 Days", 5), ("10 Days", 10), ("20 Days", 20)],
-    ):
-        pf = _load_atm_hist_fb(front_expiry, days)
-        pb = _load_atm_hist_fb(back_expiry,  days)
-        with col:
-            st.caption(label)
-            if not pf.empty and not pb.empty:
-                pm = pd.merge(
-                    pf[["timestamp", "atm_iv"]].rename(columns={"atm_iv": "f"}),
-                    pb[["timestamp", "atm_iv"]].rename(columns={"atm_iv": "b"}),
-                    on="timestamp",
-                )
-                pm["ratio"] = pm["f"] / pm["b"]
-                rs       = iv_engine.range_stats(pm["ratio"], ts_now.ratio)
-                pct_rank = iv_engine.percentile_rank(pm["ratio"], ts_now.ratio)
-                _is_low  = pct_rank < 25
-                _is_high = pct_rank > 75
-                _ctx_color = "#10d4a3" if _is_high else ("#f05252" if _is_low else "#6d8fa8")
-                _ctx_label = "HIGH" if _is_high else ("LOW" if _is_low else "MID")
-                st.markdown(
-                    f"""<div style="font-size:0.83em;line-height:1.6;">
-  <span style="color:#2f4459;">Min</span> {rs.low:.4f}
-  <div style="background:linear-gradient(90deg,#0f1e30,#1a2d45);height:5px;border-radius:3px;position:relative;margin:5px 0;">
-    <div style="position:absolute;left:{rs.position_pct:.1f}%;top:-4px;width:13px;height:13px;background:#f05252;border-radius:50%;transform:translateX(-50%);border:2px solid #060b12;"></div>
-  </div>
-  <span style="color:#2f4459;">Max</span> {rs.high:.4f}<br>
-  <span style="color:#2f4459;">Now</span> <b style="color:#dde6f1;">{ts_now.ratio:.4f}</b>
-  &nbsp;<span style="color:{_ctx_color};font-size:0.88em;">{pct_rank:.0f}th · {_ctx_label}</span>
-</div>""",
-                    unsafe_allow_html=True,
-                )
-            else:
-                st.caption("No data")
+    view_historical.render(VIEW_CTX)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 # TAB 5 — RESEARCH
-# ═══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 
 if st.session_state["active_tab"] == "research":
-
-    st.markdown(
-        '<div class="sh"><span class="sh-ico">🔬</span>'
-        '<span class="sh-ttl">Research — IV Ratio vs. Normalized Debit</span>'
-        '</div>',
-        unsafe_allow_html=True,
-    )
-    st.caption(
-        "Each point is one intraday snapshot. X = ATM IV Ratio (F/B); "
-        "Y = Normalized Debit (diagonal mark ÷ ATM straddle). "
-        "Amber diamond = current observation. No predictive claim is made."
-    )
-
-    if not strikes_set:
-        st.info("Set call and put strikes in Controls to populate the scatter.")
-    else:
-        _hist = _load_diagonal_hist(
-            front_expiry, back_expiry, call_strike, put_strike,
-            90, snapshot_id,
-        )
-        if not _hist.empty:
-            _hist["net_debit"] = (
-                _hist["back_call_mark"] + _hist["back_put_mark"]
-                - _hist["front_call_mark"] - _hist["front_put_mark"]
-            )
-            _hist["atm_straddle_hist"] = (
-                _hist["spx"] * _hist["front_iv"]
-                * np.sqrt(2.0 * _hist["front_dte"] / (365.0 * np.pi))
-            )
-            _hist = _hist[_hist["atm_straddle_hist"] > 0].copy()
-            _hist["norm_debit_hist"] = _hist["net_debit"] / _hist["atm_straddle_hist"]
-            _hist["ts"] = pd.to_datetime(_hist["snapshot_timestamp"])
-            _hist["hover_date"] = _hist["ts"].dt.strftime("%Y-%m-%d %H:%M UTC")
-
-        _has_data = not _hist.empty and len(_hist) >= 5
-        fig_sc = go.Figure()
-        if _has_data:
-            fig_sc.add_trace(go.Scatter(
-                x=_hist["iv_ratio"], y=_hist["norm_debit_hist"], mode="markers",
-                marker=dict(color="#5b9cff", size=7, opacity=0.5,
-                            line=dict(color="#1e3a5f", width=0.5)),
-                showlegend=True, name="Historical",
-                hovertemplate=(
-                    "<b>%{customdata[0]}</b><br>SPX: %{customdata[1]:.0f}<br>"
-                    "IV Ratio: %{x:.4f}<br>Norm. Debit: %{y:.4f}<br>"
-                    "Raw Debit: $%{customdata[2]:.2f}<extra></extra>"
-                ),
-                customdata=list(zip(_hist["hover_date"], _hist["spx"], _hist["net_debit"])),
-            ))
-            _valid = _hist[["iv_ratio", "norm_debit_hist"]].dropna()
-            if len(_valid) >= 5:
-                _m_sc, _b_sc = np.polyfit(_valid["iv_ratio"], _valid["norm_debit_hist"], 1)
-                _x_tr = np.linspace(_valid["iv_ratio"].min(), _valid["iv_ratio"].max(), 100)
-                fig_sc.add_trace(go.Scatter(
-                    x=_x_tr, y=_m_sc * _x_tr + _b_sc, mode="lines",
-                    line=dict(color="#2a3f56", width=1.5, dash="dash"),
-                    showlegend=True, name="OLS trend (descriptive)", hoverinfo="skip",
-                ))
-
-        if _norm_deb is not None and ts_now.ratio is not None:
-            fig_sc.add_trace(go.Scatter(
-                x=[ts_now.ratio], y=[_norm_deb], mode="markers",
-                marker=dict(symbol="diamond", color="#f0a429", size=14,
-                            line=dict(color="#78350f", width=1.5)),
-                showlegend=True, name="Current",
-                hovertemplate=(
-                    "<b>Current observation</b><br>"
-                    f"SPX: {spx_price:.0f}<br>"
-                    "IV Ratio: %{x:.4f}<br>Norm. Debit: %{y:.4f}<br>"
-                    + (f"Diagonal Mark: ${_diag_mark:.2f}" if _diag_mark else "")
-                    + "<extra></extra>"
-                ),
-            ))
-
-        fig_sc.add_vline(
-            x=1.0, line=dict(color="#2a3f56", width=1, dash="dot"),
-            annotation_text="ratio = 1.0",
-            annotation_font=dict(color="#2f4459", size=10),
-            annotation_position="top right",
-        )
-        if not _has_data and _norm_deb is None:
-            fig_sc.add_annotation(
-                x=0.5, y=0.5, xref="paper", yref="paper",
-                text="No data yet — scatter populates as snapshots accumulate.",
-                showarrow=False, font=dict(color="#2f4459", size=13),
-            )
-        fig_sc.update_layout(
-            height=400,
-            paper_bgcolor="#060b12",
-            plot_bgcolor="#060b12",
-            margin=dict(l=60, r=20, t=20, b=44),
-            font=dict(family="Inter", color="#6d8fa8", size=11),
-            xaxis=dict(title="ATM IV Ratio (Front / Back)",
-                       title_font=dict(color="#6d8fa8", size=11),
-                       tickfont=dict(color="#6d8fa8", size=11),
-                       gridcolor="#0c1928", showgrid=True, zeroline=False),
-            yaxis=dict(title="Normalized Debit (diagonal mark ÷ ATM straddle)",
-                       title_font=dict(color="#6d8fa8", size=11),
-                       tickfont=dict(color="#6d8fa8", size=11),
-                       gridcolor="#0c1928", showgrid=True, zeroline=False),
-            legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0,
-                        font=dict(color="#6d8fa8", size=11), bgcolor="rgba(0,0,0,0)"),
-            hovermode="closest",
-            hoverlabel=dict(bgcolor="#111c2e", bordercolor="#1a2d45",
-                            font=dict(color="#dde6f1", size=13)),
-        )
-        if not _has_data:
-            st.caption(
-                "Fewer than 5 complete snapshots found for this strike/expiry pair. "
-                "Scatter populates as more data is collected."
-            )
-        st.plotly_chart(fig_sc, use_container_width=True, config={"displayModeBar": False})
+    view_research.render(VIEW_CTX)

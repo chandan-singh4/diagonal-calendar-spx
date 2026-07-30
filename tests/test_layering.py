@@ -28,6 +28,7 @@ ROOT = Path(__file__).resolve().parent.parent
 CORE_DIR = ROOT / "core"
 DATAACCESS_DIR = ROOT / "dataaccess"
 STATE_DIR = ROOT / "state"
+VIEWS_DIR = ROOT / "views"
 
 # core/ computes. It is handed data and returns data.
 FORBIDDEN_CORE = {
@@ -58,10 +59,25 @@ FORBIDDEN_STATE = {
     "requests":       "network I/O",
 }
 
+# views/ DRAWS — so streamlit is not merely allowed here, it is the point.
+# What a view must not do is fetch its own data. The memoised @st.cache_data
+# wrappers live in app.py and arrive on the ViewContext; a view that imported
+# `dataaccess` would render exactly the same page while re-querying SQLite on
+# every rerun — no wrong number, no error, just a dashboard that gets slower
+# and a cache that looks like it is working.
+FORBIDDEN_VIEWS = {
+    "db":             "the database. A view is handed data; it does not fetch it",
+    "sqlite3":        "the database, one layer down",
+    "dataaccess":     "the reads directly, BYPASSING app.py's @st.cache_data wrappers",
+    "schwab_client":  "the broker. Nothing on a page should talk to Schwab",
+    "requests":       "network I/O",
+}
+
 LAYERS = [
     pytest.param(CORE_DIR, FORBIDDEN_CORE, id="core"),
     pytest.param(DATAACCESS_DIR, FORBIDDEN_DATAACCESS, id="dataaccess"),
     pytest.param(STATE_DIR, FORBIDDEN_STATE, id="state"),
+    pytest.param(VIEWS_DIR, FORBIDDEN_VIEWS, id="views"),
 ]
 
 
@@ -70,7 +86,13 @@ def modules_in(directory: Path) -> list[Path]:
 
 
 def all_modules() -> list[Path]:
+    """The layers that must stay free of the page. views/ IS the page, so it
+    is deliberately absent — see view_modules() below for its own rules."""
     return modules_in(CORE_DIR) + modules_in(DATAACCESS_DIR) + modules_in(STATE_DIR)
+
+
+def view_modules() -> list[Path]:
+    return [p for p in modules_in(VIEWS_DIR) if p.name != "context.py"]
 
 
 def _rel(path: Path) -> str:
@@ -188,9 +210,72 @@ def test_state_never_builds_a_path_from_a_bare_filename(path: Path):
     )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# views/ — one entry point, and everything it needs arrives through it
+#
+# The defect being designed out is the one step 2.4 exists to remove: a tab
+# body that reads a name app.py's prelude happened to leave lying in the
+# module namespace. Inside a function that fails loudly as a NameError, so it
+# cannot survive — but only while `render(ctx)` stays the sole way in. Add a
+# second parameter with a default, or a module-level constant computed from a
+# query, and the back door is open again.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("path", view_modules(), ids=_rel)
+def test_every_view_exposes_render_taking_only_the_context(path: Path):
+    renders = [
+        n for n in _tree(path).body
+        if isinstance(n, ast.FunctionDef) and n.name == "render"
+    ]
+    assert len(renders) == 1, f"{_rel(path)} must define exactly one render()"
+    node = renders[0]
+    args = [a.arg for a in node.args.args]
+    assert args == ["ctx"], (
+        f"{_rel(path)}::render({', '.join(args)}) — a view takes the "
+        f"ViewContext and nothing else. An extra parameter is a dependency "
+        f"that no longer has to appear on the context, which is how the "
+        f"prelude's globals grew in the first place."
+    )
+    assert not node.args.defaults and not node.args.kwonlyargs, (
+        f"{_rel(path)}::render has default or keyword-only arguments — a "
+        f"default is an input the caller never has to think about"
+    )
+
+
+@pytest.mark.parametrize("path", view_modules(), ids=_rel)
+def test_a_view_draws_nothing_at_import_time(path: Path):
+    """Module level must hold imports and definitions only.
+
+    A bare `st.something(...)` at module scope would draw on import — once,
+    into whichever tab happened to be rendering — and never again, because
+    Python caches the module. Streamlit reruns the script, not the imports.
+    """
+    offenders = [
+        f"line {n.lineno}: {ast.unparse(n)[:70]}"
+        for n in _tree(path).body
+        if isinstance(n, ast.Expr) and isinstance(n.value, ast.Call)
+    ]
+    assert not offenders, (
+        f"{_rel(path)} executes a call at module level:\n  "
+        + "\n  ".join(offenders)
+        + "\nImports are re-used across reruns; only render() re-runs."
+    )
+
+
+def test_the_extracted_tabs_are_dispatched_from_app():
+    """app.py must actually call each view — an extracted tab that nothing
+    invokes is a blank page, and no other test here would notice."""
+    source = APP_PATH.read_text(encoding="utf-8")
+    for path in view_modules():
+        assert f"{path.stem}.render(" in source.replace("view_", ""), (
+            f"nothing in app.py calls {path.stem}'s render() — the tab was "
+            f"extracted but never wired back in"
+        )
+
+
 def test_layers_import_without_a_dashboard():
     """Each layer must stand up on its own, not only inside a Streamlit run."""
-    for path in all_modules():
+    for path in all_modules() + modules_in(VIEWS_DIR):
         importlib.import_module(f"{path.parent.name}.{path.stem}")
 
 
