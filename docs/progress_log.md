@@ -395,7 +395,7 @@ actually describes. Say if you would rather it went entirely.
 
 **Only the display was removed.** The value is still computed and still carried on every card, and
 is pinned by tests in two files. Deleting the field means retiring those tests, which is a different
-kind of change from removing a `<div>` and deserves its own deliberate commit. Logged as DEBT-031.
+kind of change from removing a `<div>` and deserves its own deliberate commit. Logged as DEBT-031 — **renumbered to DEBT-035 on 2026-07-31**, since the threshold item had already taken that number.
 
 ---
 
