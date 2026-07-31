@@ -7,6 +7,90 @@ it was recorded here.
 
 ---
 
+## ADR-041 — M2 step 2.5: two more layers, and what "under 400 lines" actually required
+**Date:** 2026-07-31 · **Status:** ACCEPTED · **Closes M2 · Closes DEBT-002**
+
+**Decision:** Finish the decomposition. `app.py` 2,505 → **392 lines**, by adding two layers
+rather than stretching the four that existed:
+
+| New home | What moved | Lines |
+|---|---|---|
+| `assets/theme.css` | the stylesheet | 754 |
+| `services/` | memoised loaders, sidecar bindings, the whole Mission Control pipeline | ~670 |
+| `ui/` | theme, sidebar, refresh poller, header, controls bar, locks popover | ~560 |
+| `core/` | `exp_label`, `market.py` (daily change, GEX), `position.py` (derived values) | ~180 |
+| `views/scanner.py` | `_render_mc_section`, with the signature ADR-037 deferred | ~130 |
+
+**The scope in STATUS.md did not add up, and saying so first was the point.** It named two
+pieces — 757 lines of CSS and the 115-line `_render_mc_section`. Both were real and both were
+done, but they total 872 of 2,505, landing at ~1,630 and leaving the step's own stated target
+(under 400) missed by a factor of four. `plan.md` had the honest version all along: *"roughly
+870 of the remaining 2,486 are already identified and spoken for"* — i.e. 1,616 were not.
+Chandan chose the full evacuation once the arithmetic was in front of him. **A target and a
+task list that disagree are a decision waiting to be made by whoever notices last.**
+
+**Why two new layers, not four stretched ones.** Both candidates failed on a rule that is
+load-bearing rather than tidy:
+
+* The Mission Control pipeline reads `st.session_state` — the "New" badge is a diff against
+  what the *previous* snapshot showed, so the state must survive reruns and cannot sit inside
+  a cached function. That bars `core/` absolutely, and `dataaccess/` is told which database
+  where these wrappers *decide* it. Hence `services/`: **the only layer permitted both
+  `config` and `streamlit`**, which is precisely the pair every other layer is kept from.
+* The header, sidebar and controls bar are not tabs. They run before any tab is chosen, and
+  the controls bar *returns* the selection every tab then reads. `views/` answers to "expose
+  `render(ctx)` and nothing else"; forcing chrome in would have meant loosening that rule for
+  all six tabs to accommodate four things that are not tabs. Hence `ui/`, with views'/ two
+  rules intact: **it draws, and it never fetches.**
+
+**Alternatives rejected:** (a) do only the two named pieces — leaves M2 open at ~1,630 lines
+and defers the same decision to the next session; (b) one `page/` package for both new layers
+— it would contain both "must not touch streamlit's caches" and "is nothing but drawing", so
+no import rule could be written for it, and an unenforceable layer is a comment.
+
+**Tradeoff:** eleven new files and one genuinely non-obvious import graph
+(`app → ui → services → {core, dataaccess, state}`) in exchange for a top-level file that can
+be read in one sitting. Two ordering constraints that were previously implicit in a single
+long script are now split across modules and documented in prose at both ends — `ui/controls.py`
+holds three of them, and two fail only at runtime.
+
+**What the step actually rests on, and it is not the test suite.** Phase 3 moved
+`_ELIGIBLE_HISTORY_RETENTION_DAYS` into `services/sidecars.py` and left the reference behind.
+**All 639 tests passed and every one of the six tabs raised on load.** That is not a gap in the
+suite, it is structural and `scripts/render_check.py` has said so since M2.2: the tests exercise
+functions, and until this step the page could not be exercised at all. So each of the eight
+phases was verified by a before/after **render comparison** — `AppTest` against a git worktree of
+HEAD and against the working tree, same database, state redirected, every rendered string
+diffed. All eight came back identical across all six tabs.
+
+**Two things that comparison could not see, both handled separately.** (1) It redacts the
+checkout path as known noise, because a worktree legitimately differs there — so it was blind to
+`reauth_command`, whose `Path(__file__).parent` had to become `.parent.parent` when it moved
+into `ui/`. Get that wrong and the dashboard hands you a `cd` into the wrong directory, which
+you discover only once the token has expired. Asserted directly instead. (2) Charts remain
+uncovered entirely — Streamlit 1.58 exposes no `plotly_chart` accessor — unchanged from 2.4.
+
+**A harness that drifts is worse than none.** The first comparison run showed "Seen 2× → 3×" on
+every card. Not the code: Chandan's dashboard was running, Streamlit reloads it on every source
+save, and each reload recomputed Mission Control and bumped `hit_count` in the real registry
+that the harness was copying as its starting state. Frozen once, then reused — **the fix was to
+remove the drift, not to filter the symptom out of the diff.**
+
+**13 injected faults, 13 caught** — and the thirteenth is the finding. The DEBT-030 guard
+(*every timestamped read must be display-converted before it reaches a chart*) matched
+`load_atm_hist`, while every call site outside `views/` is named `_load_atm_hist`. **One
+underscore had made half that guard decorative since the day it was written**; `views/` was
+covered only because a view happens to call `ctx.load_atm_hist_fb(...)` without one. Mutation
+found it, nothing else would have, and this is the second consecutive session in which the
+break-it-deliberately exercise found a blind check rather than confirming a healthy one.
+
+**Left deliberately untouched, and recorded rather than fixed:** `spx_intraday["ts_et"]` is
+computed and never read (DEBT-034), and `kpi_html` is still BUG-019 and still Chandan's call.
+Fixing either inside a move destroys the one property that makes the move checkable — the same
+reasoning as step 2.4, applied to the same class of temptation.
+
+---
+
 ## ADR-040 — What BUG-020 cost, and the blind spot that let it run for a month
 **Date:** 2026-07-30 · **Status:** ACCEPTED · **Closes BUG-020**
 

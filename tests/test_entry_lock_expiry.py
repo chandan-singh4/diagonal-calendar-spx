@@ -180,8 +180,15 @@ def test_the_purge_survives_a_lock_with_an_unreadable_expiry(tmp_path):
 def test_the_app_purges_before_it_reads_locks():
     """The popover, the current-combo lookup and the chart all go through
     _load_entry_locks. The purge belongs inside it, so there is exactly one
-    place to get this right rather than one per caller."""
-    src = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
+    place to get this right rather than one per caller.
+
+    Re-pointed at services/sidecars.py in M2 step 2.5, when the sidecar
+    wrappers left app.py. The function did not change — only its address —
+    and this test failed loudly on its own anchor rather than passing
+    vacuously, which is the whole reason the anchor assertion is here.
+    """
+    src = (Path(__file__).resolve().parents[1]
+           / "services" / "sidecars.py").read_text(encoding="utf-8")
     body = re.search(
         r"\ndef _load_entry_locks\(\)[^\n]*\n(.*?)(?=\ndef |\n@)", src, re.S,
     )

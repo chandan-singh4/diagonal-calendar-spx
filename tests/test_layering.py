@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import ast
 import importlib
+import re
 from pathlib import Path
 
 import pytest
@@ -29,6 +30,22 @@ CORE_DIR = ROOT / "core"
 DATAACCESS_DIR = ROOT / "dataaccess"
 STATE_DIR = ROOT / "state"
 VIEWS_DIR = ROOT / "views"
+SERVICES_DIR = ROOT / "services"
+UI_DIR = ROOT / "ui"
+
+
+def page_sources() -> list[Path]:
+    """app.py and everything M2 step 2.5 lifted out of it.
+
+    The source-anchored tests below used to read app.py alone, because app.py
+    was where all of this lived. Several of them started failing the moment
+    the code moved — each with its own "re-point this test" message, which is
+    exactly what those messages are for. They are pointed at the SET rather
+    than at a new single file so that the next move does not silently empty
+    them: a check that scans a file the code has left passes vacuously, and a
+    vacuous pass is indistinguishable from a real one.
+    """
+    return [APP_PATH, *sorted(SERVICES_DIR.glob("*.py")), *sorted(UI_DIR.glob("*.py"))]
 
 # core/ computes. It is handed data and returns data.
 FORBIDDEN_CORE = {
@@ -73,11 +90,38 @@ FORBIDDEN_VIEWS = {
     "requests":       "network I/O",
 }
 
+# services/ is the page's data layer, added in M2 step 2.5. It is the ONLY
+# layer allowed both `config` and `streamlit` — the memoised loaders are
+# @st.cache_data and they supply config.DB_PATH, which is precisely the pair
+# every other layer is kept away from. What it must not do is draw, or reach
+# outward to the broker.
+FORBIDDEN_SERVICES = {
+    "schwab_client":  "the broker. The dashboard reads history; it never collects",
+    "requests":       "network I/O",
+    "views":          "a tab. services/ is called BY the page, not the other way round",
+    "ui":             "page chrome. Same inversion — data must not depend on chrome",
+}
+
+# ui/ DRAWS the page chrome — theme, sidebar, header, controls bar, refresh.
+# streamlit is the point here. What a ui/ module must not do is FETCH: same
+# rule as views/, and the same invisible failure if broken (a page that looks
+# identical while re-querying SQLite on every rerun).
+FORBIDDEN_UI = {
+    "db":             "the database. A ui/ module is handed its data",
+    "sqlite3":        "the database, one layer down",
+    "dataaccess":     "the reads directly, BYPASSING the @st.cache_data wrappers",
+    "schwab_client":  "the broker. The token age arrives as an argument",
+    "requests":       "network I/O",
+    "views":          "a tab. Chrome renders around the tabs, not from them",
+}
+
 LAYERS = [
     pytest.param(CORE_DIR, FORBIDDEN_CORE, id="core"),
     pytest.param(DATAACCESS_DIR, FORBIDDEN_DATAACCESS, id="dataaccess"),
     pytest.param(STATE_DIR, FORBIDDEN_STATE, id="state"),
     pytest.param(VIEWS_DIR, FORBIDDEN_VIEWS, id="views"),
+    pytest.param(SERVICES_DIR, FORBIDDEN_SERVICES, id="services"),
+    pytest.param(UI_DIR, FORBIDDEN_UI, id="ui"),
 ]
 
 
@@ -300,8 +344,12 @@ def test_no_view_helper_is_also_left_behind_in_app():
     app_tree = ast.parse(APP_PATH.read_text(encoding="utf-8"), filename=str(APP_PATH))
     in_app = {n.name for n in app_tree.body if isinstance(n, ast.FunctionDef)}
 
+    # Widened in step 2.5 from views/ alone to every directory that step
+    # moved code INTO. That step took ~2,100 lines out of app.py across six
+    # modules, so "the extraction copied instead of moving" had six new ways
+    # to happen, not one.
     duplicated = []
-    for path in view_modules():
+    for path in view_modules() + modules_in(SERVICES_DIR) + modules_in(UI_DIR):
         for node in _tree(path).body:
             if isinstance(node, ast.FunctionDef) and node.name in in_app:
                 duplicated.append(f"{node.name} — in app.py AND {_rel(path)}")
@@ -330,7 +378,7 @@ def test_every_consumer_of_a_timestamped_read_converts_it_for_display():
     LOADERS = {"load_atm_hist", "load_atm_hist_fb", "load_contract_hist"}
     offenders = []
 
-    for path in [APP_PATH, *view_modules()]:
+    for path in [*page_sources(), *view_modules()]:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
 
         # Calls that are DIRECTLY wrapped: to_display_time(loader(...), tz)
@@ -348,11 +396,20 @@ def test_every_consumer_of_a_timestamped_read_converts_it_for_display():
                 continue
             name = (node.func.attr if isinstance(node.func, ast.Attribute)
                     else getattr(node.func, "id", None))
-            if name not in LOADERS or id(node) in wrapped:
+            # The leading underscore is stripped before matching, and that is
+            # not cosmetic. The memo wrappers are `_load_atm_hist`; the names
+            # here were the un-underscored ones, so EVERY call site outside
+            # views/ was invisible to this check. Found by mutation during M2
+            # step 2.5: unwrapping app.py's ATM history read changed nothing
+            # and the test stayed green. views/ was covered only because a
+            # view calls `ctx.load_atm_hist_fb(...)`, which happens to carry
+            # no underscore.
+            if name is None or name.lstrip("_") not in LOADERS or id(node) in wrapped:
                 continue
-            # The memo wrappers in app.py are definitions, not consumers: they
-            # call queries.<loader> to BUILD the cached read. Converting there
-            # would put the display decision straight back in the data path.
+            # The memo wrappers (services/loaders.py since step 2.5) are
+            # definitions, not consumers: they call queries.<loader> to BUILD
+            # the cached read. Converting there would put the display decision
+            # straight back in the data path.
             if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name) \
                     and node.func.value.id == "queries":
                 continue
@@ -366,20 +423,136 @@ def test_every_consumer_of_a_timestamped_read_converts_it_for_display():
 
 
 def test_the_extracted_tabs_are_dispatched_from_app():
-    """app.py must actually call each view — an extracted tab that nothing
-    invokes is a blank page, and no other test here would notice."""
-    source = APP_PATH.read_text(encoding="utf-8")
-    for path in view_modules():
-        assert f"{path.stem}.render(" in source.replace("view_", ""), (
-            f"nothing in app.py calls {path.stem}'s render() — the tab was "
-            f"extracted but never wired back in"
-        )
+    """app.py must reference each view's render — an extracted tab that
+    nothing invokes is a blank page, and no other test here would notice.
+
+    Asserted on the parsed tree rather than as a substring, because step 2.5
+    replaced six literal `view_x.render(VIEW_CTX)` call sites with one
+    dispatch table holding the renderers as VALUES. The old check looked for
+    the text "x.render(" and would have failed on correct code; matching
+    `view_x.render` as an attribute access covers both forms.
+
+    Stronger than the substring version in one way that matters: it compares
+    the SETS, so a view that is referenced twice while another is missed —
+    the copy-paste failure this file has already seen once — is caught, where
+    a per-name `in` check would pass.
+    """
+    tree = ast.parse(APP_PATH.read_text(encoding="utf-8"), filename=str(APP_PATH))
+    dispatched = {
+        node.value.id.removeprefix("view_")
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute) and node.attr == "render"
+        and isinstance(node.value, ast.Name) and node.value.id.startswith("view_")
+    }
+    expected = {path.stem for path in view_modules()}
+    assert dispatched == expected, (
+        f"app.py dispatches {sorted(dispatched)} but views/ holds "
+        f"{sorted(expected)} — a tab was extracted and never wired back in, "
+        f"or wired in twice under one name"
+    )
 
 
 def test_layers_import_without_a_dashboard():
     """Each layer must stand up on its own, not only inside a Streamlit run."""
-    for path in all_modules() + modules_in(VIEWS_DIR):
+    for path in (all_modules() + modules_in(VIEWS_DIR)
+                 + modules_in(SERVICES_DIR) + modules_in(UI_DIR)):
         importlib.import_module(f"{path.parent.name}.{path.stem}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ui/ — the same two rules views/ has, for the same two reasons
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("path", modules_in(UI_DIR), ids=_rel)
+def test_a_ui_module_never_reaches_for_the_configured_database(path: Path):
+    """`config` is allowed in ui/ — ui/sidebar.py reads POLL_INTERVAL_NORMAL
+    and POLL_INTERVAL_EVENT, genuine display settings. The two dangerous
+    attributes are named instead, exactly as for dataaccess/ and views/.
+
+    STATE_DIR matters as much as DB_PATH here: ui/locks.py writes entry locks
+    through services/sidecars.py, and a ui/ module that could resolve the
+    state directory itself would re-create DEBT-011 — sidecar files resolved
+    against the working directory, silently empty when the app is launched
+    from anywhere but the project root.
+    """
+    hits = [
+        node for node in ast.walk(_tree(path))
+        if isinstance(node, ast.Attribute) and node.attr in {"DB_PATH", "STATE_DIR"}
+        and isinstance(node.value, ast.Name) and node.value.id == "config"
+    ]
+    assert not hits, (
+        f"{_rel(path)} reads config.{hits[0].attr}. Chrome is handed its data "
+        f"and its files; knowing where they live is how it starts fetching them."
+    )
+
+
+@pytest.mark.parametrize("path", modules_in(UI_DIR), ids=_rel)
+def test_a_ui_module_draws_nothing_at_import_time(path: Path):
+    """Module level holds imports and definitions only — the views/ rule.
+
+    A bare `st.something(...)` at module scope would draw ONCE, into whichever
+    render happened to trigger the import, and never again: Streamlit reruns
+    the script, not the imports. This is a live hazard for ui/ specifically,
+    because the code it holds was procedural top-level statements in app.py
+    until step 2.5 and wrapping every one of them in a function was the move.
+    """
+    offenders = [
+        f"line {n.lineno}: {ast.unparse(n)[:70]}"
+        for n in _tree(path).body
+        if isinstance(n, ast.Expr) and isinstance(n.value, ast.Call)
+    ]
+    assert not offenders, (
+        f"{_rel(path)} executes a call at module level:\n  "
+        + "\n  ".join(offenders)
+        + "\nImports are re-used across reruns; only the functions re-run."
+    )
+
+
+def test_the_reauth_command_points_at_the_project_root():
+    """The one thing in step 2.5 the render comparison could NOT have checked.
+
+    `reauth_command` builds `cd "<project dir>"` from `Path(__file__)`. In
+    app.py that was `.parent`; in ui/sidebar.py the same expression means
+    ui/, so it had to become `.parent.parent`. Get it wrong and the command
+    silently tells you to cd into a directory with no scripts/reauth.py —
+    and you only find out when the token has already expired and the
+    collector has been blind for hours.
+
+    The before/after render harness is blind to this by construction: it
+    REDACTS the checkout path as known noise, because a git worktree and the
+    working tree must legitimately differ there. So it is asserted directly.
+    """
+    from ui.sidebar import PROJECT_DIR, reauth_command
+
+    assert (PROJECT_DIR / "app.py").is_file(), (
+        f"ui.sidebar.PROJECT_DIR is {PROJECT_DIR}, which contains no app.py — "
+        f"the re-auth command would tell you to cd somewhere wrong"
+    )
+    assert (PROJECT_DIR / "scripts" / "reauth.py").is_file(), (
+        f"{PROJECT_DIR}/scripts/reauth.py does not exist — the command the "
+        f"dashboard hands you would fail when pasted"
+    )
+    assert str(PROJECT_DIR) in reauth_command("python.exe")
+
+
+def test_the_stylesheet_exists_and_is_wrapped_in_a_style_tag():
+    """A missing or empty theme.css renders an UNSTYLED page, not an error.
+
+    The 757-line stylesheet became a file in step 2.5. Nothing else in the
+    suite would notice if it vanished, was truncated, or stopped being
+    wrapped in <style> — every test would pass and the dashboard would come
+    up as unformatted black-on-white HTML.
+    """
+    from ui import theme
+
+    assert theme.STYLESHEET.is_file(), f"{theme.STYLESHEET} is missing"
+    css = theme.css()
+    assert len(css.splitlines()) > 500, (
+        f"assets/theme.css is only {len(css.splitlines())} lines — it was 754 "
+        f"when extracted; this looks truncated"
+    )
+    assert "<style" not in css, "the .css file should hold CSS, not HTML tags"
+    assert ":root {" in css, "the design tokens block is missing"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -397,15 +570,19 @@ def test_layers_import_without_a_dashboard():
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _calls_to(func_name: str) -> list[ast.Call]:
-    tree = ast.parse(APP_PATH.read_text(encoding="utf-8"), filename=str(APP_PATH))
-    return [
-        n for n in ast.walk(tree)
-        if isinstance(n, ast.Call)
-        and (
-            (isinstance(n.func, ast.Name) and n.func.id == func_name)
-            or (isinstance(n.func, ast.Attribute) and n.func.attr == func_name)
+    """Every call to `func_name` across app.py and the modules split out of it."""
+    calls: list[ast.Call] = []
+    for path in page_sources():
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        calls.extend(
+            n for n in ast.walk(tree)
+            if isinstance(n, ast.Call)
+            and (
+                (isinstance(n.func, ast.Name) and n.func.id == func_name)
+                or (isinstance(n.func, ast.Attribute) and n.func.attr == func_name)
+            )
         )
-    ]
+    return calls
 
 
 def test_the_offset_sweep_is_handed_the_memoised_scanner():
@@ -444,29 +621,40 @@ def test_the_refresh_poller_adopts_the_snapshot_before_it_reruns():
     It needs one new snapshot to trigger, so the first page load always looks
     fine — which is why this survived so long and read as "sometimes frozen".
 
-    Asserted on the source because there is no seam to call: the fragment is
-    defined and invoked inside app.py's module body, and no test can run it
-    (AppTest does not fire fragment timers at all, which is exactly why the
-    suite never saw this).
+    Asserted on the source because there is no seam to call: no test can run
+    the fragment (AppTest does not fire fragment timers at all, which is
+    exactly why the suite never saw this).
+
+    Re-pointed at ui/refresh.py in M2 step 2.5, where the poller now lives.
+    It failed on its own anchor during that move rather than passing
+    vacuously against a file the code had left — which is the only reason
+    this re-point is a re-point and not a silent loss of the guard.
     """
-    src = APP_PATH.read_text(encoding="utf-8")
+    src = (ROOT / "ui" / "refresh.py").read_text(encoding="utf-8")
     start = src.index("def _live_refresh_poller()")
     # The CALL site, not the def line — "_live_refresh_poller()" also matches
     # inside "def _live_refresh_poller()", which silently sliced this down to
     # the four characters "def " on the first attempt and made the assertion
     # below fail for entirely the wrong reason.
-    block = src[start:src.index("\n    _live_refresh_poller()", start)]
+    call_site = re.search(r"\n\s*_live_refresh_poller\(\)\s*\n", src[start:])
+    assert call_site, "the poller is defined but never invoked"
+    block = src[start:start + call_site.start()]
 
     adopt = 'st.session_state["_active_snapshot_id"] = _latest_id'
     assert block.count(adopt) == 2, (
         "the poller should record the snapshot in BOTH branches — the "
         "first-run branch and the newer-snapshot branch"
     )
-    # Match the STATEMENT, with its indentation — not the bare text, which
-    # also occurs in the comment explaining this very bug. The first version
-    # of this test matched the prose and failed against correct code.
-    rerun_at = block.index("\n            st.rerun()")
-    adopt_at = block.rindex("\n            " + adopt)
+    # Match the STATEMENT — a line whose only content is the code — not the
+    # bare text, which also occurs in the comment explaining this very bug.
+    # The first version of this test matched the prose and failed against
+    # correct code. Indentation is matched as "whatever leads the line" rather
+    # than a fixed depth: step 2.5 moved this function one level deeper inside
+    # `install()`, and a hardcoded depth would have failed for the wrong
+    # reason a second time.
+    rerun_at = [m.start() for m in re.finditer(r"\n[ \t]*st\.rerun\(\)", block)][-1]
+    adopt_at = [m.start() for m in
+                re.finditer(r"\n[ \t]*" + re.escape(adopt), block)][-1]
     assert adopt_at < rerun_at, (
         "st.rerun() is called BEFORE the poller records the snapshot it is "
         "rerunning for. rerun() aborts the script, so the record never "

@@ -5,6 +5,92 @@ what broke, and what remains.
 
 ----
 
+## 2026-07-31 (session 10) — M2 finished: app.py 2,505 → 392 lines
+
+### Completed
+
+**The last step of the decomposition is done, and the milestone with it.** `app.py` began this
+milestone at 4,283 lines and ends it at **392** — assembly and nothing else. It now holds no
+calculation, no stylesheet, no database query and no tab body. Every one of those has a layer with
+a written rule and a test that enforces it.
+
+**The brief did not add up, and that was worth saying before starting.** STATUS.md named two
+pieces: 757 lines of stylesheet and the 115-line Mission Control card renderer. Both were real,
+both are done — and together they are 872 of 2,505, which lands at about 1,630 and misses the
+step's own target of "under 400" by a factor of four. The plan file had the honest number all
+along: roughly 870 lines were "identified and spoken for", meaning 1,616 were not. Chandan was
+shown the arithmetic and chose the full evacuation.
+
+**Two new layers, because the existing four each failed on a rule worth keeping.** The Mission
+Control pipeline reads session state — the "New" badge on a card is a comparison against what the
+*previous* snapshot showed, so that memory has to survive a page rerun and cannot sit inside a
+cached function. That rules out the pure-calculation layer completely. So `services/` was added:
+the memoised reads, the sidecar-file bindings and Mission Control, and **the only layer allowed to
+know both where the database is and how the page caches things** — which is exactly the pair every
+other layer is deliberately kept away from. Separately, the header, sidebar and controls bar are
+not tabs: they run before any tab is chosen, and the controls bar is where the current expiry and
+strike selection actually comes from. `ui/` holds those, under the two rules the tabs already
+follow: it draws, and it never fetches its own data.
+
+### What this rests on, and it is not the test suite
+
+**Partway through, a move left every one of the six tabs raising on load — and all 639 tests
+passed.** One constant had moved to a new file and one reference to it had not followed. The suite
+never saw it because the suite exercises functions, and until this step the page could not be
+exercised at all; `scripts/render_check.py` has said exactly this in its own docstring since July.
+
+So each of the eight phases was checked by running the whole dashboard twice — once against a
+copy of the last commit, once against the working tree, on the same database — and comparing
+**every string either one drew**, per tab. **Eight phases, eight identical results across all six
+tabs.** That is the evidence for this step. The tests are a floor, not the proof.
+
+**The comparison drifted before it was trusted, which nearly wasted it.** The first run showed
+every opportunity card reading "Seen 3×" where the baseline said "Seen 2×". Not the code:
+Chandan's dashboard is running, Streamlit reloads it whenever a source file is saved, and each
+reload recomputed Mission Control and incremented a counter in the real registry file the harness
+was copying as its starting point. Fixed by freezing that state once and starting every run from
+the frozen copy — **removing the drift rather than filtering the symptom out of the diff**, which
+would have trained the eye to skip the exact region where a real difference would appear.
+
+**Two things the comparison cannot see, both handled separately.** It redacts the checkout
+directory as known noise, because a scratch copy legitimately differs there — so it was blind to
+the re-authentication command, which is built from the file's own location and had to be adjusted
+by one directory level when it moved. Get that wrong and the dashboard hands you an instruction to
+change into the wrong folder, discovered only when the token has already expired and collection
+has stopped. That one is asserted directly instead. Charts remain uncovered entirely, unchanged
+from last session: the testing tool exposes no way to read inside one.
+
+### Discovered
+
+**13 faults injected deliberately, 13 caught — and the thirteenth is the finding.** A guard
+written last session checks that every timestamped database read is converted to local time before
+it can reach a chart; miss a site and a chart's x-axis moves four or five hours while still looking
+completely plausible. It matched the name `load_atm_hist`. Every call site outside the tabs is
+named `_load_atm_hist`. **One underscore had made half that check decorative from the day it was
+written** — the tabs were covered only by the accident that a tab reaches its loader through a
+name that happens to carry no underscore. Nothing but deliberately breaking the code would have
+found this. That is the second session running in which this exercise found a blind check rather
+than confirming a healthy one.
+
+**Two things left alone on purpose, both recorded instead.** The intraday price frame is loaded
+and timezone-converted to build a column nothing reads — the frame's only surviving use is a
+single number (DEBT-034). And the Scanner's missing summary cards are still BUG-019, still
+Chandan's decision. Fixing either one inside a move would have destroyed the single property that
+makes the move checkable, which is the same reasoning that protected BUG-019 when it was found
+last session.
+
+### Numbers
+
+- `app.py` **2,505 → 392** lines (4,283 → 392 across the whole milestone, −91%)
+- **639 → 659 tests**, all passing (+20: the two new layers' import rules, applied per
+  module, plus the re-auth path and the stylesheet's integrity)
+- Lint **102 → 95** findings
+- 13 injected faults, **13 caught**
+- 8 render comparisons, **8 identical**
+- Closed: **DEBT-002**. Opened: **DEBT-033**, **DEBT-034** (both P3, both deliberate)
+
+----
+
 ## 2026-07-30 (session 9, continued) — expired locks now delete themselves
 
 ### Completed

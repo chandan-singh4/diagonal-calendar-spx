@@ -8,8 +8,145 @@ from __future__ import annotations
 
 import streamlit as st
 
+from core.format import fmt_duration, fmt_eta
 from core.scanner import TSCAN_THRESHOLD
 from views.context import ViewContext
+
+
+def _render_mc_section(cards: list[dict], section: str, title: str, icon: str,
+                        *, spx_price: float, snapshot_ts: str,
+                        show_duration: bool = True,
+                        show_live_badge: bool = False) -> None:
+    """Draw one titled grid of Mission Control opportunity cards.
+
+    MOVED HERE IN M2 STEP 2.5, and it is the one extraction in this
+    milestone that could not be a pure move. In app.py the last two lines
+    of the Journal deep-link read `spx_price` and `snap_ts_str` straight
+    out of the module namespace — the exact pattern step 2.4 existed to
+    remove, and the reason ADR-037 injected this function through the
+    context instead of moving it with the rest of the tab.
+
+    They are keyword-only ON PURPOSE. ADR-034 is the record of what a
+    signature change costs when a call site is missed: `_exp_label` gained
+    a required argument, two of three call sites were updated, and the
+    third was a `format_func` passed by reference — invisible to a grep
+    for the function name. All 569 tests passed and every tab raised
+    TypeError on load. Keyword-only means a positional call cannot
+    silently bind `spx_price` to whatever used to sit in that slot; it
+    fails loudly instead.
+    """
+    if not cards:
+        return
+    st.markdown(
+        f'<div class="sh" style="margin-top:.3rem">'
+        f'<span class="sh-ico">{icon}</span>'
+        f'<span class="sh-ttl">{title}</span>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+    n_cols = 3
+    for row_start in range(0, len(cards), n_cols):
+        row_cards = cards[row_start:row_start + n_cols]
+        cols = st.columns(n_cols)
+        for c_idx, (card, col) in enumerate(zip(row_cards, cols)):
+            gidx = row_start + c_idx
+            with col:
+                with st.container(key=f"mc_card_{section}_{gidx}"):
+                    _new_badge = '<span class="mc-new-badge">NEW</span>' if card["is_new"] else ""
+                    _is_live = card.get("is_live", True)
+                    if show_live_badge:
+                        if _is_live:
+                            _live_badge = '<span class="mc-live-badge">LIVE</span>'
+                        elif card.get("outside_lookback"):
+                            _live_badge = '<span class="mc-stale-badge">OUTSIDE WINDOW</span>'
+                        else:
+                            _live_badge = '<span class="mc-stale-badge">PAST</span>'
+                    else:
+                        _live_badge = ""
+                    _gap_label = "Gap" if _is_live else "Peak Gap"
+                    _gap_class = "gap" if _is_live else "gap gap-stale"
+                    # The trend arrow used to ride on the end of the sparkline.
+                    # That was removed 2026-07-30 as clutter; the arrow moved
+                    # here, onto the number it actually describes.
+                    _trend_arrow = " ↑" if card["trend_up"] else ""
+                    _metrics = (
+                        f'<div><span class="mc-metric-l">{_gap_label}</span>'
+                        f'<span class="mc-metric-v {_gap_class}">'
+                        f'+{card["gap"]:.2f}{_trend_arrow}</span></div>'
+                    )
+                    if show_duration and _is_live:
+                        _metrics += (
+                            f'<div><span class="mc-metric-l">Active</span>'
+                            f'<span class="mc-metric-v">{fmt_duration(card["duration"])}</span></div>'
+                        )
+                    elif show_live_badge and not _is_live:
+                        _metrics += (
+                            f'<div><span class="mc-metric-l">Last Crossed</span>'
+                            f'<span class="mc-metric-v">{card.get("last_seen_ago", "—")}</span></div>'
+                        )
+                    if show_live_badge and card.get("hit_count") is not None:
+                        _metrics += (
+                            f'<div><span class="mc-metric-l">Seen</span>'
+                            f'<span class="mc-metric-v">{card["hit_count"]}×</span></div>'
+                        )
+                    if card["iv_ratio"] is not None:
+                        _metrics += (
+                            f'<div><span class="mc-metric-l">IV Ratio</span>'
+                            f'<span class="mc-metric-v">{card["iv_ratio"]:.4f}</span></div>'
+                        )
+                    _eta_html = (
+                        f'<div class="mc-eta">ETA {fmt_eta(card["eta_minutes"])}</div>'
+                        if card.get("eta_minutes") is not None else ""
+                    )
+                    # No sparkline row: the gap's shape over time is what "View
+                    # Chart" opens, drawn properly and at a readable size, so a
+                    # 10-glyph version on every card was clutter rather than
+                    # information. Removed 2026-07-30 at Chandan's request.
+                    st.markdown(
+                        f'<div class="mc-rank">#{gidx + 1}{_live_badge}{_new_badge}</div>'
+                        f'<div class="mc-combo">{int(card["put_strike"])}P / {int(card["call_strike"])}C</div>'
+                        f'<div class="mc-expiry">{card["front_label"]} → {card["back_label"]}</div>'
+                        f'<div class="mc-metrics">{_metrics}</div>'
+                        f'{_eta_html}',
+                        unsafe_allow_html=True,
+                    )
+                    st.markdown('<div class="mc-actions-spacer"></div>', unsafe_allow_html=True)
+                    bcol1, bcol2 = st.columns(2)
+                    with bcol1:
+                        if st.button("View Chart", key=f"viewchart_{section}_{gidx}",
+                                     use_container_width=True):
+                            # Can't write directly to *_select keys here — those
+                            # widgets already rendered earlier in this script run
+                            # (Controls Bar comes before Scanner). Stage under
+                            # pending_ keys instead; they get promoted to the real
+                            # widget keys at the top of the NEXT run, before the
+                            # Controls Bar widgets are instantiated.
+                            st.session_state["pending_front_expiry"] = card["front_raw"]
+                            st.session_state["pending_back_expiry"]  = card["back_raw"]
+                            st.session_state["pending_put_strike"]   = card["put_strike"]
+                            st.session_state["pending_call_strike"]  = card["call_strike"]
+                            st.session_state["active_tab"] = "edge"
+                            st.rerun()
+                    with bcol2:
+                        if st.button("📓 Journal", key=f"journal_{section}_{gidx}",
+                                     use_container_width=True):
+                            # Deep-link contract for pages/journal.py — that page
+                            # should read st.session_state.get("journal_prefill")
+                            # on load and pre-populate a new IC-transform entry.
+                            st.session_state["journal_prefill"] = dict(
+                                type="transform",
+                                front_expiry=card["front_raw"], back_expiry=card["back_raw"],
+                                put_strike=card["put_strike"], call_strike=card["call_strike"],
+                                transform_gap=card["gap"], iv_ratio=card["iv_ratio"],
+                                spx_price=spx_price, timestamp=snapshot_ts,
+                            )
+                            try:
+                                st.switch_page("pages/journal.py")
+                            except Exception:
+                                st.info(
+                                    "Trade details staged — open Journal from the "
+                                    "sidebar to continue."
+                                )
 
 
 def render(ctx: ViewContext) -> None:
@@ -23,12 +160,10 @@ def render(ctx: ViewContext) -> None:
     justified it no longer applies and the before/after RENDER comparison is
     what stands behind this file instead (ADR-038).
 
-    `_render_mc_section` is INJECTED rather than moved here with the rest.
-    It reads `snap_ts_str` and `spx_price` from app.py's module namespace, so
-    bringing it across means turning those into parameters — a signature
-    change, and ADR-034 is the record of what a signature change costs when a
-    call site is missed. That belongs in its own step, with the call sites
-    checked; it is 115 lines step 2.5 must still move.
+    `_render_mc_section` now lives at the top of this file. Step 2.4 injected
+    it through the context because it read two of app.py's prelude globals and
+    moving it meant a signature change; step 2.5 made that change, and both
+    values arrive off the context here (ADR-040).
 
     Carried across unchanged: `use_container_width` (DEBT-029), and the
     hardcoded threshold comparisons the table shares with DEBT-031.
@@ -57,9 +192,10 @@ def render(ctx: ViewContext) -> None:
     else:
         if ctx.mc["non_atm"]:
             _lb_label = st.session_state["mc_lookback_select"]
-            ctx.render_mc_section(
+            _render_mc_section(
                 ctx.mc["non_atm"][:6], "natm",
                 f"Non-ATM Opportunities — live or active within {_lb_label}", "🟢",
+                spx_price=ctx.spx_price, snapshot_ts=ctx.snapshot_ts,
                 show_live_badge=True,
             )
             _caption_bits = []
@@ -75,9 +211,10 @@ def render(ctx: ViewContext) -> None:
             if _caption_bits:
                 st.caption(" ".join(_caption_bits))
 
-        ctx.render_mc_section(
+        _render_mc_section(
             ctx.mc["likely_next"][:3], "likely",
             "Likely Next — gap rising, sorted by soonest ETA", "⏱",
+            spx_price=ctx.spx_price, snapshot_ts=ctx.snapshot_ts,
             show_duration=False,
         )
 

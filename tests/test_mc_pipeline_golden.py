@@ -87,8 +87,8 @@ def test_the_expiry_label_uses_the_table_it_is_given(pipe):
     apart. Handing it two DIFFERENT tables must give two different answers; the
     old version would have given the same one twice, or dropped the suffix.
     """
-    seven = pipe["_exp_label"](MC_FRONT_EXPIRY, {MC_FRONT_EXPIRY: 7})
-    ninety = pipe["_exp_label"](MC_FRONT_EXPIRY, {MC_FRONT_EXPIRY: 90})
+    seven = pipe["exp_label"](MC_FRONT_EXPIRY, {MC_FRONT_EXPIRY: 7})
+    ninety = pipe["exp_label"](MC_FRONT_EXPIRY, {MC_FRONT_EXPIRY: 90})
 
     assert "(7 DTE)" in seven
     assert "(90 DTE)" in ninety
@@ -97,7 +97,7 @@ def test_the_expiry_label_uses_the_table_it_is_given(pipe):
 def test_an_expiry_missing_from_the_table_loses_only_its_suffix(pipe):
     """The fallback path, pinned: an unknown expiry still renders a readable
     date rather than raising or printing None."""
-    label = pipe["_exp_label"](MC_FRONT_EXPIRY, {})
+    label = pipe["exp_label"](MC_FRONT_EXPIRY, {})
 
     assert "DTE" not in label
     assert label.strip(), "an unknown expiry produced an empty label"

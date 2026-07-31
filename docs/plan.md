@@ -1,20 +1,21 @@
 # plan.md — Current Implementation Plan
 
-**Last updated:** 2026-07-30
-**Current milestone:** M2 — Architecture Refactor *(pre-work COMPLETE; steps 1–4 of 5 done — `core/`, `dataaccess/`, `state/` and `views/` all extracted)*
-**Status:** M0 ✅ and M1 ✅ COMPLETE and merged to `main`. **623 tests**, run automatically on every
+**Last updated:** 2026-07-31
+**Current milestone:** M2 — Architecture Refactor ✅ **COMPLETE 2026-07-31** *(all 5 steps: `core/`, `dataaccess/`, `state/`, `views/`, and 2.5's `services/` + `ui/`)*. Next: **M3 — Data Hardening.**
+**Status:** M0 ✅, M1 ✅ and M2 ✅ COMPLETE (M0/M1 merged to `main`; M2 on `m2-core-extraction`). **659 tests**, run automatically on every
 commit. **80% coverage of non-UI code** against a ~70% target; `iv_engine`, `db.py`,
 `schwab_client.py` and `config.py` at 100%. Every module mutation-verified rather than assumed —
 **56 injected across M1, 54 caught, 2 proven equivalent**, plus 7 in the `check_db.py` work, 9 in
 the display pinning (ADR-029), 43 across the Mission Control pinning (ADR-030/031), 7 + 10 across
-the `views/` extraction (ADR-036/037) and 6 clearing the debt behind it (ADR-038).
+the `views/` extraction (ADR-036/037) 6 clearing the debt behind it (ADR-038) and 13 across step 2.5 (ADR-041).
 **M2's pre-work is COMPLETE and DEBT-026 is closed.** 88 characterization tests cover what reaches
-the screen. **Steps 2.1–2.4 are done: `app.py` is 4,283 → 2,505 lines,** down 42% and no longer the
-largest file in the repo. All six tabs live in `views/`, and every one of the six bodies was proved
-byte-identical to the version it replaced before anything was renamed. **The debt those safe moves
-deliberately left behind is now cleared too** — DEBT-028, DEBT-030 and DEBT-032, all closed
-2026-07-30 (ADR-038). **Step 2.5 is the remaining work**, targeting `app.py` under 400 lines; of
-what is left, 757 lines are the CSS block and 115 are `_render_mc_section`.
+the screen. **M2 IS COMPLETE. `app.py` is 4,283 → 392 lines**, down 91%, and holds no calculation, no
+stylesheet, no query and no tab body — assembly only. All six tabs live in `views/`, and step 2.5
+(ADR-041) added the two layers the remaining code needed: `services/` for the memoised loaders,
+sidecar bindings and Mission Control pipeline, and `ui/` for the page chrome. **DEBT-002 is closed.**
+Each of 2.5's eight phases was verified by a before/after render comparison against a worktree of
+HEAD, all eight identical across all six tabs — which is what caught the phase that left every tab
+raising while all 639 tests passed.
 **Reference:** [`AUDIT_2026-07-25.md`](AUDIT_2026-07-25.md) §10 for the full M0–M8 roadmap —
 a **frozen snapshot**, superseded by this file wherever they differ (see the banner at its head,
 and ADR-028 for the two M1 tasks settled differently).
@@ -155,9 +156,9 @@ appearance is the part that cannot be tested and so should be the thinnest thing
 | 2.2 | `dataaccess/queries.py` — the **nine** database reads | ✅ Done 2026-07-30 | **Named `dataaccess/`, not `data/`** — that directory already holds `dashboard.db` and `token.json`, and source code does not belong beside them (ADR-033). **The count was wrong here: nine, not eleven.** Three other `_load_*` functions read small JSON settings files, not the database; they belong to 2.3. Every function takes `db_path` as its first argument, which **closes DEBT-027 site 1** — `_candidate_signals` now takes the path too, defaulting to the global so production is unchanged. `snapshot_id` is gone from four signatures: it was never read, existing only to key the cache, which lives in `app.py`. The nine `@st.cache_data` wrappers stay there and are now memo-and-nothing-else. 564 tests (4 new); mutation-verified 6 injected, 6 caught. **Not done: returning data rather than display shapes** — the naive wall-clock conversion is a display concern in the data layer, but moving it changes every chart's x-axis and is its own job (DEBT-030). |
 | 2.3 | `state/` — the JSON-file persistence | ✅ Done 2026-07-30 | 4 modules: `store.py` (absolute paths, atomic write, quarantine), plus `chart_colors.py`, `entry_locks.py`, `eligible_history.py`. **`config.STATE_DIR` is absolute and anchored to the project root** — following the convention `DB_PATH` already used, so no file moved. Closes **three of DEBT-011's five parts**, the three that could lose data; schema and scheduled backup remain (M3). **The dangerous one was not the relative path** but the loader that read an unreadable file as `{}` and let the next write destroy it. `state/` may not import `config` — it is handed its directory and timezone. 591 tests (22 new); 6 injected, 6 caught. Real files backed up and hash-verified before any change. |
 | 2.4 | `views/` — one module per tab | ✅ **Done 2026-07-30** | All six tabs out: `historical.py`, `research.py`, `entry.py`, `strike.py`, `scanner.py`, `edge.py`, over a frozen `ViewContext`. **`app.py` 4,283 → 2,486** across the whole milestone, 3,945 → 2,486 in step 2.4 alone. **Every one of the six bodies is byte-identical to the version it replaced**, each compared against the commit in which it was still inline — that is the step's entire evidentiary basis, and it is why nothing was renamed, no threshold was corrected and no dead line was deleted along the way. 613 tests (22 new); mutation-verified **10 injected, 10 caught**. Lint +1 against baseline, and that one is a pre-existing dead assignment the extraction made *visible* (DEBT-032). All six tabs render, and all six produce byte-identical rendered text against a worktree of the previous commit on the same live database. **What is still in `app.py` and must move at 2.5:** `_render_mc_section`, 115 lines, injected rather than moved because it reads two prelude globals and relocating it means a signature change — the rename phase, not the move phase. **Entry needed no loaders at all** — eight metric tiles over numbers the prelude had already derived — so it was the cheapest possible test of whether the context grows cleanly: five new fields, no new seam, 600 tests. It also found two things by being read closely, neither caused by the move and both left alone: **DEBT-031** (the 5-point transform threshold hardcoded three times in this one tab, disagreeing with `core/scanner.py` at exactly 5.00 because one test is `>` and the rest are `>=`) and **BUG-018** (on expiry day the default front expiry is 0 DTE, so there is no straddle, and the Normalized Debit tile renders "— (set strikes)" beside a Diagonal Mark computed from those same strikes). Fixing either inside a move would have destroyed the one property that makes the move checkable. **The pattern being proven, and the reason for the tab order:** a tab body sat one indent level in under `if st.session_state[...]` and sits one level in under `def render(ctx)`, so each body moves with **zero reindentation** and the only new lines are rebinds of `ctx.x` to the name the body already used. That makes the move *provable* — a script diffs each moved body against `git show HEAD:app.py` and both came back **byte-identical**. This is the untestable layer; "nothing was rewritten in transit" is the strongest claim available, so the extraction is shaped to make it checkable. Renaming to `ctx.` throughout is DEBT-028, after all six are out. **7 new tests** in `test_layering.py`: `views/` may not import `db`/`sqlite3`/`dataaccess` (the last would bypass app.py's memos and re-query on every rerun while looking identical), `render` takes `ctx` and nothing else, no module-level drawing, and app.py must actually dispatch each one. 598 tests; mutation-verified **7 injected, 7 caught**. `test_chart_breaks.py` failed on its own anchor and was re-pointed, not weakened — and got stronger, since the module now IS the tab and the 2,000-character window is gone. |
-| 2.5 | `app.py` — page config, sidebar, tab dispatch | ☐ | Target: under 400 lines. |
+| 2.5 | `app.py` — page config, sidebar, tab dispatch | ✅ **Done 2026-07-31** | **2,505 → 392 lines**, target was under 400. Two new layers rather than four stretched ones (ADR-041): **`services/`** — the memoised loaders, the sidecar bindings and the whole Mission Control pipeline; the only layer allowed both `config` and `streamlit`, because `_run_mission_control` reads `st.session_state` (the "New" badge is a cross-snapshot diff, so it cannot live inside a cached function) while the loaders decide `config.DB_PATH`. **`ui/`** — theme, sidebar, refresh poller, header, controls bar, locks popover: chrome that is not a tab, runs before any tab is chosen, and in the controls bar's case *returns* the selection the tabs read. Also out: the stylesheet to `assets/theme.css` (754 lines, lifted by script that ASSERTED the reconstruction was character-identical — 757 lines is far past proof-reading, and a dropped CSS brace kills every rule after it silently), `_render_mc_section` into `views/scanner.py` with the keyword-only signature ADR-037 deferred, and `exp_label` / `market.py` / `position.py` into `core/`. **659 tests** (+20 — the two new layers' import rules are parametrised per module, plus the re-auth path and the stylesheet's integrity), lint 102 → 95. **The step's evidence is the render comparison, not the suite** — phase 3 left every one of the six tabs raising on load and all 639 tests still passed, which is the structural gap `scripts/render_check.py` has documented since 2.2. Eight phases, eight identical dumps. **Mutation: 13 injected, 13 caught — and the 13th is the point.** The DEBT-030 guard matched `load_atm_hist` while every call site outside `views/` is `_load_atm_hist`; one underscore had made half that check decorative since it was written. Second consecutive session where the break-it-deliberately pass found a blind check rather than confirming a healthy one. **Two things left alone on purpose:** `spx_intraday["ts_et"]` is computed and never read (DEBT-034) and `kpi_html` is still BUG-019 — deleting either inside a move destroys the property that makes the move checkable. |
 
-Steps 2.1–2.3 carry the value. Step 2.4 looks like the work and is the least interesting part of it.
+Steps 2.1–2.3 carry the value. Step 2.4 looks like the work and is the least interesting part of it. Step 2.5 is where the target and the task list turned out to disagree — see ADR-041.
 
 **Debt cleared straight after 2.4, before starting 2.5** (ADR-038). Three rows that had been waiting
 on the decomposition, all closed 2026-07-30. **DEBT-028:** `core/`'s 14 public names lost their
@@ -184,11 +185,14 @@ between two runs minutes apart as the collector adds snapshots.
 
 ## Immediate next actions
 
-1. **Step 2.5 is the only M2 step left.** 2.1–2.4 are done and the debt they left was
-   cleared the same day (ADR-038). `app.py` is 4,283 → 2,505 lines. Target for 2.5 is
-   under 400. Of what remains, **757 lines are CSS** and **115 are `_render_mc_section`**,
-   which needs a signature change to move because it reads two prelude globals — that is
-   the bulk of the step, and neither part is difficult, only fiddly.
+1. **M2 is done — the next milestone is M3, Data Hardening.** `app.py` finished at
+   **392 lines** from 4,283 (ADR-041), and DEBT-002 is closed. Nothing in M2 is
+   outstanding. Before starting M3, note that step 2.5 left two P3 rows it deliberately
+   did not fix inside a move: **DEBT-033** (the `services/` names still carry app.py's
+   leading underscores — rename in a commit whose diff shows only the rename, and update
+   `tests/app_loader.py::_PIPELINE_FUNCS` in the same change) and **DEBT-034**
+   (`spx_intraday["ts_et"]` computed and never read — check git history for a removed
+   chart first; BUG-019 is the standing reminder that "dead" and "dropped" look identical).
 2. **The 6 practice trades can now safely be discarded.** BUG-016 was the blocker — the
    next ID after a deletion collided with a live PRIMARY KEY and the save raised. Fixed
    2026-07-26 (ADR-023 §1) and covered by a test that runs exactly that sequence. Note the

@@ -31,6 +31,11 @@ class ViewContext:
     snapshot_id: int
     spx_price: float
     session_date: str
+    # The snapshot's full timestamp. `session_date` is its first ten
+    # characters and was all any tab needed until step 2.5; the Mission
+    # Control card renderer stamps the whole thing onto a Journal deep-link,
+    # so the full value has to travel too.
+    snapshot_ts: str
     # The whole option chain for this snapshot. Handed over rather than
     # re-read: it is one DataFrame that app.py has already loaded through a
     # memo, and every tab that needs it needs the SAME one.
@@ -87,17 +92,6 @@ class ViewContext:
     # too, so it is a result to pass on rather than work for a view to do.
     mc: dict
     sc_max_rows: int
-
-    # ── Injected renderer ─────────────────────────────────────────────────
-    # The Mission Control card renderer, still defined in app.py. It reads
-    # two of the prelude's globals (`snap_ts_str`, `spx_price`), so relocating
-    # it into views/scanner.py means turning those into parameters — a
-    # signature change, which is the *rename* phase, not the move phase, and
-    # deserves its own step where the call sites can be checked (the lesson
-    # of ADR-034). Injected here so this move stays a move. It is 115 lines
-    # of app.py that step 2.5 must still deal with to reach its 400-line
-    # target.
-    render_mc_section: Callable[..., None]
 
     # ── Entry-lock and registry actions, injected ─────────────────────────
     # These are app.py's thin wrappers over state/, and each one binds

@@ -67,10 +67,24 @@ from state import eligible_history
 REPO_ROOT = Path(__file__).resolve().parent.parent
 APP_PATH = REPO_ROOT / "app.py"
 CORE_DIR = REPO_ROOT / "core"
+SERVICES_DIR = REPO_ROOT / "services"
 
-# core/ first — see the module docstring. Sorted so the search order is stable
-# and a failure message names the same file every run.
-SOURCES: tuple[Path, ...] = (*sorted(CORE_DIR.glob("*.py")), APP_PATH)
+# core/ first, then services/, then app.py — see the module docstring. Sorted
+# within each directory so the search order is stable and a failure message
+# names the same file every run.
+#
+# services/ JOINED THIS LIST IN M2 STEP 2.5, when the memoised loaders, the
+# sidecar bindings and the whole Mission Control pipeline left app.py. Not one
+# of these tests changed as a result, which is the property they were written
+# for: they name functions, and the functions kept their names. The duplicate
+# check below matters more than ever now that there are three places to look —
+# a name left behind in app.py AND defined in services/ would otherwise let
+# this loader test the copy the dashboard no longer runs.
+SOURCES: tuple[Path, ...] = (
+    *sorted(CORE_DIR.glob("*.py")),
+    *sorted(SERVICES_DIR.glob("*.py")),
+    APP_PATH,
+)
 
 # Decorators that are safe to strip because they cannot change a return value.
 _PURE_MEMOISERS = ("st.cache_data", "st.cache_resource")
@@ -103,7 +117,7 @@ _PIPELINE_FUNCS = (
     # scanner, because scan_all_offsets is a real collaborator of the core
     "compute_transform_scanner", "scan_all_offsets",
     # display helpers the pipeline calls directly
-    "rank_for_panel", "card_key", "sparkline", "fmt_duration", "_exp_label",
+    "rank_for_panel", "card_key", "sparkline", "fmt_duration", "exp_label",
     # signals
     "_candidate_signals",
     # the persisted eligibility registry
