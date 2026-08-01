@@ -5,7 +5,7 @@ what broke, and what remains.
 
 ----
 
-## 2026-08-01 (session 11) — BUG-022 closed: locked legs keep being recorded, and the screen owns up
+## 2026-08-01 (session 11) — BUG-022 and BUG-019 closed; M2 merged to main
 
 ### Completed
 
@@ -53,11 +53,36 @@ in history from before the lock existed. That is why the on-screen message stays
 covers the gap honestly. There are also **no locks saved right now**, so this was built and
 checked against constructed cases, not a live position.
 
+### Also completed — BUG-019 closed: the Scanner's summary cards are gone for good
+
+Four figures — Diagonals Scanned, Diff > 5, Best Difference, Avg IV Ratio — sat above the Scanner
+table until 29 June, when a large refactor deleted the single line that drew them and left the
+forty lines feeding them running on every refresh since. **Chandan chose to delete rather than
+restore**, with the asymmetry stated: restoring was reversible after seeing them on screen,
+deleting is not. Taken deliberately, not by default, which is what the standing advice warned
+against. **ADR-043 records the exact commands to paste the block back** if he changes his mind —
+that is the answer to "cannot be undone by looking at the screen", rather than refusing the call.
+
+**And for the third time, something that read as dead was holding something up.** Ten of the
+block's eleven working values were genuinely unused. The eleventh, `_ready_count`, feeds the
+"N combinations ready to transform" badge that is still on screen. Deleting the block in one
+piece was rehearsed on a copy first and **took down all six tabs** — not just the Scanner —
+because that code runs before any tab is chosen. All 693 checks passed with the dashboard in
+that state. `scripts/render_check.py` caught it, as it did the two previous times.
+
 ### Discovered
 
 `pinned_pairs.json` in the project root is dead — an orphaned feature from the v2 dashboard, no
 code reads it, contents long expired. Left in place pending Chandan's word (deleting files needs
 his say-so); recorded as DEBT-036.
+
+The KPI cards' styling — about fifty lines of `theme.css` — now styles nothing. Kept on purpose:
+it is the cheapest restore path for the decision above. DEBT-037.
+
+**Item IDs are being reused.** `BUG-019` has now been two unrelated bugs; the first was closed on
+28 July. Since closing means deleting the row and `git log -S` is the documented way to recover
+the text, a reused ID makes that search return two mixed-up items. Second occurrence of the
+pattern — DEBT-031 was issued twice on 30 July. DEBT-038.
 
 ----
 

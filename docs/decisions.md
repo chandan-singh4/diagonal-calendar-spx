@@ -7,6 +7,55 @@ it was recorded here.
 
 ---
 
+## ADR-043 — The Scanner's KPI cards are deleted, not restored — and how to get them back
+**Date:** 2026-08-01 · **Status:** ACCEPTED · **Closes BUG-019**
+
+**Chandan's call, made with the tradeoff in front of him.** Four summary cards — Diagonals
+Scanned, Diff > 5, Best Difference, Avg IV Ratio — sat above the Scanner table until 29 June,
+when a large refactor deleted the one line that drew them while leaving the ~40 lines that fed
+them running on every refresh. He was shown that this was reversible in one direction only, and
+chose deletion anyway. **Recorded plainly: this is the irreversible direction**, and the standing
+advice in the backlog row was not to take it by default. He took it deliberately, not by default.
+
+**THE RECOVERY PATH, which is the point of this ADR.** The objection to deleting was that it
+cannot be undone by looking at the screen. That is answered by writing down where the code is
+rather than by refusing the decision:
+
+```
+git show 875b257:views/scanner.py | sed -n '283,327p'    # the block, last commit before removal
+git show b782ec3 -- app.py                                # the 29 June commit that dropped the render
+```
+
+The CSS is still in `assets/theme.css` (`.kpi-grid`, `.kpi-card`, `.kpi-hl`, `.kpi-icon`,
+`.kpi-v`, `.kpi-l`, `.kpi-sub`, lines ~496–546), untouched by this change — see DEBT-037.
+Restoring is: paste the block back, add `st.markdown(kpi_html, unsafe_allow_html=True)`.
+
+**The accident, confirmed rather than assumed.** Commit `b782ec3` ("V3.4", 29 June, 41
+insertions / 173 deletions) did three things to this block at once: removed two of six cards,
+**refitted the grid to `repeat(4,1fr)` — exactly the four that remained** — and deleted the
+render. Nobody re-fits a layout to four cards in the commit where they mean to delete all four.
+The render was caught by an over-broad deletion. Worth keeping in the record because the *reason
+for removal* is now permanent, and "he decided against them" and "he never saw them" are very
+different histories.
+
+**ONE LOCAL WAS NOT DEAD, AND THIS IS THE SECOND TIME.** `_ready_count` feeds the "N combinations
+ready to transform" badge *below* the cards, which is still on screen. Ten of the block's eleven
+locals were dead; that one never was. Deleting the block wholesale was rehearsed on a copy and
+**took down all six tabs**, not just the Scanner — the code runs on the initial pass before any
+tab is selected, so a `NameError` there is a dead dashboard, not a broken panel.
+
+This is exactly the shape of the M2 step 2.2 failure (`_exp_label`) and of DEBT-032, which
+recorded this very block as "dead code" and would have made the 29 June accident permanent.
+**Three times now, something that read as dead was load-bearing in one place.** The check that
+caught it each time is the same one: `scripts/render_check.py`, which runs the page rather than
+its functions. The test suite passed on all 693 checks with the wholesale deletion in place.
+
+**Why no new test.** There is nothing left to characterise — the feature is gone, and a test
+asserting the absence of four cards would pin an accident of history rather than a behaviour.
+The badge that survives has `_ready_count` as its input and is covered by the render check.
+
+---
+
 ## ADR-042 — A locked diagonal outranks the collection window, and the screen admits what it dropped
 **Date:** 2026-08-01 · **Status:** ACCEPTED · **Closes BUG-022**
 

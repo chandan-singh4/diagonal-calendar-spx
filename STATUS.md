@@ -1,9 +1,9 @@
 # PROJECT STATUS
 
-**Updated:** 2026-07-31 · **Branch:** `m2-core-extraction`, **pushed to GitHub, not yet merged.**
-**State:** **Stage 2 is finished — all 5 steps.** 659 checks pass. Price record healthy (126
-recordings today, latest 15:59 New York). All six tabs run, checked by machine — **but Chandan has
-not looked at the screen since the change.**
+**Updated:** 2026-08-01 · **Branch:** `main` — **stage 2 merged and saved online.**
+**State:** Two faults fixed and checked on the real screen. 693 checks pass. **Stage 3 starts
+next; nothing blocks it.** This session's last two changes are saved on this machine but **not
+yet sent to GitHub** — send them first.
 > Self-contained: read this file alone to start a session. Replaced entirely by `/wrap`.
 
 ## What this project is
@@ -14,8 +14,7 @@ the small difference. The soon-expiring ones lose value faster, and that gap is 
 it's worth enough he restructures into a safer shape that locks the gain and caps the loss. **It's
 all about timing**, and brokers discard today's prices rather than keep them. **So the historical
 record IS the product** — the screen is just a window onto it. **Honest condition:** record and
-checking are in good shape; the screen has real faults, all known and listed below. Backed up to
-GitHub; nothing *runs* anywhere but this machine.
+checking are in good shape; the screen's known faults are listed below and are now fewer.
 
 | Part | What it does |
 |---|---|
@@ -34,61 +33,62 @@ also need ~20 and ~100 real trades; there are 6 practice ones.
 
 ## This session
 
-**The main screen file went from 2,505 lines to 392 — and from 4,283 when the stage began.** It
-now only assembles: load prices, work out the few numbers several tabs share, hand over to the tab
-being shown. Styling, sums, database questions and the scanning engine each have their own folder
-now, each with a rule a check enforces.
+**Stage 2 is signed off.** Chandan looked at the charts — the one thing last session's automatic
+word-by-word comparison could not do. Everything then merged into the main line of work.
 
-**The task as written didn't add up, and saying so first changed the job.** The notes named two
-pieces to move. Both are done — but together they were 872 of 2,505 lines, landing at ~1,630 and
-missing this step's own "under 400" target fourfold. Chandan saw the arithmetic and chose to finish
-it properly.
+**A saved trade could be charted as a different trade — fixed at the cause, Chandan's idea.**
+The collector only records prices near where the index is **today**; a saved position is fixed at
+the price it was opened at. As the index drifts, that position's prices stop being recorded, so
+the screen couldn't find them, quietly substituted its nearest guess, and drew a confident chart
+of the wrong trade. The first plan was only to warn on screen. Chandan asked whether those prices
+could simply keep being recorded instead. **Checking the stored data showed he was right and it
+was nearly free — the broker was already sending them and we were throwing them away.** Both were
+done. Verified live: saved a position, restarted the collector, opened its chart — correct.
+**A claim made here was wrong and measuring took a minute:** the broker's limit was said to bind
+much sooner, making this expensive. It doesn't — the assumption was wrong in the direction that
+would have cost the most work.
 
-**Partway through, one move broke all six tabs — and all 639 checks still passed.** One reference
-didn't follow its value into a new file; the checks exercise pieces of code, not the screen. **What
-caught it** was running the whole screen twice — old version and new, same database — and comparing
-every word each drew. Done after all eight stages of the work; all eight identical.
+**Four summary figures at the top of the Scanner were deleted — Chandan's call.** They vanished by
+accident a month ago while the sums behind them kept running. He chose deleting over restoring,
+knowing that is the direction that can't be undone by looking at the screen; `docs/decisions.md`
+(ADR-043) records the exact commands to bring them back.
 
-**A check written last session turned out to be blind.** It guards against a chart whose time axis
-would silently shift four or five hours, but looked for a name spelled one way where every place
-that matters has an extra underscore — so half of it had never done anything. Found only by
-deliberately breaking the code: **13 breakages attempted, 13 caught** after the fix.
+**For the third time, something that looked dead was holding something up.** Ten of the eleven
+values behind those figures were unused; the eleventh feeds a badge still on screen. Removing the
+lot **was tried on a copy first and broke all six tabs** — and all 693 checks still passed.
+`python scripts/render_check.py` caught it, as twice before. **Run it after any screen change.**
 
 ## What to do next
 
-1. **Have Chandan open the screen and look at the charts.** The comparison proves every *word* is
-   unchanged but **cannot see inside a chart** — check Calendar Edge and Strike Detail by eye.
-2. **Then start stage 3 — stop the database growing**; nothing blocks it. Get Chandan's decision
-   on BUG-019 and BUG-022 when convenient — both wait on him, not on work.
+1. **Send this session's work to GitHub** (`git push origin main`) — ask Chandan first.
+2. **Start stage 3 — stop the database growing.** Nothing blocks it. Build one thing alongside it:
+   the app must save market conditions *with each trade*, or trades logged from now on lose that
+   context once old prices are cleared out.
+3. **After a day of collection, read `collector.log`** for lines beginning `strike window:
+   broker supplied` — they show how much room exists beyond what's kept. Nothing depends on it yet.
 
 ## Open problems
 
-- **BUG-022 (high) — blocked on Chandan.** Clicking "View Chart" on a saved lock can silently show
-  a **different** diagonal than the one clicked, when the strike or back expiry isn't in today's
-  data. Expiry was one cause and is fixed; two remain that hit *live* positions. He asked whether
-  that fix made this moot — it doesn't — and hasn't said whether to do it.
-- **BUG-019 (medium) — blocked on Chandan.** Four summary figures vanished from the top of the
-  Scanner a month ago, by accident; the code behind them still runs. He must choose: restore the
-  missing line, or delete the 40 lines behind it. **Don't default to deleting** — that is the
-  choice that can't be undone by looking at the screen.
 - **ENH-011 (high)** — tab clicks are slow. Cause **not established**; measure first, and don't
   start by tuning the cache timers. **BUG-001 (high, blocked on Chandan)** — old unexplained
-  report, needs a symptom and a screenshot. **BUG-018 (medium)** — on expiry day one tile says
-  "set strikes" when they are already set.
-- **DEBT-029** — two screen-library features past their removal dates, in ~36 places. **DEBT-034**
-  — data loaded and converted for a column nothing reads; check history for a removed chart first.
+  report; nothing can be done until he gives a symptom and a screenshot. **BUG-018 (medium)** —
+  on expiry day one tile says "set strikes" when they are already set.
+- **DEBT-029** — two screen-library features are past their removal dates, used in ~36 places.
+  The screen runs only because the old versions still work; any upgrade may break it.
+- **DEBT-034** — data loaded and converted for a column nothing reads. **DEBT-036/037** — a dead
+  file and ~50 lines of unused styling, both left on purpose; deleting needs Chandan's word.
+  **DEBT-038** — problem numbers reused twice, breaking the documented way to look up a closed one.
 
 ## Settled decisions
 
-- **The screen stays as it is until stage 5**, and whether to move off the current screen
-  technology is **not pre-committed** — decided with evidence at stage 5, not before.
+- **The screen stays as it is until stage 5**; whether to move off the current screen technology
+  is **not pre-committed** — decided with evidence at stage 5, not before.
 - **Closing a problem means deleting its row**, never ticking it off — if the fix leaves a lesson,
-  write it up in `docs/decisions.md` first. **Never re-record a failing check to make it pass**;
-  a deliberate break that changes nothing is evidence about the code, not a check to bend.
-- **Move code first, rename second, in separate commits** — that is what makes a move provable
-  (two renames are deliberately outstanding: DEBT-033, DEBT-035).
-- **The 6 practice trades are blocked** on Chandan at the keyboard with a confirmed backup, and the
-  app must save market conditions *with each trade* before real trading resumes.
+  write it up in `docs/decisions.md` first. **Never re-record a failing check to make it pass.**
+- **Move code first, rename second, separately** (two renames outstanding: DEBT-033, DEBT-035).
+  **The 6 practice trades are blocked** on Chandan at the keyboard with a confirmed backup.
+- **Keeping a saved position's prices is forward-only** — it cannot fill in history from before
+  the position was saved. That is why the on-screen warning stays.
 
 ## How to work here
 

@@ -280,51 +280,14 @@ def render(ctx: ViewContext) -> None:
                 max_rows     = int(ctx.sc_max_rows),
             )
 
-        # ── KPI cards ─────────────────────────────────────────────────────────────
+        # ── Ready count ───────────────────────────────────────────────────────────
+        # All that survives of the KPI card row, removed 2026-08-01 (ADR-043).
+        # The badge below is the ONLY remaining reader — the four cards this once
+        # fed had been invisible since 29 June and Chandan chose not to restore
+        # them. Deleting the block wholesale would have raised NameError here:
+        # the cards' other ten locals were dead, this one never was.
         if not _ts_df.empty:
-            _ready_count  = int((_ts_df["Transform Diff"] >= TSCAN_THRESHOLD).sum())
-            _best_diff    = float(_ts_df["Transform Diff"].max())
-            _best_row     = _ts_df.iloc[0]
-            _best_label   = f"Put {int(_best_row['Put Strike'])} / Call {int(_best_row['Call Strike'])}"
-            _avg_iv_ratio = (
-                _ts_df["IV Ratio"].dropna().mean()
-                if "IV Ratio" in _ts_df.columns else None
-            )
-
-            # Diff distribution for badge
-            _diff_vals      = _ts_df["Transform Diff"]
-            _gt5_count      = int((_diff_vals >= 5).sum())
-            _best_diff_str  = f"{_best_diff:+.2f}"
-            _avg_ratio_str  = f"{_avg_iv_ratio:.4f}" if _avg_iv_ratio else "—"
-
-            # KPI 1 highlight check
-            _kpi1_hl = " kpi-hl" if _best_diff >= TSCAN_THRESHOLD else ""
-            _kpi2_hl = " kpi-hl" if _ready_count > 0 else ""
-
-            kpi_html = f"""
-    <div class="kpi-grid" style="grid-template-columns:repeat(4,1fr)">
-      <div class="kpi-card{_kpi2_hl}">
-        <span class="kpi-icon">📡</span>
-        <span class="kpi-v c-blue">{len(_ts_df):,}</span>
-        <span class="kpi-l">Diagonals Scanned</span>
-      </div>
-      <div class="kpi-card{_kpi2_hl}">
-        <span class="kpi-icon">🎯</span>
-        <span class="kpi-v{'  c-green' if _ready_count > 0 else ''}">{_ready_count}</span>
-        <span class="kpi-l">Diff &gt; {TSCAN_THRESHOLD:.0f}</span>
-      </div>
-      <div class="kpi-card{_kpi1_hl}">
-        <span class="kpi-icon">✦</span>
-        <span class="kpi-v">{_best_diff_str}</span>
-        <span class="kpi-l">Best Difference</span>
-        <span class="kpi-sub">{_best_label}</span>
-      </div>
-      <div class="kpi-card">
-        <span class="kpi-icon">⚡</span>
-        <span class="kpi-v c-amber">{_avg_ratio_str}</span>
-        <span class="kpi-l">Avg IV Ratio</span>
-      </div>
-    </div>"""
+            _ready_count = int((_ts_df["Transform Diff"] >= TSCAN_THRESHOLD).sum())
 
         # ── Ready badge ───────────────────────────────────────────────────────────
         if not _ts_df.empty and _ready_count > 0:
