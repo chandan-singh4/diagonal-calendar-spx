@@ -7,6 +7,77 @@ it was recorded here.
 
 ---
 
+## ADR-042 — A locked diagonal outranks the collection window, and the screen admits what it dropped
+**Date:** 2026-08-01 · **Status:** ACCEPTED · **Closes BUG-022**
+
+**The defect, stated properly.** Both of the collector's narrowings are centred on TODAY —
+the nearest `MAX_EXPIRY_COUNT` expiries, and strikes within `STRIKE_FETCH_WIDTH_POINTS` of
+spot. A lock is centred on the fill and never moves. So as SPX drifts, a locked strike walks
+to the edge of the recorded window and then out of it, and the legs of a position actually
+being held stop being recorded. "View Chart" then found the strike absent from today's chain,
+dropped it (it must — Streamlit raises "not in options" and the page dies otherwise), and each
+dropdown fell back to its default. **The trader clicked a position they were holding and was
+shown a different diagonal, drawn with the same confidence, with nothing saying so.**
+
+**Two fixes, because they answer different questions.** Pinning removes the two known *causes*.
+The notice covers the *class* — any future reason a staged value goes missing (a collector
+outage, a gap day, a lock edited by hand) lands back on the same guard, and BUG-022's actual
+wording was that *there is no path where the app admits it could not honour the request*.
+Pinning alone would have left that sentence true.
+
+**Chandan's idea, and it was the better one.** The first proposal here was the notice alone.
+He asked whether the locked legs could simply keep being collected. Measuring the stored data
+settled it: every snapshot is clipped at almost exactly ±300 points, which means **the Python
+backstop is the binding fence and the broker is already supplying the strikes we discard**.
+So the exemption widens what we KEEP, never what we ASK FOR — no extra API call, no extra
+latency, and it cannot invent data. A locked strike the broker never sent is logged as a
+warning and left missing, not fabricated.
+
+**A correction made mid-discussion, recorded because it nearly changed the design.** It was
+asserted here that the API's 80-strike limit would bind at roughly ±200 points, which would
+have made this expensive (a second targeted fetch per cycle). The stored data disproved it.
+**The measurement was cheap and the assumption was wrong in the direction that would have
+cost the most work** — worth remembering the next time a fetch-width question comes up.
+
+**The headroom question is now answered continuously, not guessed.** `filter_chain_by_strike_window`
+logs how wide the broker actually went, BEFORE it filters, because the filter destroys the
+evidence: once stored, every snapshot is clipped at exactly ±width and can never answer how
+much room was left. That log is what will decide whether a drifting strike ever needs a
+second fetch.
+
+**Where it lives.** The rule in `core/pins.py` (pure — a locks dict in, expiries and strikes
+out; no file, no config, no clock, the same shape as `core/expiry.py`). The exemption in
+`schwab_client.filter_chain_by_strike_window` and the expiry widening in `collector._run_cycle`.
+The admission in `ui/controls.py`, scoped by a plain local dict — promotion and both guards run
+inside one `render()` call, so a value recorded there belongs to the click that triggered that
+rerun and nothing else.
+
+**Deliberate refusals.**
+
+* **The notice fires only for lock clicks — Chandan's scoping call.** A value the trader set by
+  hand going stale (the tab left open overnight while the chain rolled) stays silent. A banner
+  that fires during ordinary browsing teaches you to ignore the banner that matters.
+* **A malformed lock costs that lock its protection, never the snapshot.** The cycle is
+  unrepeatable; a hand-edited lock file is not worth losing one over. Same refusal as
+  `purge_expired`'s unparseable `front_expiry`.
+* **`core/pins.py` does not judge expiry.** `state.entry_locks.purge_expired` owns that and runs
+  against the same file. A lock that should have been purged and was not pins a few extra
+  strikes — a handful of rows, and the safe direction.
+
+**What this does NOT fix, and it is not a defect.** Pinning is **forward only**: it protects a
+lock from the next snapshot onward and cannot fill in history recorded before the lock existed.
+A lock created today has no history for the strike yesterday, and never will. The notice is
+what covers that stretch honestly.
+
+**Proving it.** 19 deliberate breakages, 19 caught — but one **survived the first run**, and it
+mattered: narrowing `_load_pins`'s `except Exception` to a type that never occurs broke nothing,
+because `state.store.read_json` already quarantines a corrupt file and returns `{}`. The guard
+was real but unreachable from the test that claimed to cover it. **A test that cannot fail is
+not evidence**, so the failure is now injected at the seam instead, and both layers are pinned
+separately because they fail for different reasons.
+
+---
+
 ## ADR-041 — M2 step 2.5: two more layers, and what "under 400 lines" actually required
 **Date:** 2026-07-31 · **Status:** ACCEPTED · **Closes M2 · Closes DEBT-002**
 

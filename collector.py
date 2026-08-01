@@ -51,6 +51,8 @@ import pandas as pd
 import config
 import db
 import schwab_client
+from core import pins as core_pins
+from state import entry_locks
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Constants
@@ -546,6 +548,24 @@ def _check_startup_gap(db_path: str) -> None:
 # Single Collection Cycle
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _load_pins() -> core_pins.Pins:
+    """Which expiries and strikes the entry locks require us to keep (BUG-022).
+
+    NEVER RAISES. This is the collector's first read of a file the DASHBOARD
+    owns, and the snapshot is worth more than the protection: a lock file that
+    is missing, empty, corrupt or being rewritten as we read costs the locks
+    their exemption for this cycle and nothing else. `state.store.read_json`
+    already handles missing and corrupt (quarantine, return {}) and writes
+    atomically via os.replace, so a half-written read is not possible — the
+    catch here is for the cases neither of us thought of.
+    """
+    try:
+        return core_pins.from_locks(entry_locks.load(config.STATE_DIR))
+    except Exception:
+        logger.exception("could not read entry locks; collecting unpinned this cycle")
+        return core_pins.Pins()
+
+
 def _run_cycle(client, db_path: str, session: str, poll_interval: int) -> int:
     """
     Execute one complete collection cycle. Returns snapshot_id on success.
@@ -606,9 +626,35 @@ def _run_cycle(client, db_path: str, session: str, poll_interval: int) -> int:
         if chain_df.empty:
             raise ValueError("Option chain contained no contracts after parsing")
 
+        # Locked legs are exempt from BOTH narrowings below (BUG-022). Read once
+        # per cycle, before either, so the two exemptions cannot disagree.
+        pinned = _load_pins()
+
         # NEW: keep only the nearest MAX_EXPIRY_COUNT expirations (sorted by date)
         all_expiries = sorted(chain_df["expiry"].unique())
         keep_expiries = set(all_expiries[:config.MAX_EXPIRY_COUNT])
+
+        # A locked expiry the broker returned is kept even if it falls outside
+        # the nearest N. Intersected with what actually arrived, so a lock on an
+        # expiry beyond the fetch window widens nothing and invents nothing.
+        pinned_expiries = pinned.expiries & (set(all_expiries) - keep_expiries)
+        if pinned_expiries:
+            logger.info(
+                "keeping %d expiry(ies) beyond the nearest %d because a lock "
+                "depends on them (BUG-022): %s",
+                len(pinned_expiries), config.MAX_EXPIRY_COUNT,
+                ", ".join(sorted(pinned_expiries)),
+            )
+            keep_expiries |= pinned_expiries
+
+        missing = pinned.expiries - set(all_expiries)
+        if missing:
+            logger.warning(
+                "a lock depends on expiry(ies) the broker did not return: %s — "
+                "the dashboard will show defaults for that lock (BUG-022)",
+                ", ".join(sorted(missing)),
+            )
+
         chain_df = chain_df[chain_df["expiry"].isin(keep_expiries)]
 
         raw_expiry_count = chain_df["expiry"].nunique()
@@ -622,6 +668,7 @@ def _run_cycle(client, db_path: str, session: str, poll_interval: int) -> int:
             underlying_price,
             atm_iv_pct = atm_iv_pct,
             max_dte    = max_dte,
+            keep_strikes = pinned.strikes,
         )
 
         # ── 6. Build option rows ─────────────────────────────────────────────

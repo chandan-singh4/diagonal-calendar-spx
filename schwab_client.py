@@ -244,6 +244,7 @@ def filter_chain_by_strike_window(
     width: int = config.STRIKE_FETCH_WIDTH_POINTS,
     atm_iv_pct: float | None = None,
     max_dte: int | None = None,
+    keep_strikes: frozenset[float] | set[float] | None = None,
 ) -> pd.DataFrame:
     """
     Python-side safety filter: drops any strikes outside spot ± width points.
@@ -260,6 +261,13 @@ def filter_chain_by_strike_window(
     informational only — it never changes what gets stored. Use it as a signal that
     config.STRIKE_FETCH_WIDTH_POINTS should be reviewed.
 
+    `keep_strikes` EXEMPTS LOCKED STRIKES FROM THE WINDOW (BUG-022). The window
+    is centred on today's spot; a lock is fixed at the fill. As SPX moves, a
+    locked strike drifts out of the window and stops being recorded, and the
+    dashboard then silently charts a different diagonal. An exempt strike is
+    kept only if the broker actually returned it — this widens what we KEEP,
+    never what we ASK FOR, so it costs no extra API call and cannot invent data.
+
     Args:
         chain_df:    Full chain DataFrame from chain_to_dataframe().
         spot:        Current SPX underlying price.
@@ -268,6 +276,8 @@ def filter_chain_by_strike_window(
                      Pass None to skip the check.
         max_dte:     Longest DTE in the current fetch window, used for SD check.
                      Pass None to skip the check.
+        keep_strikes: Strikes to retain regardless of the window (locked legs).
+                     Pass None or an empty set for the ordinary behaviour.
 
     Returns:
         Filtered DataFrame containing only strikes within [spot - width, spot + width].
@@ -277,10 +287,33 @@ def filter_chain_by_strike_window(
 
     lower    = spot - width
     upper    = spot + width
-    filtered = chain_df[
-        (chain_df["strike"] >= lower) &
-        (chain_df["strike"] <= upper)
-    ].copy()
+    in_window = (chain_df["strike"] >= lower) & (chain_df["strike"] <= upper)
+
+    # Locked legs survive the window (BUG-022). `.isin` on an empty collection
+    # is all-False, so the no-locks case is byte-identical to the old behaviour.
+    exempt = chain_df["strike"].isin(list(keep_strikes or ()))
+    filtered = chain_df[in_window | exempt].copy()
+
+    # HOW WIDE THE BROKER ACTUALLY WENT. Logged before the drop because the
+    # filter destroys the evidence: once stored, every snapshot is clipped at
+    # exactly ±width, so the stored data can never answer "how much headroom is
+    # there?" — the question that decides whether a drifting locked strike can
+    # be rescued from the response we already pay for, or needs a second fetch.
+    _offsets = (chain_df["strike"] - spot)
+    if not _offsets.empty:
+        logger.info(
+            "strike window: broker supplied -%.0f/+%.0f pts around spot %.2f; "
+            "keeping ±%d (headroom -%.0f/+%.0f)",
+            -_offsets.min(), _offsets.max(), spot, width,
+            max(0.0, -_offsets.min() - width), max(0.0, _offsets.max() - width),
+        )
+
+    rescued = int((exempt & ~in_window).sum())
+    if rescued:
+        logger.info(
+            "filter_chain_by_strike_window: kept %d contracts outside the window "
+            "because their strike is locked (BUG-022)", rescued,
+        )
 
     dropped = len(chain_df) - len(filtered)
     if dropped > 0:

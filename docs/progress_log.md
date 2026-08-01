@@ -5,6 +5,62 @@ what broke, and what remains.
 
 ----
 
+## 2026-08-01 (session 11) — BUG-022 closed: locked legs keep being recorded, and the screen owns up
+
+### Completed
+
+**Stage 2 signed off.** Chandan opened the dashboard and checked the charts by eye — the one thing
+last session's word-for-word comparison could not do. Calendar Edge and Strike Detail are correct.
+
+**BUG-022 is fixed at both ends, and the better half was Chandan's idea.** The bug: clicking
+"View Chart" on a saved lock could silently show a *different* diagonal. The cause is that the
+collector narrows every snapshot around **today** — nearest 20 expiries, strikes within ±300
+points of spot — while a lock is fixed at the fill and never moves. As the index drifts, a locked
+strike walks out of the recorded window, the dashboard finds it missing, drops it (it must, or the
+page crashes) and falls back to a default. A position being held, charted as something else, with
+nothing saying so.
+
+The first proposal was a warning message. Chandan asked whether the locked legs could simply keep
+being collected instead — **fix the cause, not the symptom**. Measuring the stored data showed he
+was right and that it was nearly free: every snapshot is clipped at almost exactly ±300 points,
+which means **the broker is already sending the strikes we throw away**. Keeping the locked ones
+costs no extra request and no extra waiting. Both were done: the locked legs now survive both
+narrowings, and the screen still says so on the occasions it cannot honour a click.
+
+### What this rests on
+
+**19 deliberate breakages, 19 caught — but only after one survived.** The survivor was worth more
+than the eighteen: a safety net in the collector, meant to stop a damaged lock file killing a
+snapshot, turned out to be unreachable from the test that claimed to cover it — a lower layer was
+quietly handling the damage first. The net was real; the evidence for it was not. **A test that
+cannot fail is not evidence.** Rewritten to inject the failure at the right seam, and both layers
+are now checked separately.
+
+**One assumption was stated here and was wrong.** It was claimed the broker's strike limit would
+bind at about ±200 points, which would have made this expensive — a second request every cycle.
+Reading the stored data disproved it in about a minute. The assumption was wrong in the direction
+that would have cost the most work.
+
+**The measurement is now permanent, because filtering destroyed the evidence.** Once stored, every
+snapshot is clipped at exactly ±300, so the data could never answer "how much room was left?" The
+collector now logs how wide the broker actually went *before* it filters. That log is what will
+decide whether a strike that drifts very far ever needs a second request.
+
+### What this does not do
+
+**Pinning only works forwards.** It protects a lock from the next snapshot onward; it cannot fill
+in history from before the lock existed. That is why the on-screen message stays — it is what
+covers the gap honestly. There are also **no locks saved right now**, so this was built and
+checked against constructed cases, not a live position.
+
+### Discovered
+
+`pinned_pairs.json` in the project root is dead — an orphaned feature from the v2 dashboard, no
+code reads it, contents long expired. Left in place pending Chandan's word (deleting files needs
+his say-so); recorded as DEBT-036.
+
+----
+
 ## 2026-07-31 (session 10) — M2 finished: app.py 2,505 → 392 lines
 
 ### Completed

@@ -21,7 +21,15 @@ THE ORDER OF WHAT HAPPENS HERE IS LOAD-BEARING, in three separate ways:
      which is why the four columns are created together up front but written
      into in two passes.
 
-Extracted from app.py in M2 step 2.5, statement for statement.
+  4. The BUG-022 notice renders after BOTH guards, so one message can name
+     every control that was dropped rather than one message per control. It
+     also depends on (1) and (2) being in this order: what was staged is
+     recorded during promotion and read during the guards, all inside this one
+     call, and that single call IS the scoping — it is what distinguishes a
+     value a lock click asked for from one the trader set by hand.
+
+Extracted from app.py in M2 step 2.5, statement for statement. The notice
+(ADR-042) is the only behaviour added since.
 """
 from __future__ import annotations
 
@@ -57,22 +65,53 @@ def render(*, chain_df: pd.DataFrame, available_expiries: list,
     # widget has already rendered earlier in the same script run. Promote them
     # here — before any of the widgets below are instantiated — so the rerun
     # this triggers picks them up cleanly.
-    if "pending_front_expiry" in st.session_state:
-        st.session_state["front_expiry_select"] = st.session_state.pop("pending_front_expiry")
-    if "pending_back_expiry" in st.session_state:
-        st.session_state["back_expiry_select"] = st.session_state.pop("pending_back_expiry")
-    if "pending_put_strike" in st.session_state:
-        st.session_state["put_strike_select"] = st.session_state.pop("pending_put_strike")
-    if "pending_call_strike" in st.session_state:
-        st.session_state["call_strike_select"] = st.session_state.pop("pending_call_strike")
+    # WHAT WAS STAGED BY THIS CLICK, remembered so the guards below can tell a
+    # value that came from a lock from one the trader set by hand (BUG-022).
+    # A plain local is the whole scoping mechanism: promotion and both guards
+    # run inside this one call, so anything recorded here belongs to the click
+    # that triggered this rerun and nothing else.
+    _staged: dict[str, object] = {}
+    _dropped: list[str] = []
+
+    for _pending, _widget in (
+        ("pending_front_expiry", "front_expiry_select"),
+        ("pending_back_expiry",  "back_expiry_select"),
+        ("pending_put_strike",   "put_strike_select"),
+        ("pending_call_strike",  "call_strike_select"),
+    ):
+        if _pending in st.session_state:
+            _value = st.session_state.pop(_pending)
+            st.session_state[_widget] = _value
+            _staged[_widget] = _value
+
+    _LABELS = {
+        "front_expiry_select": "Front Expiry",
+        "back_expiry_select":  "Back Expiry",
+        "put_strike_select":   "Put Strike",
+        "call_strike_select":  "Call Strike",
+    }
+
+    def _drop(widget_key: str) -> None:
+        """Discard an unusable selection, and REMEMBER it if a lock asked for it.
+
+        Dropping is not optional — Streamlit raises "not in options" and the
+        page dies otherwise. The defect BUG-022 named was never the drop; it was
+        that the app fell through to its defaults with no path where it admitted
+        it could not honour what was clicked.
+        """
+        if widget_key in _staged:
+            _value = _staged[widget_key]
+            _shown = f"{int(_value):,}" if isinstance(_value, (int, float)) else _value
+            _dropped.append(f"{_LABELS[widget_key]} ({_shown})")
+        del st.session_state[widget_key]
 
     # If the stashed value isn't valid for the freshly-loaded chain, drop it so
     # the normal default logic below takes over instead of raising a
     # "not in options" error.
     if "front_expiry_select" in st.session_state and st.session_state["front_expiry_select"] not in available_expiries:
-        del st.session_state["front_expiry_select"]
+        _drop("front_expiry_select")
     if "back_expiry_select" in st.session_state and st.session_state["back_expiry_select"] not in available_expiries:
-        del st.session_state["back_expiry_select"]
+        _drop("back_expiry_select")
 
     c1, c2, c3, c4 = st.columns(4)
 
@@ -110,9 +149,23 @@ def render(*, chain_df: pd.DataFrame, available_expiries: list,
     ))
 
     if "put_strike_select" in st.session_state and st.session_state["put_strike_select"] not in _put_strikes:
-        del st.session_state["put_strike_select"]
+        _drop("put_strike_select")
     if "call_strike_select" in st.session_state and st.session_state["call_strike_select"] not in _call_strikes:
-        del st.session_state["call_strike_select"]
+        _drop("call_strike_select")
+
+    # THE ADMISSION (BUG-022). Rendered after the strike guards so one notice
+    # covers all four, and above the tabs so it sits with the controls it is
+    # about — the chart below is drawn from the DEFAULTS named here, not from
+    # the lock that was clicked.
+    if _dropped:
+        st.warning(
+            "**Showing defaults — this lock could not be opened as saved.** "
+            + ", ".join(_dropped)
+            + " — not in the latest snapshot, so the control(s) fell back to a "
+            "default. **The chart below is a different diagonal from the one you "
+            "clicked.** A locked strike leaves the recorded window as SPX moves; "
+            "newly locked legs are kept from the next snapshot on."
+        )
 
     with c3:
         if _put_strikes:
