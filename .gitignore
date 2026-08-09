@@ -34,6 +34,8 @@ eligible_history.json
 entry_locks.json
 chart_colors.json
 pinned_pairs.json
+# The watchdog's "have I already complained about this?" note (M3.4).
+watchdog_state.json
 
 # Single-instance lock held by the running collector (see collector.py).
 .collector.lock

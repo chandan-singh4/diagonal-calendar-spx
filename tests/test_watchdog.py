@@ -1,0 +1,229 @@
+"""scripts/watchdog.py — the alarm that does not need the dashboard open.
+
+WHAT THESE TESTS ARE REALLY FOR. The easy half of a watchdog is noticing an
+outage; the hard half is not crying wolf, because an alarm that fires when
+nothing is wrong gets muted, and a muted alarm is worse than none — you
+believe you are covered. So most of this file is about the QUIET cases:
+weekends, the minutes after the opening bell, the moment before each poll
+lands, and the twelfth email about the same dead collector.
+
+Every test drives `check()` with an explicit `now`, against a temporary
+database. `config.DB_PATH` is monkeypatched and the first test asserts the
+patch took, because a leak would mean these tests reading production while
+reporting on a fixture.
+
+NOTHING HERE SENDS ANYTHING. `notify_desktop` and `notify_email` are never
+called; `should_alert` — the decision — is tested directly. Testing that an
+email leaves the machine is not this suite's job and is what `--test-alert`
+is for.
+"""
+from __future__ import annotations
+
+import sqlite3
+import sys
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+import pytest
+
+import config
+import db
+
+REAL_DB_PATH = config.DB_PATH
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+
+import watchdog  # noqa: E402  — requires the sys.path line above
+
+pytestmark = pytest.mark.integration
+
+# Wednesday 15 July 2026 is an ordinary trading day.
+# ET is UTC-4 in July, so 16:00 UTC = 12:00 ET = MIDDAY (300s cadence),
+# and 13:45 UTC = 09:45 ET = OPEN (60s cadence).
+MIDDAY = datetime(2026, 7, 15, 16, 0, tzinfo=UTC)
+OPEN_SESSION = datetime(2026, 7, 15, 13, 45, tzinfo=UTC)
+JUST_OPENED = datetime(2026, 7, 15, 13, 32, tzinfo=UTC)     # 09:32 ET
+SATURDAY = datetime(2026, 7, 18, 16, 0, tzinfo=UTC)
+OVERNIGHT = datetime(2026, 7, 15, 3, 0, tzinfo=UTC)         # 23:00 ET Tuesday
+
+
+def _snapshot_at(path: str, when_utc: datetime) -> None:
+    """One COMPLETE snapshot with the given timestamp."""
+    sid = db.create_snapshot(path, when_utc.strftime("%Y-%m-%d %H:%M:%S"),
+                             "OPEN", 60, underlying_price=6000.0,
+                             underlying_bid=6000.0, underlying_ask=6000.0,
+                             vix_value=15.0)
+    db.finalize_snapshot(path, sid, "COMPLETE", 10, 2, 500)
+
+
+@pytest.fixture
+def wd_db(temp_db, monkeypatch):
+    monkeypatch.setattr(config, "DB_PATH", temp_db)
+    monkeypatch.setattr(watchdog.config, "DB_PATH", temp_db)
+    # The token line is a bonus fact, not what these tests are about; pin it so
+    # a real token expiring on a Tuesday cannot turn these red.
+    monkeypatch.setattr(watchdog, "_token_note", lambda: "Token has 5.0 days left.")
+    return temp_db
+
+
+def test_the_test_database_is_not_the_production_one(wd_db):
+    """First on purpose — see the same check in test_prune_script.py."""
+    assert Path(wd_db).resolve() != Path(REAL_DB_PATH).resolve()
+    assert wd_db == watchdog.config.DB_PATH
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cry-wolf case 1 — the market is shut
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("when,label", [(SATURDAY, "weekend"), (OVERNIGHT, "overnight")])
+def test_a_shut_market_is_never_an_alarm(wd_db, when, label):
+    """The collector is idle BY DESIGN out of hours. If this fails, the
+    watchdog emails every night at midnight and is muted within a week."""
+    _snapshot_at(wd_db, when - timedelta(days=3))     # ancient, deliberately
+    result = watchdog.check(when)
+    assert result["ok"], label
+    assert "closed" in result["headline"].lower()
+
+
+def test_a_holiday_is_treated_as_shut(wd_db, monkeypatch):
+    """A weekday the market is closed — the case a weekend-only check misses."""
+    monkeypatch.setattr(watchdog.config, "MARKET_HOLIDAYS", {"2026-07-15"})
+    _snapshot_at(wd_db, MIDDAY - timedelta(days=2))
+    assert watchdog.check(MIDDAY)["ok"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cry-wolf case 2 — the minutes after the opening bell
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_two_minutes_after_the_bell_is_not_an_alarm(wd_db):
+    """At 09:32 the newest price is legitimately yesterday's 16:00 close. An
+    age check without a grace period alarms EVERY trading morning."""
+    _snapshot_at(wd_db, JUST_OPENED - timedelta(hours=17))
+    result = watchdog.check(JUST_OPENED)
+    assert result["ok"]
+    assert "grace" in result["detail"].lower()
+
+
+def test_but_it_does_alarm_once_the_grace_period_is_over(wd_db):
+    """The other side of the same boundary — without this, the test above is
+    satisfied by a watchdog that never alarms in the morning at all."""
+    _snapshot_at(wd_db, OPEN_SESSION - timedelta(hours=17))
+    assert not watchdog.check(OPEN_SESSION)["ok"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cry-wolf case 3 — the moment before each poll lands
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_data_as_old_as_the_interval_is_normal_not_late(wd_db):
+    """At a 300s cadence the age reaches 300s immediately before every new
+    price. That is the cadence working."""
+    _snapshot_at(wd_db, MIDDAY - timedelta(seconds=300))
+    assert watchdog.check(MIDDAY)["ok"]
+
+
+def test_one_missed_cycle_is_tolerated_and_three_are_not(wd_db):
+    _snapshot_at(wd_db, MIDDAY - timedelta(seconds=600))     # 2x — still under 2.5x
+    assert watchdog.check(MIDDAY)["ok"]
+
+
+def test_a_long_silence_during_market_hours_is_an_alarm(wd_db):
+    _snapshot_at(wd_db, MIDDAY - timedelta(seconds=3600))
+    result = watchdog.check(MIDDAY)
+    assert not result["ok"]
+    assert result["severity"] == "alarm"
+    assert "cannot be recovered" in result["detail"]
+
+
+def test_the_threshold_is_tighter_in_the_first_half_hour(wd_db):
+    """Four minutes old is fine at midday and late at the open, because the
+    collector polls every 60s then. The two answers come from the SAME
+    function the collector uses (core/session.py) — this is what stops the
+    header, the watchdog and the collector drifting apart."""
+    _snapshot_at(wd_db, OPEN_SESSION - timedelta(seconds=240))
+    assert not watchdog.check(OPEN_SESSION)["ok"]
+
+    # Same age, midday: healthy.
+    _snapshot_at(wd_db, MIDDAY - timedelta(seconds=240))
+    assert watchdog.check(MIDDAY)["ok"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The things that must never read as healthy
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_an_unreadable_database_is_an_alarm(wd_db, monkeypatch):
+    """Silence and 'all well' must not look the same. The database is the one
+    thing this script depends on."""
+    def _boom(*_a, **_k):
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(watchdog.db, "get_latest_complete_snapshot", _boom)
+    result = watchdog.check(MIDDAY)
+    assert not result["ok"] and result["severity"] == "alarm"
+
+
+def test_no_snapshots_at_all_is_an_alarm(wd_db):
+    assert not watchdog.check(MIDDAY)["ok"]
+
+
+def test_a_price_timestamped_in_the_future_is_an_alarm(wd_db):
+    """Found by probing during M3.4: this reported 'collecting normally,
+    newest price -2001584s old'. Every check here is a comparison against a
+    clock, so a wrong clock makes the reassuring answers meaningless too."""
+    _snapshot_at(wd_db, MIDDAY + timedelta(hours=2))
+    result = watchdog.check(MIDDAY)
+    assert not result["ok"]
+    assert "FUTURE" in result["headline"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cry-wolf case 4 — not saying it twelve times an hour
+# ─────────────────────────────────────────────────────────────────────────────
+
+ALARM = {"ok": False, "severity": "alarm", "headline": "x", "detail": "y"}
+FINE = {"ok": True, "severity": "ok", "headline": "x", "detail": "y"}
+NOW = MIDDAY
+
+
+def test_the_first_alarm_is_sent():
+    send, kind = watchdog.should_alert(ALARM, NOW, {})
+    assert send and kind == "new"
+
+
+def test_the_same_alarm_five_minutes_later_is_not():
+    state = {"alarming": True, "last_alert_utc": (NOW - timedelta(minutes=5)).isoformat()}
+    send, _ = watchdog.should_alert(ALARM, NOW, state)
+    assert not send
+
+
+def test_but_it_is_repeated_after_the_re_alert_window():
+    """An outage that lasts all day must not go quiet after one message."""
+    state = {"alarming": True,
+             "last_alert_utc": (NOW - timedelta(
+                 minutes=config.WATCHDOG_REALERT_MINUTES + 1)).isoformat()}
+    send, kind = watchdog.should_alert(ALARM, NOW, state)
+    assert send and kind == "repeat"
+
+
+def test_recovery_is_announced():
+    """Once an alarm has fired, silence means either 'fixed' or 'the watchdog
+    died too'. Only one is good news, so it says which."""
+    send, kind = watchdog.should_alert(FINE, NOW, {"alarming": True})
+    assert send and kind == "recovered"
+
+
+def test_a_quiet_day_stays_quiet():
+    send, _ = watchdog.should_alert(FINE, NOW, {"alarming": False})
+    assert not send
+
+
+def test_a_corrupt_state_file_does_not_stop_the_check(tmp_path, monkeypatch):
+    """The note about what was already reported is a convenience. Losing it
+    costs one duplicate alert; letting it raise costs the alarm entirely."""
+    bad = tmp_path / "watchdog_state.json"
+    bad.write_text("{not json", encoding="utf-8")
+    monkeypatch.setattr(watchdog, "STATE_PATH", bad)
+    assert watchdog.load_state() == {}

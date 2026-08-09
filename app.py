@@ -35,6 +35,7 @@ IV SCALE NOTE
 import logging
 import sys
 from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
@@ -50,6 +51,7 @@ import schwab_client
 # core.charts is gone from here entirely: every chart site moved to views/ in
 # step 2.4, which is what DEBT-030's fix has been waiting for.
 from core import market, position
+from core import session as core_session
 from core.charts import to_display_time
 
 # ─── services/ — the page's data layer, extracted in M2 step 2.5 ──────────────
@@ -174,6 +176,21 @@ snap_dt = datetime.strptime(snap_ts_str[:19], "%Y-%m-%d %H:%M:%S").replace(
 snap_age_secs = (datetime.now(UTC) - snap_dt).total_seconds()
 session_date  = snap_ts_str[:10]
 
+# How old the newest price is ALLOWED to be right now, in seconds — 60 in the
+# first and last half hour, 300 midday, None when the market is shut. This is
+# the collector's own polling interval, read from the same pure function the
+# collector uses, so the header cannot start disagreeing with the thing it is
+# reporting on (core/session.py). Not to be confused with `poll_interval` above,
+# which is how often the DASHBOARD looks for new data — a display preference.
+_expected_interval = core_session.expected_interval(
+    core_session.session_of(
+        datetime.now(UTC).astimezone(ZoneInfo(config.DISPLAY_TIMEZONE)),
+        config.MARKET_HOLIDAYS,
+    ),
+    config.POLL_INTERVAL_EVENT,
+    config.POLL_INTERVAL_NORMAL,
+)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Load option chain
 # ─────────────────────────────────────────────────────────────────────────────
@@ -250,6 +267,7 @@ header.render(
     snap_age_secs=snap_age_secs,
     snap_ts_str=snap_ts_str,
     change=change,
+    expected_interval=_expected_interval,
 )
 header.render_attention_strip(MC)
 header.render_token_banner(_token_age, sys.executable)

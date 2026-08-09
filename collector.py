@@ -41,7 +41,6 @@ import os
 import sys
 import time
 from datetime import UTC, date, datetime, timedelta
-from datetime import time as dtime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -52,6 +51,7 @@ import config
 import db
 import schwab_client
 from core import pins as core_pins
+from core import session as core_session
 from state import entry_locks
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -60,11 +60,16 @@ from state import entry_locks
 
 _ET = ZoneInfo("America/New_York")
 
-# Market session time boundaries (Eastern Time, no seconds/microseconds)
-_OPEN_START = dtime(9, 30)    # OPEN session begins
-_OPEN_END   = dtime(10, 0)    # OPEN ends / MIDDAY begins
-_MIDDAY_END = dtime(15, 30)   # MIDDAY ends / CLOSE begins
-_CLOSE_END  = dtime(16, 0)    # CLOSE ends — SPX underlying freezes at this point
+# Market session time boundaries (Eastern Time, no seconds/microseconds).
+# THE DEFINITIONS NOW LIVE IN core/session.py and are aliased here so the rest
+# of this file reads unchanged. They moved in M3.4 because the dashboard header
+# and the watchdog need the same boundaries, and the header's "prices are late"
+# threshold must BE the collector's polling interval rather than a second copy
+# of it that agrees today.
+_OPEN_START = core_session.OPEN_START
+_OPEN_END   = core_session.OPEN_END
+_MIDDAY_END = core_session.MIDDAY_END
+_CLOSE_END  = core_session.CLOSE_END
 
 # Collector reliability settings
 _BACKOFF_SECONDS          = 30    # Sleep between retries after a cycle failure
@@ -131,8 +136,12 @@ def _is_holiday(d: date) -> bool:
 
 
 def _is_trading_day(d: date) -> bool:
-    """True if d is a weekday and not a market holiday."""
-    return d.weekday() < 5 and not _is_holiday(d)
+    """True if d is a weekday and not a market holiday.
+
+    Delegates to core/session.py (M3.4); this wrapper supplies the holiday set
+    that a pure function is not allowed to reach for itself.
+    """
+    return core_session.is_trading_day(d, config.MARKET_HOLIDAYS)
 
 
 def get_session(now_et: datetime) -> str | None:
@@ -148,27 +157,18 @@ def get_session(now_et: datetime) -> str | None:
     Collection stops at 16:00 ET — not 16:15 — because SPX (a cash-settled index)
     stops updating at equity-market close. IVs computed after 16:00 use a frozen
     underlying price, making them analytically unreliable.
+
+    Delegates to core/session.py (M3.4). Kept as a named function here because
+    the collector calls it in several places and the tests name it.
     """
-    if not _is_trading_day(now_et.date()):
-        return None
-
-    # Strip seconds/microseconds for clean boundary comparison
-    t = now_et.time().replace(second=0, microsecond=0)
-
-    if _OPEN_START <= t < _OPEN_END:
-        return "OPEN"
-    if _OPEN_END <= t < _MIDDAY_END:
-        return "MIDDAY"
-    if _MIDDAY_END <= t < _CLOSE_END:
-        return "CLOSE"
-    return None
+    return core_session.session_of(now_et, config.MARKET_HOLIDAYS)
 
 
 def _poll_interval(session: str) -> int:
     """Return the configured poll interval (seconds) for a market session."""
-    if session in ("OPEN", "CLOSE"):
-        return config.POLL_INTERVAL_EVENT
-    return config.POLL_INTERVAL_NORMAL
+    return core_session.expected_interval(
+        session, config.POLL_INTERVAL_EVENT, config.POLL_INTERVAL_NORMAL
+    )
 
 
 def market_minutes_between(start_utc: datetime, end_utc: datetime) -> float:
