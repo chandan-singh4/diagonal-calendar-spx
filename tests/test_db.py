@@ -35,6 +35,7 @@ database under tmp_path and assert they are not the production path.
 from __future__ import annotations
 
 import logging
+import json
 import sqlite3
 from datetime import UTC, datetime, timedelta
 
@@ -1516,3 +1517,185 @@ def test_ic_marks_keeps_a_genuine_zero_mark(temp_db):
     assert marks is not None
     assert marks["long_call_mark"] == 0.0
     assert marks["cost_to_close"] == pytest.approx(5.5)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Entry-IV snapshotting — the gate on retention (M3, ADR-044 / ADR-016)
+#
+# get_entry_iv_context() answers "what was the term structure when I opened
+# this?" by reading historical option_rows. Retention deletes those rows, so
+# the answer is copied onto the trade while they still exist. These tests pin
+# the two properties that make pruning safe: the value IS stored at logging
+# time, and it SURVIVES the rows it was derived from disappearing.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 10:00 America/New_York in July == 14:00 UTC, the moment _seed_entry_context
+# places its snapshot.
+ENTRY_DATE, ENTRY_TIME_ET = "2026-07-15", "10:00"
+
+TRADE_LEGS = json.dumps([
+    {"expiry": FRONT, "type": "Call", "action": "Sell to Open",
+     "strike": CALL_STRIKE, "fill": 10.0},
+    {"expiry": FRONT, "type": "Put",  "action": "Sell to Open",
+     "strike": PUT_STRIKE,  "fill": 10.0},
+    {"expiry": BACK,  "type": "Call", "action": "Buy to Open",
+     "strike": CALL_STRIKE, "fill": 12.0},
+    {"expiry": BACK,  "type": "Put",  "action": "Buy to Open",
+     "strike": PUT_STRIKE,  "fill": 12.0},
+])
+
+
+def _log_trade(path, trade_id="T-100", **overrides):
+    fields = {
+        "trade_id": trade_id, "entry_date": ENTRY_DATE,
+        "entry_time": ENTRY_TIME_ET, "status": "Open", "contracts": 1,
+        "initial_legs": TRADE_LEGS, "total_debit": 4.0,
+    }
+    fields.update(overrides)
+    db.insert_trade(path, fields)
+    return db.get_trade(path, trade_id)
+
+
+def _drop_option_rows(path):
+    """What retention will eventually do to the rows behind the context."""
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute("DELETE FROM option_rows")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_init_trades_table_adds_every_entry_iv_column(trades_db):
+    with db.get_conn(trades_db) as conn:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(trades)")}
+    assert set(db.ENTRY_IV_COLUMNS) <= cols
+
+
+def test_entry_iv_columns_are_added_to_a_pre_existing_trades_table(temp_db):
+    """The migration path, not the fresh-schema path. An existing database has
+    a trades table built before these columns existed; init_trades_table() must
+    bring it forward without touching the rows already in it."""
+    conn = sqlite3.connect(temp_db)
+    try:
+        conn.executescript(
+            "CREATE TABLE trades (trade_id TEXT PRIMARY KEY, entry_date TEXT, "
+            "entry_time TEXT, status TEXT, contracts INTEGER, initial_legs TEXT, "
+            "total_debit REAL, created_at TEXT, updated_at TEXT);"
+        )
+        conn.execute(
+            "INSERT INTO trades VALUES ('T-001','2026-07-01','10:00','Open',1,"
+            "'[]',4.0,'x','x')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    db.init_trades_table(temp_db)
+
+    with db.get_conn(temp_db) as conn:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(trades)")}
+        assert set(db.ENTRY_IV_COLUMNS) <= cols
+        row = conn.execute("SELECT * FROM trades WHERE trade_id='T-001'").fetchone()
+    assert row["entry_date"] == "2026-07-01"      # untouched
+    assert row["entry_front_iv"] is None          # nothing invented for it
+
+
+def test_insert_trade_stores_the_entry_iv_context(trades_db):
+    _seed_entry_context(trades_db)
+    t = _log_trade(trades_db)
+    assert t["entry_front_iv"] == pytest.approx(0.21)   # (0.20 + 0.22) / 2
+    assert t["entry_back_iv"] == pytest.approx(0.10)
+    assert t["entry_iv_ratio"] == pytest.approx(2.1)
+    assert t["entry_atm_front_iv"] == pytest.approx(0.24)
+    assert t["entry_iv_snapshot_ts"] == "2026-07-15 14:00:00"
+
+
+def test_stored_context_matches_what_reconstruction_would_have_returned(trades_db):
+    """The stored value is not a second, subtly different calculation. If these
+    two ever diverge, every trade logged from now on carries a number that no
+    longer means what the historical charts mean."""
+    _seed_entry_context(trades_db)
+    t = _log_trade(trades_db)
+    ctx = db.get_entry_iv_context(
+        trades_db, "2026-07-15 14:00:00", FRONT, BACK, CALL_STRIKE, PUT_STRIKE)
+    assert t["entry_front_iv"] == pytest.approx(ctx["front_iv"])
+    assert t["entry_back_iv"] == pytest.approx(ctx["back_iv"])
+    assert t["entry_iv_ratio"] == pytest.approx(ctx["ratio"])
+    assert t["entry_iv_level"] == pytest.approx(ctx["level"])
+    assert t["entry_iv_snapshot_id"] == ctx["snapshot_id"]
+
+
+def test_stored_context_survives_pruning_the_rows_it_came_from(trades_db):
+    """THE POINT OF THE WHOLE EXERCISE. After retention deletes the option_rows,
+    reconstruction can no longer answer — and the trade still can."""
+    _seed_entry_context(trades_db)
+    t = _log_trade(trades_db)
+    stored = t["entry_front_iv"]
+
+    _drop_option_rows(trades_db)
+
+    gone = db.get_entry_iv_context(
+        trades_db, "2026-07-15 14:00:00", FRONT, BACK, CALL_STRIKE, PUT_STRIKE)
+    assert gone["front_iv"] is None               # reconstruction is now blind
+    assert db.get_trade(trades_db, "T-100")["entry_front_iv"] == stored
+
+
+def test_a_trade_is_still_recordable_with_no_snapshot_anywhere(trades_db):
+    """Collector down, token expired, weekend — logging a trade must never fail
+    because the context is unavailable. Missing context stores NULL, not 0."""
+    t = _log_trade(trades_db)
+    assert t is not None
+    assert t["entry_front_iv"] is None
+    assert t["entry_iv_snapshot_id"] is None
+
+
+def test_unparseable_legs_do_not_prevent_logging_a_trade(trades_db):
+    _seed_entry_context(trades_db)
+    t = _log_trade(trades_db, initial_legs="not json at all")
+    assert t is not None
+    assert t["entry_front_iv"] is None
+
+
+def test_an_explicit_context_is_not_overwritten(trades_db):
+    """How a backfill supplies its own answer."""
+    _seed_entry_context(trades_db)
+    t = _log_trade(trades_db, entry_front_iv=0.5, entry_back_iv=0.25,
+                   entry_iv_ratio=2.0, entry_iv_level=0.35,
+                   entry_iv_snapshot_id=999, entry_iv_snapshot_ts="x",
+                   entry_atm_front_iv=0.4, entry_atm_back_iv=0.2)
+    assert t["entry_front_iv"] == pytest.approx(0.5)
+    assert t["entry_iv_snapshot_id"] == 999
+
+
+def test_editing_the_entry_time_recomputes_the_stored_context(trades_db):
+    """A stored context describing the trade as it USED to be is worse than no
+    context: it is confidently wrong, and nothing on screen would say so."""
+    _seed_entry_context(trades_db)                        # 14:00 UTC, front 0.21
+    late = add_snapshot(trades_db, "2026-07-15 18:00:00")  # 14:00 ET
+    db.insert_option_rows(trades_db, [
+        opt(late, FRONT, CALL_STRIKE, "C", iv=0.50),
+        opt(late, FRONT, PUT_STRIKE, "P", iv=0.50),
+        opt(late, BACK, CALL_STRIKE, "C", iv=0.25),
+        opt(late, BACK, PUT_STRIKE, "P", iv=0.25),
+    ])
+    _log_trade(trades_db)
+    assert db.get_trade(trades_db, "T-100")["entry_front_iv"] == pytest.approx(0.21)
+
+    db.update_trade(trades_db, "T-100", entry_time="14:00")
+
+    t = db.get_trade(trades_db, "T-100")
+    assert t["entry_iv_snapshot_id"] == late
+    assert t["entry_front_iv"] == pytest.approx(0.50)
+
+
+def test_editing_an_unrelated_column_leaves_the_context_alone(trades_db):
+    """Recomputation is not free — it reads option_rows — and an edit to the
+    notes has no business re-deriving anything."""
+    _seed_entry_context(trades_db)
+    _log_trade(trades_db)
+    _drop_option_rows(trades_db)          # recomputing now would blank it
+
+    db.update_trade(trades_db, "T-100", notes="changed my mind", status="Closed")
+
+    assert db.get_trade(trades_db, "T-100")["entry_front_iv"] == pytest.approx(0.21)

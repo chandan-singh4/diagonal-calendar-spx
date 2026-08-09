@@ -53,7 +53,7 @@ weeks of work, not days.
 | **M0** | Stabilize & Clean | Make the repo safe to work in. No behaviour change. **Blocks everything.** | Clean `git status`, reproducible env, linted, backed up, ~318 MB reclaimed, context files live | 14 tasks — 10 S, 4 M | — | **everything** | ✅ Done, merged |
 | **M1** | Test Foundation | Make change safe. **Keystone — everything after depends on it.** | ≥70% coverage of non-UI code, checks that run unprompted, regressions in M2 detectable | 9 tasks — 3 S, 4 M, 2 L | M0 | M2 → all | ✅ Done (80%, 462 tests) |
 | **M2** | Architecture Refactor | Decompose the monolith. Behaviour-preserving, verified by M1. | `app.py` < 400 lines (composition only); `core/` framework-agnostic and fully tested | 14 tasks — 10 M, 4 L | M1 | M3, M4, M6 (so M5, M7, M8 too) | ✅ Done 2026-07-31, merged to main 2026-08-01 |
-| **M3** | Data Layer Hardening | Put the data pipeline on a sustainable footing | Bounded DB growth, monitored collection, documented operations | 9 tasks — 3 S, 4 M, 2 L | M2 | M8; 3.2 also gates M6.3 | ← **next** |
+| **M3** | Data Layer Hardening | Put the data pipeline on a sustainable footing | Bounded DB growth, monitored collection, documented operations | 9 tasks — 3 S, 4 M, 2 L | M2 | M8; 3.2 also gates M6.3 | 🔄 **In progress** — 3.1, 3.2 done 2026-08-09 |
 | **M4** | Backend API *(gated)* | Stable contract over `core/`; prerequisite for any UI migration | Documented API; Streamlit still running unchanged | 5 tasks — 1 S, 3 M, 1 L | M2 | M5 | Not started |
 | **M5** | Dashboard Modernization *(decision point)* | Resolve the Streamlit ceiling — **only if it still hurts after M2** | Live-updating UI without full-page reruns; charts hold zoom across updates | 7 tasks — 1 S, 1 M, 3 L, 2 XL | M2 + M4 (5.0 gate) | — *(leaf)* | Gated at 5.0 |
 | **M6** | Analytics Engine | Answer the questions the project set out to answer | Core unvalidated questions answered from data, or explicitly retired | 6 tasks — 2 M, 3 L, 1 XL | M2 (6.3 also needs 3.2) + ~20 trades | M7 | Blocked: needs ~20 trades, have 6 |
@@ -183,26 +183,69 @@ between two runs minutes apart as the collector adds snapshots.
 
 ---
 
+## M3 — Data Layer Hardening
+
+**Goal:** put the data pipeline on a sustainable footing. Bounded growth, monitored collection,
+documented operations.
+
+**Status: started 2026-08-09. 3.1 and 3.2 are done; seven tasks remain.**
+
+**The one thing to understand before reading the table.** Collection began 2026-06-23, so on the
+day the policy was written **the oldest expiry was 47 days past and a 90-day rule deleted nothing**
+(ADR-044). Growth continues at ~82 MB/trading-day until roughly November. That is not an argument
+against 3.2 — the mechanism has to exist before the data ages into it — but **3.2 landing is not
+"growth is solved."** It is "growth will be bounded, starting later." Anyone reading the ✅ and
+concluding the storage problem is behind them will be surprised in October.
+
+| # | Task | Status | Notes |
+|---|---|---|---|
+| 3.1 | Decide and document a retention policy | ✅ **Done 2026-08-09** | **ADR-044.** Chandan chose **90 days past expiry** and **manual invocation** with the alternatives in front of him. `option_rows` is the only prunable table. `atm_iv_by_expiry`, `snapshots`, `collection_gaps` kept forever — 5.3 MB for 47 days, 0.26% of the database, so keeping the history is free. **Expiries used by a trade are exempt at any age**, read from the trades rows themselves so logging a trade protects its data with no further action. Measured rather than estimated: `dbstat` shows `option_rows` 1,399.6 MB with 636.4 MB of indexes on it, so **a deleted row reclaims ~2.2× its own bytes** — the audit counted table bytes only and understated the saving. |
+| 3.1a | **Entry-IV snapshotting — the gate on all pruning** | ✅ **Done 2026-08-09** | Not in the original task list; it is ADR-016's blocker, and 3.2 could not ship without it. `get_entry_iv_context()` reconstructed a trade's entry-time term structure by reading historical `option_rows`; pruning those made the question permanently unanswerable **and silently so** — Regime Analysis would plot fewer trades each month with nothing on screen saying why. Eight `entry_*` columns now carry the answer on the trade row. Written by `insert_trade`/`update_trade`, **not by the call site**, so it cannot be forgotten; an edit to entry date/time/legs recomputes it, because a stored context describing the trade as it *used to be* is worse than none. Reconstruction survives as the fallback for pre-M3 rows. |
+| 3.2 | Implement retention/archival + a dry-run mode | ✅ **Done 2026-08-09** | `db.plan_prune` / `db.execute_prune` + `scripts/prune.py`. **Split in two on purpose:** planning is read-only and acting takes a plan it is handed, so a caller cannot delete without holding the description of what it deletes, and the report shown and the rows deleted cannot be two different answers. Three gates: reporting is the default and `--execute` is a flag; `--execute` refuses without a backup newer than the database; past that it asks for the **row count in figures** — a y/n prompt is answered by reflex, a number has to be read off the report. Closed stdin cancels, which is exactly the unattended case. **Rehearsed on the real database** with `--today 2026-12-01`: 42 expiries / 9,901,390 rows (85.8%) would go, **8 expiries / 1,589,912 rows held back for the 6 practice trades**. 31 tests across `test_retention.py` and `test_prune_script.py`. **VACUUM is deliberately not automatic** — it needs exclusive access and free disk equal to the database; the script prints the command instead. |
+| 3.3 | Proper migration framework (versioned, forward-only, tested) | Not started | The `entry_*` columns went in via the existing add-if-missing `ALTER TABLE` pattern, which now runs **ten** times in `init_trades_table`. That is the argument for this task, not a reason to defer it. |
+| 3.4 | Collector liveness monitoring + alerting on missed cycles | Not started | **Highest operational value of what remains.** Two of the three real collector weaknesses the audit found are "depends on Chandan remembering" — and this session opened with the token expired and nothing but a render check to say so. |
+| 3.5 | Surface `collection_gaps` in the dashboard | Not started | Data collected since day one and never once shown. `db.get_gaps()` already exists and is uncalled. |
+| 3.6 | Log `INSERT OR IGNORE` rowcount mismatches | Not started | **There is a standing symptom to explain here**: the collector logs *"160 of 3,156 rows were DISCARDED"* on nearly every cycle. A figure that constant is a pattern, not random duplicates. See DEBT-008 / ADR-022. |
+| 3.7 | Data-quality checks: IV outliers, stale quotes, missing legs | Not started | — |
+| 3.8 | Streamline Schwab token re-auth; document the runbook | Not started | Weekly manual chore. Re-auth was needed on the morning of this session. |
+| 3.9 | `docs/DATABASE.md`, `docs/OPERATIONS.md`, `docs/TROUBLESHOOTING.md` | Not started | Depends on 3.2. `prune.py` and the VACUUM procedure are the first things `OPERATIONS.md` has to describe. |
+
+**Exit:** bounded DB growth; monitored collection; documented operations.
+
+---
+
 ## Immediate next actions
 
-1. **M2 is done — the next milestone is M3, Data Hardening.** `app.py` finished at
+1. **M3 is under way — 3.3 through 3.9 remain; take 3.4 next.** 3.1, 3.2 and the
+   entry-IV gate landed 2026-08-09 (ADR-044). **3.4, collector liveness monitoring, is
+   the highest-value item left**: this session opened with the Schwab token silently
+   expired, and only a render check revealed it. Markets were shut, so nothing was lost —
+   Monday's open would not have been so forgiving. 3.8 (re-auth runbook) is its natural
+   companion. 3.9 is last because `OPERATIONS.md` has to describe `prune.py`, and
+   documenting a procedure before it has been run in anger writes fiction.
+2. **Do not read 3.2's ✅ as "database growth is handled."** It is handled *eventually*.
+   Collection began 2026-06-23; a 90-day rule reaches nothing until about November, and
+   the database grows ~82 MB per trading day until then. If disk becomes a real problem
+   before November, that is a separate conversation with separate options (audit §5.8's
+   downsampling), not a reason to reopen ADR-044.
+3. **M2 is done.** `app.py` finished at
    **392 lines** from 4,283 (ADR-041), and DEBT-002 is closed. Nothing in M2 is
-   outstanding. Before starting M3, note that step 2.5 left two P3 rows it deliberately
+   outstanding. Step 2.5 left two P3 rows it deliberately
    did not fix inside a move: **DEBT-033** (the `services/` names still carry app.py's
    leading underscores — rename in a commit whose diff shows only the rename, and update
    `tests/app_loader.py::_PIPELINE_FUNCS` in the same change) and **DEBT-034**
    (`spx_intraday["ts_et"]` computed and never read — check git history for a removed
    chart first; BUG-019 is the standing reminder that "dead" and "dropped" look identical).
-2. **The 6 practice trades can now safely be discarded.** BUG-016 was the blocker — the
+4. **The 6 practice trades can now safely be discarded.** BUG-016 was the blocker — the
    next ID after a deletion collided with a live PRIMARY KEY and the save raised. Fixed
    2026-07-26 (ADR-023 §1) and covered by a test that runs exactly that sequence. Note the
    related commitment in STATUS.md: the app must save market conditions *with each trade*
    before serious trading resumes.
-3. **Work DEBT-025 down toward zero, then gate on it.** 85 lint findings remain after the
+5. **Work DEBT-025 down toward zero, then gate on it.** 85 lint findings remain after the
    first pass. Most dissolve during the M2 decomposition. Only wire `ruff check` into the
    M1.9 pre-commit hook once it is at zero — a gate that fails on every commit teaches
    everyone to bypass it.
-4. **Still blocked on the user: BUG-001.** The duplicate-collector theory is dead (ADR-018).
+6. **Still blocked on the user: BUG-001.** The duplicate-collector theory is dead (ADR-018).
    Needs a symptom, a tab, and a screenshot.
 
 ---
@@ -211,7 +254,7 @@ between two runs minutes apart as the collector adds snapshots.
 
 | Decision | Blocks | Detail |
 |---|---|---|
-| **Entry-IV-context snapshotting** | M3.2 | ~~Blocker~~ **downgraded 2026-07-26**: the 6 existing trades are being discarded, so no backfill is needed and pruning can proceed freely. The design fix still stands for *future* trades — `get_entry_iv_context()` reads historical `option_rows`, so any trade logged from now on loses its entry context once its expiries are pruned. Implement entry-IV snapshotting into `trades` **alongside** the pruner in M3, before the journal accumulates trades that matter. See ADR-016. |
+| ~~**Entry-IV-context snapshotting**~~ | ~~M3.2~~ | ✅ **Closed 2026-08-09 (ADR-044).** Eight `entry_*` columns on `trades`, written inside `insert_trade`/`update_trade` so no call site can omit them; `get_entry_iv_context()` reconstruction remains the fallback for pre-M3 rows. The 2026-07-26 note said "implement it alongside the pruner" and that is what happened — snapshotting shipped first, pruning second, in that order deliberately. See ADR-016, ADR-044. |
 | **M5.0 re-evaluation** | M5 | Whether Streamlit still hurts enough to migrate, decided with evidence after M2. Not pre-committed. |
 | **Formatter run timing** | 0.6 | See ADR-015. |
 

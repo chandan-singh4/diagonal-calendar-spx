@@ -560,6 +560,19 @@ Critical index: `idx_option_rows_contract_snap` on `(expiry_date, strike, right,
 
 > **Planned (v1.1):** a `trades` table for the validation mechanism — see §10.1.
 
+**Retention (added M3, 2026-08-09 — ADR-044).** `option_rows` is the only prunable table:
+per-strike rows are deletable **90 days after their expiry date** (`config.RETENTION_DAYS`).
+`snapshots`, `atm_iv_by_expiry` and `collection_gaps` are kept **forever** — measured at 5.3 MB
+for the first 47 days, 0.26% of the database. **Expiries used by a trade are exempt at any age**
+(`db.get_protected_expiries`). **Nothing reads `RETENTION_DAYS` on a schedule**: pruning happens
+only when `python scripts/prune.py` is run by hand, and that script reports unless given
+`--execute`, which then requires a fresh backup and the row count typed in figures.
+Measured with `dbstat`: `option_rows` is 1,399.6 MB of table plus 636.4 MB of indexes on it, so
+**a deleted row reclaims ~2.2× its own bytes** — but only after a separate manual `VACUUM`,
+which the script prints rather than runs (it needs exclusive access and free disk equal to the
+database). **Note the timeline:** collection began 2026-06-23, so a 90-day rule reaches nothing
+until roughly November 2026.
+
 **IV scale rule:** every IV column is stored as a decimal. `app.py` multiplies ×100 at the load boundary; `iv_engine.py` functions always receive percentage-form IV.
 
 **New read functions added in v1.2:**
@@ -875,7 +888,7 @@ Open  ──► Transformed ──► Expired
 
 ### 12.3 Database Schema — `trades` table
 
-All columns in full, as of v3.1:
+All columns in full, as of v3.1 plus the eight `entry_*` columns added 2026-08-09 (M3):
 
 | Column | Type | Description |
 |---|---|---|
@@ -891,6 +904,14 @@ All columns in full, as of v3.1:
 | `initial_legs` | TEXT | JSON array of 4 legs — the diagonal |
 | `total_debit` | REAL | Net debit paid / share at entry |
 | `notes` | TEXT | Freeform trader notes |
+| `entry_iv_snapshot_id` | INTEGER | ↓ **The eight `entry_*` columns below are the M3 entry-IV snapshot (ADR-044/ADR-016).** They record the term structure as it stood when the trade was opened, because `db.get_entry_iv_context()` derives that by reading historical `option_rows`, and `scripts/prune.py` deletes those 90 days past expiry. **They are written by `db.insert_trade()` and recomputed by `db.update_trade()`, never by the caller** — a call site that could forget them would lose the context permanently and silently. `db.snapshot_entry_iv_context()` returns all-None on any failure: a trade must always be recordable. NULL on pre-M3 rows, which fall back to reconstruction (`pages/journal.py::_stored_entry_iv` returns None and Regime Analysis reports the split). `db.ENTRY_IV_COLUMNS` is the single definition. ── The snapshot this was taken from |
+| `entry_iv_snapshot_ts` | TEXT | Timestamp of that snapshot |
+| `entry_front_iv` | REAL | Front-expiry IV at the traded strike, **decimal** (0.18 = 18%) |
+| `entry_back_iv` | REAL | Back-expiry IV at the traded strike, decimal |
+| `entry_iv_ratio` | REAL | front ÷ back |
+| `entry_iv_level` | REAL | Front IV's percentile against its own history |
+| `entry_atm_front_iv` | REAL | At-the-money front IV, decimal |
+| `entry_atm_back_iv` | REAL | At-the-money back IV, decimal |
 | `transform_date` | TEXT | ISO date of transformation or direct close |
 | `transform_time` | TEXT | HH:MM ET of transformation or direct close |
 | `transform_minutes` | INTEGER | Minutes from entry to transformation (IC path only) |
@@ -1100,6 +1121,11 @@ The Iron Condor tab shows per-leg fill prices and unrealized P&L alongside the e
 | `delete_trade(db_path, trade_id)` | `db.py` | `DELETE WHERE trade_id = ?`; called only after user confirmation |
 | `transform_commissions REAL` migration | `db.py` | `ALTER TABLE` inside `init_trades_table`; safe on existing databases |
 | `close_type TEXT` migration | `db.py` | Same pattern; drives display branching throughout journal |
+| 8 × `entry_*` migration | `db.py` | Same pattern, driven by `ENTRY_IV_COLUMNS`. This makes **ten** hand-rolled add-if-missing `ALTER TABLE`s in `init_trades_table` — the argument for M3.3's real migration framework |
+| `snapshot_entry_iv_context()` | `db.py` | Derives front/back expiry and call/put strikes from `initial_legs`, converts the ET entry time to UTC via `config.DISPLAY_TIMEZONE`, calls `get_entry_iv_context()`. All-None on any failure |
+| `_stored_entry_iv(trade)` | `pages/journal.py` | Reads the stored context in reconstruction shape; None when the columns are absent or front/back IV is NULL, so Regime Analysis falls back |
+| `get_protected_expiries()` | `db.py` | Every expiry named by any trade's `initial_legs` / `transform_legs` / `ic_expiry_date`. **Fails closed** — the `json.loads` is deliberately unguarded, because a swallowed parse error would silently drop a trade's protection |
+| `plan_prune()` / `execute_prune()` | `db.py` | Read-only planning, separated from acting, so the report shown and the rows deleted cannot be two different answers. `execute_prune` deletes only `option_rows`, only the plan's exact expiries, in one transaction |
 
 ---
 

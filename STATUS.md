@@ -1,9 +1,9 @@
 # PROJECT STATUS
 
-**Updated:** 2026-08-01 · **Branch:** `main` — **stage 2 merged and saved online.**
-**State:** Two faults fixed and checked on the real screen. 693 checks pass. **Stage 3 starts
-next; nothing blocks it.** This session's last two changes are saved on this machine but **not
-yet sent to GitHub** — send them first.
+**Updated:** 2026-08-09 · **Branch:** `main` — **stage 3 under way.**
+**State:** The first two parts of stage 3 are built and checked. 740 checks pass. **This
+session's work is saved on this machine only and is not yet sent to GitHub** — that is the
+first thing to offer next session. Nothing in it has touched the real database.
 > Self-contained: read this file alone to start a session. Replaced entirely by `/wrap`.
 
 ## What this project is
@@ -19,52 +19,71 @@ checking are in good shape; the screen's known faults are listed below and are n
 | Part | What it does |
 |---|---|
 | **Collector** | Background program. Every 1–5 min while markets are open, records all option prices. Starts with Windows. |
-| **Database** | One file, ~1.8 GB since 23 June. Irreplaceable — the broker won't sell you last Tuesday's prices. |
+| **Database** | One file, **2.0 GB** since 23 June, growing ~82 MB a trading day. Irreplaceable — the broker won't sell you last Tuesday's prices. |
 | **Dashboard** | Web page, 6 tabs: Scanner, Entry Analysis, Calendar Edge, Strike Detail, Historical Stats, Research. Reads only. |
 | **Journal** | Diary of actual trades. 6 practice entries, to be discarded. |
 
 ## The 9-stage plan
 
 `0 clean up` **done** → `1 automatic checking` **done** → `2 break up big files` **done** →
-`3 stop database growing` **← here** → `4 data service` → `5 decide on rebuilding the screen` →
+`3 stop database growing` **← here, 2 of 9 parts done** → `4 data service` → `5 decide on rebuilding the screen` →
 `6 answer trading questions with real results` → `7 machine learning` → `8 run reliably unattended`
 Order is fixed: **you can't safely rearrange code you can't check automatically.** Stages 6 and 7
 also need ~20 and ~100 real trades; there are 6 practice ones.
 
 ## This session
 
-**Stage 2 is signed off.** Chandan looked at the charts — the one thing last session's automatic
-word-by-word comparison could not do. Everything then merged into the main line of work.
+**The collector had been blind and nothing said so.** The permission slip the broker issues (the
+"token") had quietly expired. No prices were lost — the markets were shut all weekend — but
+Monday's opening would have been lost in silence. Chandan renewed it. **This is why the next
+piece of work is a watchdog that shouts when collection stops** (see below).
 
-**A saved trade could be charted as a different trade — fixed at the cause, Chandan's idea.**
-The collector only records prices near where the index is **today**; a saved position is fixed at
-the price it was opened at. As the index drifts, that position's prices stop being recorded, so
-the screen couldn't find them, quietly substituted its nearest guess, and drew a confident chart
-of the wrong trade. The first plan was only to warn on screen. Chandan asked whether those prices
-could simply keep being recorded instead. **Checking the stored data showed he was right and it
-was nearly free — the broker was already sending them and we were throwing them away.** Both were
-done. Verified live: saved a position, restarted the collector, opened its chart — correct.
-**A claim made here was wrong and measuring took a minute:** the broker's limit was said to bind
-much sooner, making this expensive. It doesn't — the assumption was wrong in the direction that
-would have cost the most work.
+**Stage 3, part 1: the rule for clearing out old prices — Chandan's decision, written down.**
+Per-strike prices may be deleted **90 days after the option they describe has expired**. The
+daily *summaries* are kept **forever** (all of them together are 5 MB — 0.26% of the file, so
+keeping the whole history costs nothing). **Any expiry a real trade actually used is never
+deleted, at any age** — logging a trade protects its own data automatically, with nothing to
+remember. Recorded in `docs/decisions.md` as ADR-044, along with the alternatives he turned down.
 
-**Four summary figures at the top of the Scanner were deleted — Chandan's call.** They vanished by
-accident a month ago while the sums behind them kept running. He chose deleting over restoring,
-knowing that is the direction that can't be undone by looking at the screen; `docs/decisions.md`
-(ADR-043) records the exact commands to bring them back.
+**Something had to be built first, or the rule would have destroyed the journal's memory.**
+The screen worked out the market conditions at the moment a trade was opened by *going back and
+reading the old prices*. Clear those out and that question becomes permanently unanswerable —
+and **silently**: the chart would simply show fewer trades each month with nothing saying why.
+So the answer is now **written onto the trade itself the moment it is saved**, by the saving code
+rather than by the screen, so no future screen can forget to do it. Old trades still fall back to
+the old method.
 
-**For the third time, something that looked dead was holding something up.** Ten of the eleven
-values behind those figures were unused; the eleventh feeds a badge still on screen. Removing the
-lot **was tried on a copy first and broke all six tabs** — and all 693 checks still passed.
-`python scripts/render_check.py` caught it, as twice before. **Run it after any screen change.**
+**Stage 3, part 2: the clearing-out tool exists — and it deletes nothing unless asked three
+times.** `python scripts/prune.py` **reports** by default; deleting needs `--execute`, which
+refuses to run without a backup newer than the database, and then asks for the **exact number of
+rows in figures**. "y" is rejected on purpose — a number has to be read off the report first. If
+nobody is at the keyboard it cancels. Rehearsed against the real database in report mode: asked
+what it *would* do in December, it correctly held back the 8 expiries belonging to the practice
+trades. 31 new checks cover it.
+
+**The thing to understand about that: it clears nothing today, and nothing until about November.**
+Collection only started 23 June — 47 days ago — so nothing is yet 90 days past expiry. The tool
+had to be built before the data aged into it, but the file keeps growing until then.
+
+**A mistake worth remembering: `git checkout` undid an hour of unsaved work.** It was used to undo
+a deliberate temporary break in a file — and it reverted every other unsaved change in that same
+file with it. The project rule says rehearse on a *copy*; `git checkout` is not a copy, it is the
+opposite. Later checks copied the file aside first and put it back by hand.
 
 ## What to do next
 
-1. **Send this session's work to GitHub** (`git push origin main`) — ask Chandan first.
-2. **Start stage 3 — stop the database growing.** Nothing blocks it. Build one thing alongside it:
-   the app must save market conditions *with each trade*, or trades logged from now on lose that
-   context once old prices are cleared out.
-3. **After a day of collection, read `collector.log`** for lines beginning `strike window:
+1. **Save this session's work and send it to GitHub** — ask Chandan first. Nothing is committed
+   yet; it is all sitting unsaved in the working folder, which is the state that lost an hour
+   earlier today.
+2. **Build the collector watchdog (part 4 of stage 3) — the most valuable thing left.** Something
+   must notice and say so when collection stops during market hours. Today's expired permission
+   slip is exactly the case it exists for. **Part 8 belongs with it**: write down the renewal
+   steps, since that chore comes round every week.
+3. **Then parts 5 and 6.** The database has recorded every gap in collection since day one and the
+   screen has never once shown them. And there is a standing puzzle worth explaining: the collector
+   reports **"160 of 3,156 rows discarded" on nearly every cycle**. A number that steady is a
+   pattern, not chance.
+4. **After a day of collection, read `collector.log`** for lines beginning `strike window:
    broker supplied` — they show how much room exists beyond what's kept. Nothing depends on it yet.
 
 ## Open problems
@@ -87,6 +106,10 @@ lot **was tried on a copy first and broke all six tabs** — and all 693 checks 
   write it up in `docs/decisions.md` first. **Never re-record a failing check to make it pass.**
 - **Move code first, rename second, separately** (two renames outstanding: DEBT-033, DEBT-035).
   **The 6 practice trades are blocked** on Chandan at the keyboard with a confirmed backup.
+- **Old prices are cleared 90 days past expiry, summaries kept forever, traded expiries never
+  cleared, and it never happens on a timer** — only when Chandan runs it and confirms (ADR-044).
+  **Reclaiming the disk space needs a separate `VACUUM` step**, which locks the file and needs
+  free space equal to the database; the tool prints the command rather than running it.
 - **Keeping a saved position's prices is forward-only** — it cannot fill in history from before
   the position was saved. That is why the on-screen warning stays.
 

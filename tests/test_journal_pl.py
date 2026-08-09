@@ -471,3 +471,69 @@ def test_holding_days_counts_calendar_days(journal):
 
 def test_holding_days_is_none_on_a_bad_date(journal):
     assert journal["holding_days"](make_trade(entry_date="not-a-date")) is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _stored_entry_iv — the read side of the retention gate (ADR-044)
+#
+# Regime Analysis prefers the context recorded on the trade and falls back to
+# reconstructing it from option_rows. This helper is the switch between the two.
+# Getting it wrong is not visible: the chart still draws, just from a different
+# source than intended, and after pruning it would draw from nothing.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_FULL_CONTEXT = {
+    "entry_iv_snapshot_id": 42, "entry_iv_snapshot_ts": "2026-07-15 14:00:00",
+    "entry_front_iv": 0.21, "entry_back_iv": 0.10,
+    "entry_iv_ratio": 2.1, "entry_iv_level": 0.1449,
+    "entry_atm_front_iv": 0.24, "entry_atm_back_iv": 0.12,
+}
+
+
+def _row_with_context(**overrides) -> FakeRow:
+    data = dict(_FULL_CONTEXT)
+    data.update(overrides)
+    return FakeRow(data)
+
+
+def test_stored_context_is_returned_in_the_reconstruction_shape(journal):
+    """The caller must not need to know which source answered — one shape, one
+    code path. A different key here is a KeyError on a live page."""
+    ctx = journal["_stored_entry_iv"](_row_with_context())
+    assert ctx == {
+        "snapshot_id": 42, "snapshot_timestamp": "2026-07-15 14:00:00",
+        "front_iv": 0.21, "back_iv": 0.10,
+        "ratio": 2.1, "level": 0.1449,
+        "atm_front_iv": 0.24, "atm_back_iv": 0.12,
+    }
+
+
+def test_a_row_predating_the_columns_falls_back(journal):
+    """A trade logged before M3. The columns are not on the row at all."""
+    assert journal["_stored_entry_iv"](FakeRow({"trade_id": "T-001"})) is None
+
+
+def test_a_row_with_the_columns_but_no_values_falls_back(journal):
+    """Logged with the collector down — the columns exist and are NULL."""
+    assert journal["_stored_entry_iv"](
+        _row_with_context(entry_front_iv=None, entry_back_iv=None)) is None
+
+
+def test_one_missing_side_is_not_enough_to_use(journal):
+    """A ratio needs both. Half a context would plot a trade at a made-up
+    position rather than omitting it."""
+    assert journal["_stored_entry_iv"](_row_with_context(entry_back_iv=None)) is None
+
+
+def test_a_genuine_zero_is_not_treated_as_missing(journal):
+    """Project rule: missing is blank, not 0 — and the converse holds too. A
+    stored 0.0 is a fact about the market and a truthiness check would discard
+    it, silently falling back to reconstruction that no longer has the rows."""
+    ctx = journal["_stored_entry_iv"](_row_with_context(entry_iv_level=0.0))
+    assert ctx is not None
+    assert ctx["level"] == 0.0
+
+
+def test_something_that_is_not_a_row_falls_back(journal):
+    """Defensive: the loop must not die on an unexpected object."""
+    assert journal["_stored_entry_iv"](object()) is None

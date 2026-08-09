@@ -5,6 +5,83 @@ what broke, and what remains.
 
 ----
 
+## 2026-08-09 (session 12) — M3 begun: retention policy decided, entry-IV gate built, pruner shipped
+
+### Completed
+
+**M3.1 — the retention policy is decided and written down (ADR-044).** Chandan chose **90 days
+past expiry** and **manual invocation** from the alternatives, with the measured tradeoffs in
+front of him. `option_rows` is the only prunable table; `atm_iv_by_expiry`, `snapshots` and
+`collection_gaps` are kept forever. Expiries used by a trade are exempt at any age.
+
+**The entry-IV gate is built — this was the precondition on all pruning (ADR-016).**
+`get_entry_iv_context()` answered "what was the term structure when I opened this?" by reading
+historical `option_rows`. Pruning those made the question permanently unanswerable, and
+*silently*: Regime Analysis would simply plot fewer trades each month with nothing on screen
+saying why. Eight `entry_*` columns now carry the answer on the trade row, written by
+`insert_trade`/`update_trade` rather than by the call site, so it cannot be forgotten. The old
+reconstruction survives as the fallback for pre-M3 rows.
+
+**M3.2 — `scripts/prune.py`, with three gates in front of the delete.** Reporting is the default;
+`--execute` is a flag. `--execute` still refuses without a backup newer than the database. Past
+that it asks for the row count *in figures* — a y/n prompt gets answered by reflex, a number has
+to be read off the report. Closed stdin cancels, which is exactly the unattended case.
+
+**41 new checks (693 → 740), and `render_check.py` clean on all six tabs.**
+
+### Discovered
+
+**The 90-day policy reclaims nothing until roughly November, and this was worth measuring.**
+Collection began 2026-06-23, so on the day the policy was written the oldest expiry was 47 days
+past. **A 90-day rule deletes zero rows today.** The policy is still right — it has to exist
+before data ages into it — but M3.2 merging does not mean growth is solved. It arms a mechanism
+that fires later. Near-term relief is a separate decision (downsampling, audit §5.8c),
+deliberately not bundled into ADR-044.
+
+**Pruning is worth more than the audit estimated.** `dbstat` on the live database: `option_rows`
+1,399.6 MB, its two indexes another 636.4 MB. A deleted row reclaims **~2.2× its own bytes**
+because both indexes carry every row. `atm_iv_by_expiry` is 5.3 MB for 47 days — 0.26% of the
+database — so keeping the summaries forever is genuinely free.
+
+**Rehearsed against the real data with `--today 2026-12-01`:** 42 expiries / 9,901,390 rows
+(85.8%) would go, and **8 expiries / 1,589,912 rows were held back for the 6 practice trades** —
+the protection rule working on real inputs, not just in a fixture.
+
+**A lint rule wanted a change that would have broken the edit path.** Ruff's SIM118 flagged
+`k in current.keys()` and suggested `k in current`. On a `sqlite3.Row`, `in` tests the row's
+**values**, not its column names — verified in a REPL, not assumed. Taking the suggestion makes
+`'entry_date' in row` False on a row that has one, blanking the stored context on every edit,
+silently. Kept with a `noqa` and the reasoning inline;
+`test_editing_the_entry_time_recomputes_the_stored_context` fails if anyone takes it later.
+
+**The collector was blind and STATUS did not know.** The Schwab token had expired ~10 hours before
+the session started; `render_check.py` reported it on every tab. No data was lost — markets were
+shut all weekend — but Monday's open would have recorded nothing. Chandan re-authed. STATUS was
+also stale on its first instruction: last session's two commits were already on `origin/main`.
+
+### What broke
+
+**Two tests passed vacuously on first writing and were rewritten.** `test_execute_is_all_or_nothing`
+exercised `managed_conn` and never called `execute_prune` — replaced with a `BEFORE DELETE` trigger
+that aborts on the second expiry, so the rollback is genuinely tested. `test_a_comma_formatted_count`
+typed `"5"`, which contains no comma — it now seeds 1,500 rows and types `"1,500"`.
+
+**`git checkout -- db.py` destroyed an hour of uncommitted work.** Used to undo a deliberate
+sabotage that was proving a test could fail; it reverted the real changes in the same file too.
+The sabotage had already done its job. Later verification used a file copy in a scratch directory
+instead, and that is the pattern to use: **the project rule says rehearse on a copy, and `git
+checkout` is not a copy — it is the opposite.**
+
+### Remaining
+
+M3.3 migrations, 3.4 collector liveness, 3.5 surface `collection_gaps`, 3.6 log the
+`INSERT OR IGNORE` mismatch, 3.7 data-quality checks, 3.8 token re-auth runbook, 3.9 the three
+operations documents. 3.6 has a standing symptom to explain: the collector logs
+**"160 of 3,156 rows DISCARDED"** on nearly every cycle, and a figure that constant is a pattern,
+not random duplicates.
+
+----
+
 ## 2026-08-01 (session 11) — BUG-022 and BUG-019 closed; M2 merged to main
 
 ### Completed

@@ -7,6 +7,67 @@ it was recorded here.
 
 ---
 
+## ADR-044 — Retention policy: 90 days past expiry, summaries forever, deletion never automatic
+**Date:** 2026-08-09 · **Status:** ACCEPTED · **Closes M3.1** · **Unblocks M3.2**
+
+**THE POLICY.** `option_rows` is deleted for an `expiry_date` more than **90 days** in the past.
+`atm_iv_by_expiry`, `snapshots` and `collection_gaps` are **kept forever**. Deletion is **never
+automatic** — no scheduled task, no collector hook, no app trigger. It runs only when Chandan
+runs it, and it reports what it would delete before it deletes anything.
+
+Chandan chose both numbers with the alternatives in front of him (30 / 90 / 365 / archive-instead,
+and manual / scheduled / dry-run-only). 90 days and manual are the middle of each range.
+
+**WHY PER-STRIKE DETAIL IS THE ONLY THING WORTH DELETING — measured 2026-08-09, not assumed:**
+
+```
+option_rows                    1399.6 MB     ← the target
+idx_option_rows_contract_snap   322.9 MB     ← shrinks with it
+uq_option_rows_contract         313.5 MB     ← shrinks with it
+atm_iv_by_expiry                  5.3 MB     ← 47 days of it. Keep forever.
+snapshots / collection_gaps       0.4 MB
+```
+
+Two things follow. **A deleted row reclaims ~2.2× its own bytes**, because both indexes on
+`option_rows` carry every row — the audit's estimate counted table bytes only and understated the
+saving. And **keeping the summaries forever is free**: 5.3 MB is 0.26% of a 2,044 MB database, and
+it already powers most of the historical charts. The choice is not "history vs. space." It is
+"per-strike detail vs. space", with the history retained either way.
+
+**WHAT THIS POLICY DOES NOT DO, stated plainly because the number is misleading.** Collection
+began 2026-06-23. On the day this was written the oldest expiry in the database was 47 days past,
+so **a 90-day rule deletes zero rows today and reclaims nothing until roughly November 2026**.
+Growth continues at ~82 MB/trading-day until then. This is not an argument against the policy —
+the policy has to exist before the data ages into it, and building it now is what makes the
+November cutover uneventful. It *is* an argument against believing M3.2 has solved growth the day
+it merges. **It has not. It has armed a mechanism that fires later.** Near-term relief, if wanted,
+is a separate decision (downsampling old intraday snapshots to hourly — audit §5.8 option (c));
+that is deliberately not bundled in here.
+
+**EXPIRIES REFERENCED BY A TRADE ARE NEVER PRUNED, at any age.** The whole point of the record is
+the trades that were actually taken. Any `expiry_date` appearing in `trades.initial_legs` or
+`trades.ic_expiry_date` is exempt permanently. This is a rule of the policy, not an option on the
+pruner — a flag that could disable it would eventually get passed.
+
+**ENTRY CONTEXT IS SNAPSHOTTED BEFORE ANY PRUNING RUNS — this is the gate (ADR-016).**
+`get_entry_iv_context()` reconstructs a trade's entry-time IV term structure by reading historical
+`option_rows`. Prune those and the answer is gone permanently, for every trade, with no error —
+the Regime Analysis would simply report fewer matched trades each month. So the entry context is
+written onto the `trades` row at logging time, and the reconstruction becomes a fallback for rows
+that predate the columns. **Ordering is not negotiable: snapshotting ships first, pruning second.**
+
+**WHY MANUAL.** The data is irreplaceable and deletion is the one direction that cannot be undone
+by looking at the screen (the ADR-043 formulation). A scheduled pruner deletes while nobody is
+watching, and the first time its cutoff arithmetic is wrong is also the last time it matters.
+Manual invocation is revisitable once it has run correctly several times; the reverse is not.
+
+**WHY NOT ARCHIVE TO A SECOND FILE (audit §5.8 option (b)).** It preserves everything, which is
+genuinely attractive for irreplaceable data. Rejected for now on complexity: it needs a second
+schema, an attach-on-demand read path, and its own backup story, and it does not stop total disk
+growth — it relocates it. Revisit if 90 days ever proves too short in practice.
+
+---
+
 ## ADR-043 — The Scanner's KPI cards are deleted, not restored — and how to get them back
 **Date:** 2026-08-01 · **Status:** ACCEPTED · **Closes BUG-019**
 

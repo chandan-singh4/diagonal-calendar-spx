@@ -94,6 +94,18 @@ POLL_INTERVAL_EVENT = 60     # seconds (1 minute)
 DISPLAY_TIMEZONE = "America/New_York"
 
 # ---------------------------------------------------------------------------
+# Retention (ADR-044)
+# ---------------------------------------------------------------------------
+
+# Per-strike option_rows are prunable this many days after their expiry date.
+# atm_iv_by_expiry, snapshots and collection_gaps are kept forever, and any
+# expiry a trade actually used is exempt at any age.
+#
+# NOTHING READS THIS ON A SCHEDULE. Pruning happens only when scripts/prune.py
+# is run by hand, and that script defaults to reporting rather than deleting.
+RETENTION_DAYS = 90
+
+# ---------------------------------------------------------------------------
 # Market Holidays
 # ---------------------------------------------------------------------------
 # US equity market holidays for 2026. The collector uses this list to classify

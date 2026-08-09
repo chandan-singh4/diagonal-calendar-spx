@@ -47,7 +47,8 @@ import json
 import logging
 import sqlite3
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import config
 
@@ -732,6 +733,83 @@ def get_entry_iv_context(db_path: str, entry_ts_utc: str,
     }
 
 
+# Column name → SQLite type, and the get_entry_iv_context() key each one stores.
+# Declared once: init_trades_table() migrates from it, insert_trade/update_trade
+# write it, and tests assert against it, so the three cannot drift apart.
+ENTRY_IV_COLUMNS: dict[str, str] = {
+    "entry_iv_snapshot_id": "INTEGER",
+    "entry_iv_snapshot_ts": "TEXT",
+    "entry_front_iv":       "REAL",
+    "entry_back_iv":        "REAL",
+    "entry_iv_ratio":       "REAL",
+    "entry_iv_level":       "REAL",
+    "entry_atm_front_iv":   "REAL",
+    "entry_atm_back_iv":    "REAL",
+}
+
+_ENTRY_IV_SOURCE_KEY = {
+    "entry_iv_snapshot_id": "snapshot_id",
+    "entry_iv_snapshot_ts": "snapshot_timestamp",
+    "entry_front_iv":       "front_iv",
+    "entry_back_iv":        "back_iv",
+    "entry_iv_ratio":       "ratio",
+    "entry_iv_level":       "level",
+    "entry_atm_front_iv":   "atm_front_iv",
+    "entry_atm_back_iv":    "atm_back_iv",
+}
+
+
+def snapshot_entry_iv_context(db_path: str, entry_date: str, entry_time: str,
+                              initial_legs: str | list) -> dict:
+    """
+    Compute the entry-IV context for a trade and return it as trades columns.
+
+    THIS IS THE GATE ON RETENTION (ADR-044, ADR-016). get_entry_iv_context()
+    answers "what did the term structure look like when I opened this?" by
+    reading historical option_rows. Retention deletes those rows 90 days past
+    expiry, at which point the question becomes permanently unanswerable — and
+    unanswerable *silently*: Regime Analysis would just plot fewer trades each
+    month with no error anywhere. So the answer is written onto the trade while
+    the rows still exist, and reconstruction becomes the fallback for rows
+    logged before these columns existed.
+
+    Derives the four legs the way render_regime_analysis() does — earliest and
+    latest expiry, one call strike and one put strike — so the stored value
+    matches what reconstruction would have returned at the same moment.
+
+    Always returns every key in ENTRY_IV_COLUMNS. Missing inputs, an unparseable
+    entry time, or no nearby snapshot all yield all-None rather than raising:
+    a trade must always be recordable, even with the collector down. All-None is
+    also what a pre-existing row looks like, so the read path needs one case,
+    not two.
+    """
+    blank = dict.fromkeys(ENTRY_IV_COLUMNS)
+    try:
+        legs = json.loads(initial_legs) if isinstance(initial_legs, str) else initial_legs
+        expiries = sorted({leg["expiry"] for leg in legs})
+        front_expiry, back_expiry = expiries[0], expiries[-1]
+        call_strike = next(leg["strike"] for leg in legs if leg["type"] == "Call")
+        put_strike  = next(leg["strike"] for leg in legs if leg["type"] == "Put")
+
+        # entry_date/entry_time are local (ET); snapshots are UTC.
+        entered = datetime.strptime(f"{entry_date} {entry_time}", "%Y-%m-%d %H:%M")
+        ts_utc = (entered.replace(tzinfo=ZoneInfo(config.DISPLAY_TIMEZONE))
+                         .astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S"))
+
+        ctx = get_entry_iv_context(db_path, ts_utc, front_expiry, back_expiry,
+                                   call_strike, put_strike)
+    except Exception:
+        logger.warning("snapshot_entry_iv_context: could not derive context for "
+                       "%s %s — storing NULLs", entry_date, entry_time, exc_info=True)
+        return blank
+
+    if ctx is None:
+        logger.info("snapshot_entry_iv_context: no snapshot near %s %s",
+                    entry_date, entry_time)
+        return blank
+    return {col: ctx.get(key) for col, key in _ENTRY_IV_SOURCE_KEY.items()}
+
+
 def get_diagonal_history(
     db_path:      str,
     front_expiry: str,
@@ -1044,6 +1122,18 @@ CREATE TABLE IF NOT EXISTS trades (
     expired_inside_wings   INTEGER,               -- 1 if ic_long_put < SPX < ic_long_call
     expired_between_shorts INTEGER,               -- 1 if ic_short_put <= SPX <= ic_short_call
     outcome                TEXT,
+    -- Entry IV context, snapshotted at logging time (ADR-044 / ADR-016).
+    -- These duplicate what get_entry_iv_context() can reconstruct from
+    -- option_rows TODAY, and are the only copy once retention prunes those
+    -- rows. IVs in DECIMAL form, matching the rest of the schema.
+    entry_iv_snapshot_id   INTEGER,               -- snapshot the context came from
+    entry_iv_snapshot_ts   TEXT,                  -- its timestamp, UTC
+    entry_front_iv         REAL,                  -- at-strike, front expiry
+    entry_back_iv          REAL,                  -- at-strike, back expiry
+    entry_iv_ratio         REAL,                  -- front / back
+    entry_iv_level         REAL,                  -- sqrt(front * back)
+    entry_atm_front_iv     REAL,                  -- ATM macro context
+    entry_atm_back_iv      REAL,
     -- Metadata
     notes                  TEXT,
     created_at             TEXT    NOT NULL,
@@ -1079,6 +1169,14 @@ def init_trades_table(db_path: str) -> None:
             conn.execute("ALTER TABLE trades ADD COLUMN close_type TEXT")
         except Exception:
             pass  # column already exists
+
+        # M3 entry-IV snapshot columns (ADR-044). Same add-if-missing pattern as
+        # above; existing rows keep NULL and fall back to reconstruction.
+        for _col, _type in ENTRY_IV_COLUMNS.items():
+            try:
+                conn.execute(f"ALTER TABLE trades ADD COLUMN {_col} {_type}")
+            except Exception:
+                pass  # column already exists
 
     logger.info("Trades table verified at %s", db_path)
 
@@ -1131,23 +1229,69 @@ def insert_trade(db_path: str, trade: dict) -> None:
         'ic_call_wing','ic_put_wing','ic_max_profit','ic_worst_case','ic_risk_free',
         'result_date','spx_at_expiry','final_pl',
         'expired_inside_wings','expired_between_shorts','outcome','notes',
+        *ENTRY_IV_COLUMNS,
     ]
+    # Snapshotted here, not by the caller, so it cannot be forgotten at a call
+    # site (ADR-044). An explicit value in `trade` still wins — that is how a
+    # backfill or a test supplies its own.
+    entry_iv = _entry_iv_for(db_path, trade)
+
     col_str = ", ".join(columns + ['created_at', 'updated_at'])
     val_str = ", ".join(f":{c}" for c in columns) + ", :created_at, :updated_at"
     with managed_conn(db_path) as conn:
         conn.execute(
             f"INSERT INTO trades ({col_str}) VALUES ({val_str})",
-            {**{c: trade.get(c) for c in columns}, 'created_at': now, 'updated_at': now}
+            {**{c: trade.get(c) for c in columns}, **entry_iv,
+             'created_at': now, 'updated_at': now}
         )
+
+
+def _entry_iv_for(db_path: str, fields: dict) -> dict:
+    """Entry-IV columns for a trade, honouring any the caller supplied itself.
+
+    Shared by insert_trade and update_trade so an edit cannot leave a stored
+    context describing the trade as it used to be — moving the entry time or a
+    strike changes which snapshot and which legs the context should come from.
+    """
+    supplied = {c: fields[c] for c in ENTRY_IV_COLUMNS if c in fields}
+    if len(supplied) == len(ENTRY_IV_COLUMNS):
+        return supplied
+    computed = snapshot_entry_iv_context(
+        db_path, fields.get('entry_date'), fields.get('entry_time'),
+        fields.get('initial_legs'),
+    )
+    return {**computed, **supplied}
+
+
+# An edit that touches any of these invalidates the stored entry context.
+_ENTRY_IV_INPUTS = ('entry_date', 'entry_time', 'initial_legs')
 
 
 def update_trade(db_path: str, trade_id: str, **fields) -> None:
     """
     Update specific columns on a trade. Pass column=value keyword args.
     'updated_at' is always set to UTC now automatically.
+
+    If the edit changes an input to the entry-IV context, the context is
+    recomputed from the trade's *post-edit* values (ADR-044) — the row after an
+    edit must describe the trade it now is. Recomputation reads the same
+    historical option_rows, so it is only as available as retention has left it;
+    once those rows are pruned an edit will store NULLs rather than a wrong
+    answer, and the row falls back to reconstruction like any pre-M3 trade.
     """
     if not fields:
         return
+    if any(k in fields for k in _ENTRY_IV_INPUTS):
+        current = get_trade(db_path, trade_id)
+        # `k in current.keys()`, NOT `k in current`. Ruff's SIM118 wants the
+        # shorter form and it is wrong here: `in` on a sqlite3.Row tests its
+        # VALUES, not its column names, so `'entry_date' in row` is False on a
+        # row that has an entry_date. Taking the suggestion blanks the stored
+        # context on every edit, silently. Verified in a REPL, not assumed.
+        merged = {k: (current[k] if current is not None and k in current.keys() else None)  # noqa: SIM118
+                  for k in _ENTRY_IV_INPUTS}
+        merged.update(fields)  # the edit wins, including any explicit entry_* values
+        fields.update(_entry_iv_for(db_path, merged))
     fields['updated_at'] = _utcnow()
     set_clause = ", ".join(f"{k} = :{k}" for k in fields)
     with managed_conn(db_path) as conn:
@@ -1155,6 +1299,122 @@ def update_trade(db_path: str, trade_id: str, **fields) -> None:
             f"UPDATE trades SET {set_clause} WHERE trade_id = :trade_id",
             {**fields, 'trade_id': trade_id}
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Retention (M3.2 — ADR-044)
+#
+# The only code in this project that deletes irreplaceable data. It is split in
+# two on purpose: plan_prune() answers "what would go" and touches nothing,
+# execute_prune() acts on a plan it is handed. A caller cannot delete without
+# first holding the description of what it is deleting, and scripts/prune.py
+# prints that description before it will act on it.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_protected_expiries(db_path: str) -> set[str]:
+    """Every expiry_date any trade used. Never prunable, at any age (ADR-044).
+
+    Read from the trades rows themselves rather than from a list maintained by
+    hand, so logging a trade protects its data with no further action. Covers
+    both the diagonal's legs and the iron condor's expiry — a transformed trade
+    has two structures and the record of it is worth nothing without both.
+
+    Fails CLOSED. A trades table that is absent, or a legs blob that will not
+    parse, yields nothing to protect — so any exception here must never be
+    swallowed into an empty set, or the answer "protect nothing" arrives looking
+    exactly like the truth. Only genuinely-absent trades gives an empty set.
+    """
+    expiries: set[str] = set()
+    with get_conn(db_path) as conn:
+        tables = {r["name"] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        if "trades" not in tables:
+            return expiries          # journal never opened; nothing to protect
+        rows = conn.execute(
+            "SELECT initial_legs, transform_legs, ic_expiry_date FROM trades"
+        ).fetchall()
+
+    for row in rows:
+        if row["ic_expiry_date"]:
+            expiries.add(row["ic_expiry_date"])
+        for blob in (row["initial_legs"], row["transform_legs"]):
+            if not blob:
+                continue
+            # Deliberately unguarded: a leg blob that will not parse means a
+            # trade whose expiries cannot be determined, and pruning around an
+            # unknown is exactly the mistake this function exists to prevent.
+            for leg in json.loads(blob):
+                if leg.get("expiry"):
+                    expiries.add(leg["expiry"])
+    return expiries
+
+
+def plan_prune(db_path: str, retention_days: int | None = None,
+               today: str | None = None) -> dict:
+    """Describe what a prune WOULD delete. Read-only — opens query_only.
+
+    Returns the cutoff, the expiries that would go with their row counts, the
+    expiries held back and why, and the totals. `today` is injectable so the
+    boundary can be tested without waiting for the calendar.
+    """
+    days = config.RETENTION_DAYS if retention_days is None else retention_days
+    if days < 0:
+        raise ValueError(f"retention_days must not be negative, got {days}")
+    ref = date.fromisoformat(today) if today else date.today()
+    cutoff = (ref - timedelta(days=days)).isoformat()
+
+    protected = get_protected_expiries(db_path)
+    with get_conn(db_path) as conn:
+        aged = conn.execute(
+            "SELECT expiry_date, COUNT(*) AS rows FROM option_rows "
+            "WHERE expiry_date < ? GROUP BY expiry_date ORDER BY expiry_date",
+            (cutoff,),
+        ).fetchall()
+        total_rows = conn.execute(
+            "SELECT COUNT(*) AS c FROM option_rows").fetchone()["c"]
+
+    prunable = [{"expiry_date": r["expiry_date"], "rows": r["rows"]}
+                for r in aged if r["expiry_date"] not in protected]
+    held = [{"expiry_date": r["expiry_date"], "rows": r["rows"]}
+            for r in aged if r["expiry_date"] in protected]
+
+    return {
+        "cutoff": cutoff,
+        "retention_days": days,
+        "as_of": ref.isoformat(),
+        "prunable": prunable,
+        "held_for_trades": held,
+        "rows_to_delete": sum(e["rows"] for e in prunable),
+        "rows_held": sum(e["rows"] for e in held),
+        "option_rows_total": total_rows,
+    }
+
+
+def execute_prune(db_path: str, plan: dict) -> int:
+    """Delete the option_rows a plan named. Returns rows actually deleted.
+
+    Takes the plan rather than re-deriving the cutoff so that what was shown to
+    the user and what is deleted cannot be two different answers — re-running
+    the query here would silently re-widen the set if a trade were deleted, or
+    if midnight passed, between the report and the confirmation.
+
+    Deletes by the exact expiry list, one statement per expiry, inside one
+    transaction: all of it lands or none of it does. Only option_rows is
+    touched. atm_iv_by_expiry, snapshots and collection_gaps are never deleted.
+    """
+    expiries = [e["expiry_date"] for e in plan["prunable"]]
+    if not expiries:
+        return 0
+
+    deleted = 0
+    with managed_conn(db_path) as conn:
+        for expiry in expiries:
+            deleted += conn.execute(
+                "DELETE FROM option_rows WHERE expiry_date = ?", (expiry,)
+            ).rowcount
+    logger.warning("retention: deleted %d option_rows across %d expiries "
+                   "older than %s", deleted, len(expiries), plan["cutoff"])
+    return deleted
 
 
 def delete_trade(db_path: str, trade_id: str) -> None:  # write path
