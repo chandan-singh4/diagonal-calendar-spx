@@ -96,7 +96,8 @@ def check(now_utc: datetime | None = None) -> dict:  # noqa: PLR0911
     # ── The market is shut ───────────────────────────────────────────────────
     if interval is None:
         return _result("ok", "Market closed — collector idle by design",
-                       f"{now_et:%Y-%m-%d %H:%M} ET. Nothing is expected right now.")
+                       f"{now_et:%Y-%m-%d %H:%M} ET. Nothing is expected right now.",
+                       informative=False)
 
     # ── Inside the opening grace period ──────────────────────────────────────
     open_today = now_et.replace(hour=core_session.OPEN_START.hour,
@@ -106,7 +107,8 @@ def check(now_utc: datetime | None = None) -> dict:  # noqa: PLR0911
     if minutes_since_open < config.WATCHDOG_OPEN_GRACE_MINUTES:
         return _result("ok", "Just opened — waiting for the first cycle",
                        f"{minutes_since_open:.1f} min since the bell; grace is "
-                       f"{config.WATCHDOG_OPEN_GRACE_MINUTES} min.")
+                       f"{config.WATCHDOG_OPEN_GRACE_MINUTES} min.",
+                       informative=False)
 
     # ── How old is the newest price? ─────────────────────────────────────────
     try:
@@ -190,9 +192,26 @@ def _token_note() -> str:
     return f"Token has {remaining:.1f} days left."
 
 
-def _result(severity: str, headline: str, detail: str) -> dict:
+def _result(severity: str, headline: str, detail: str,
+            informative: bool = True) -> dict:
+    """`informative=False` means "I have no news", NOT "all is well".
+
+    THE FALSE ALL-CLEAR. Chandan asked whether a ten-minute schedule meant an
+    email every ten minutes; explaining why it does not exposed this. At 16:00
+    the market shuts and the check starts answering "ok — market closed". If
+    the collector had been dead all afternoon, that flip from alarming to ok
+    fired a RECOVERED email: *prices are arriving again*. They were not. The
+    market had simply closed, and the watchdog had stopped being able to tell.
+
+    A false all-clear is the worst thing an alarm can say, because it is
+    specifically the message that stops you looking. So the two states where
+    the watchdog genuinely cannot see — market shut, and the grace period
+    after the bell — say so, and the caller leaves the alarm exactly as it
+    found it. The all-clear now requires positively observing fresh data.
+    """
     return {"ok": severity == "ok", "severity": severity,
-            "headline": headline, "detail": detail}
+            "headline": headline, "detail": detail,
+            "informative": informative}
 
 
 def _fmt(secs: float) -> str:
@@ -218,6 +237,11 @@ def should_alert(result: dict, now_utc: datetime, state: dict) -> tuple[bool, st
     good news. Saying so explicitly removes the ambiguity.
     """
     was_alarming = state.get("alarming", False)
+
+    # No news. Not good news. See _result's docstring for the false all-clear
+    # this prevents at 16:00 every day.
+    if not result.get("informative", True):
+        return (False, "no news")
 
     if result["severity"] == "ok":
         return (was_alarming, "recovered")
@@ -388,8 +412,16 @@ def main(argv: list[str] | None = None) -> int:
         notify_desktop(title, body)
         notify_email(title, body)
 
+    # An uninformative check must not overwrite what we last actually KNEW.
+    # Clearing the flag overnight would lose the fact that collection was
+    # broken when the bell rang, and the morning's first real check would
+    # report it as brand new — which is survivable, but the note is supposed
+    # to be a record of the last thing observed, not of the last thing asked.
+    alarming = state.get("alarming", False) if not result.get("informative", True) \
+        else not result["ok"]
+
     save_state({
-        "alarming": not result["ok"],
+        "alarming": alarming,
         "last_alert_utc": now.isoformat() if send else state.get("last_alert_utc"),
         "last_check_utc": now.isoformat(),
         "last_headline": result["headline"],

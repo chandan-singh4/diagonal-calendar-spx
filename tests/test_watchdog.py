@@ -220,6 +220,57 @@ def test_a_quiet_day_stays_quiet():
     assert not send
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# The false all-clear
+# ─────────────────────────────────────────────────────────────────────────────
+
+NO_NEWS = {"ok": True, "severity": "ok", "headline": "Market closed",
+           "detail": "", "informative": False}
+
+
+def test_the_market_closing_does_not_announce_a_recovery():
+    """THE BUG THIS FILE EXISTS TO PREVENT COMING BACK.
+
+    Collector dead all afternoon, 16:00 arrives, the check flips to 'ok —
+    market closed', and the watchdog emails 'prices are arriving again'. They
+    are not. The market shut and the watchdog stopped being able to see.
+
+    A false all-clear is the worst thing an alarm can say, because it is
+    precisely the message that stops you looking. Recovery must require
+    positively observing fresh data, not merely the absence of a complaint.
+    """
+    send, kind = watchdog.should_alert(NO_NEWS, NOW, {"alarming": True})
+    assert not send, f"would have sent a {kind} alert on a market close"
+
+
+def test_the_opening_grace_period_does_not_announce_a_recovery_either():
+    """Same shape, different hour: broken overnight, 09:31 arrives, and the
+    grace period answers 'ok' before any new price has actually landed."""
+    send, _ = watchdog.should_alert(NO_NEWS, NOW, {"alarming": True})
+    assert not send
+
+
+def test_seeing_real_data_does_still_announce_a_recovery():
+    """The other side of it. Without this, the two tests above are satisfied
+    by a watchdog that never sends an all-clear at all — and then silence
+    means both 'fixed' and 'dead', which is where we started."""
+    send, kind = watchdog.should_alert(FINE, NOW, {"alarming": True})
+    assert send and kind == "recovered"
+
+
+@pytest.mark.parametrize("when", [SATURDAY, OVERNIGHT])
+def test_a_shut_market_reports_itself_as_uninformative(wd_db, when):
+    """Ties the flag to the real code path rather than to a hand-built dict —
+    otherwise the tests above pass while check() never sets the flag."""
+    _snapshot_at(wd_db, when - timedelta(days=3))
+    assert watchdog.check(when)["informative"] is False
+
+
+def test_a_normal_healthy_check_is_informative(wd_db):
+    _snapshot_at(wd_db, MIDDAY - timedelta(seconds=60))
+    assert watchdog.check(MIDDAY)["informative"] is True
+
+
 def test_a_corrupt_state_file_does_not_stop_the_check(tmp_path, monkeypatch):
     """The note about what was already reported is a convenience. Losing it
     costs one duplicate alert; letting it raise costs the alarm entirely."""
