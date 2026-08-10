@@ -53,7 +53,7 @@ weeks of work, not days.
 | **M0** | Stabilize & Clean | Make the repo safe to work in. No behaviour change. **Blocks everything.** | Clean `git status`, reproducible env, linted, backed up, ~318 MB reclaimed, context files live | 14 tasks — 10 S, 4 M | — | **everything** | ✅ Done, merged |
 | **M1** | Test Foundation | Make change safe. **Keystone — everything after depends on it.** | ≥70% coverage of non-UI code, checks that run unprompted, regressions in M2 detectable | 9 tasks — 3 S, 4 M, 2 L | M0 | M2 → all | ✅ Done (80%, 462 tests) |
 | **M2** | Architecture Refactor | Decompose the monolith. Behaviour-preserving, verified by M1. | `app.py` < 400 lines (composition only); `core/` framework-agnostic and fully tested | 14 tasks — 10 M, 4 L | M1 | M3, M4, M6 (so M5, M7, M8 too) | ✅ Done 2026-07-31, merged to main 2026-08-01 |
-| **M3** | Data Layer Hardening | Put the data pipeline on a sustainable footing | Bounded DB growth, monitored collection, documented operations | 9 tasks — 3 S, 4 M, 2 L | M2 | M8; 3.2 also gates M6.3 | 🔄 **In progress** — 3.1, 3.2 done 2026-08-09 |
+| **M3** | Data Layer Hardening | Put the data pipeline on a sustainable footing | Bounded DB growth, monitored collection, documented operations | 9 tasks — 3 S, 4 M, 2 L | M2 | M8; 3.2 also gates M6.3 | 🔄 **In progress** — 3.1, 3.2, 3.4 done 2026-08-09 |
 | **M4** | Backend API *(gated)* | Stable contract over `core/`; prerequisite for any UI migration | Documented API; Streamlit still running unchanged | 5 tasks — 1 S, 3 M, 1 L | M2 | M5 | Not started |
 | **M5** | Dashboard Modernization *(decision point)* | Resolve the Streamlit ceiling — **only if it still hurts after M2** | Live-updating UI without full-page reruns; charts hold zoom across updates | 7 tasks — 1 S, 1 M, 3 L, 2 XL | M2 + M4 (5.0 gate) | — *(leaf)* | Gated at 5.0 |
 | **M6** | Analytics Engine | Answer the questions the project set out to answer | Core unvalidated questions answered from data, or explicitly retired | 6 tasks — 2 M, 3 L, 1 XL | M2 (6.3 also needs 3.2) + ~20 trades | M7 | Blocked: needs ~20 trades, have 6 |
@@ -203,7 +203,7 @@ concluding the storage problem is behind them will be surprised in October.
 | 3.1a | **Entry-IV snapshotting — the gate on all pruning** | ✅ **Done 2026-08-09** | Not in the original task list; it is ADR-016's blocker, and 3.2 could not ship without it. `get_entry_iv_context()` reconstructed a trade's entry-time term structure by reading historical `option_rows`; pruning those made the question permanently unanswerable **and silently so** — Regime Analysis would plot fewer trades each month with nothing on screen saying why. Eight `entry_*` columns now carry the answer on the trade row. Written by `insert_trade`/`update_trade`, **not by the call site**, so it cannot be forgotten; an edit to entry date/time/legs recomputes it, because a stored context describing the trade as it *used to be* is worse than none. Reconstruction survives as the fallback for pre-M3 rows. |
 | 3.2 | Implement retention/archival + a dry-run mode | ✅ **Done 2026-08-09** | `db.plan_prune` / `db.execute_prune` + `scripts/prune.py`. **Split in two on purpose:** planning is read-only and acting takes a plan it is handed, so a caller cannot delete without holding the description of what it deletes, and the report shown and the rows deleted cannot be two different answers. Three gates: reporting is the default and `--execute` is a flag; `--execute` refuses without a backup newer than the database; past that it asks for the **row count in figures** — a y/n prompt is answered by reflex, a number has to be read off the report. Closed stdin cancels, which is exactly the unattended case. **Rehearsed on the real database** with `--today 2026-12-01`: 42 expiries / 9,901,390 rows (85.8%) would go, **8 expiries / 1,589,912 rows held back for the 6 practice trades**. 31 tests across `test_retention.py` and `test_prune_script.py`. **VACUUM is deliberately not automatic** — it needs exclusive access and free disk equal to the database; the script prints the command instead. |
 | 3.3 | Proper migration framework (versioned, forward-only, tested) | Not started | The `entry_*` columns went in via the existing add-if-missing `ALTER TABLE` pattern, which now runs **ten** times in `init_trades_table`. That is the argument for this task, not a reason to defer it. |
-| 3.4 | Collector liveness monitoring + alerting on missed cycles | Not started | **Highest operational value of what remains.** Two of the three real collector weaknesses the audit found are "depends on Chandan remembering" — and this session opened with the token expired and nothing but a render check to say so. |
+| 3.4 | Collector liveness monitoring + alerting on missed cycles | ✅ **Done 2026-08-09** | **ADR-045.** `scripts/watchdog.py`, every 10 minutes all day via Task Scheduler, alerting by desktop toast **and** email. The dashboard's TOKEN EXPIRED banner already worked this morning; nobody was looking at it — **an alarm reachable only through a page you open is not an alarm**, so this had to live outside Streamlit. Observes only: no restart, no re-auth, no DB write. Most of the work was **not crying wolf** — silent overnight/weekend/holiday, an opening grace period, 2.5× the interval rather than 1×, and one alert per hour per outage. **Two bugs found and pinned**: a future-dated price was reported as "collecting normally" (a lying clock poisons the reassuring answers too), and at 16:00 a dead-all-afternoon collector would have emailed **"RECOVERED"** — the blind states now return `informative=False`, so an all-clear requires positively seeing fresh data. Session logic extracted to **`core/session.py`** because the header's threshold *is* the collector's poll interval, not a second policy; delegation proved by sabotage failing both new and pre-existing tests. Header countdown replaced by a ticking clock + **Time since last data** (the countdown's worst case displayed `0s` and sat there). 48 new tests. |
 | 3.5 | Surface `collection_gaps` in the dashboard | Not started | Data collected since day one and never once shown. `db.get_gaps()` already exists and is uncalled. |
 | 3.6 | Log `INSERT OR IGNORE` rowcount mismatches | Not started | **There is a standing symptom to explain here**: the collector logs *"160 of 3,156 rows were DISCARDED"* on nearly every cycle. A figure that constant is a pattern, not random duplicates. See DEBT-008 / ADR-022. |
 | 3.7 | Data-quality checks: IV outliers, stale quotes, missing legs | Not started | — |
@@ -216,13 +216,18 @@ concluding the storage problem is behind them will be surprised in October.
 
 ## Immediate next actions
 
-1. **M3 is under way — 3.3 through 3.9 remain; take 3.4 next.** 3.1, 3.2 and the
-   entry-IV gate landed 2026-08-09 (ADR-044). **3.4, collector liveness monitoring, is
-   the highest-value item left**: this session opened with the Schwab token silently
-   expired, and only a render check revealed it. Markets were shut, so nothing was lost —
-   Monday's open would not have been so forgiving. 3.8 (re-auth runbook) is its natural
-   companion. 3.9 is last because `OPERATIONS.md` has to describe `prune.py`, and
-   documenting a procedure before it has been run in anger writes fiction.
+1. **M3 is under way — 3.3, 3.5–3.9 remain; take 3.8 next.** 3.1, 3.2, the entry-IV gate
+   and 3.4 all landed 2026-08-09 (ADR-044, ADR-045). **3.8, the re-auth runbook, is now the
+   highest-value item left** precisely *because* 3.4 shipped: the watchdog tells Chandan the
+   moment collection stops and says nothing about what to do next, and re-auth is a weekly
+   chore performed under time pressure on a market morning. 3.9 is last because
+   `OPERATIONS.md` has to describe `prune.py`, and documenting a procedure before it has
+   been run in anger writes fiction.
+   **One caveat on 3.4's ✅:** pop-up, email and schedule are each verified live, but no
+   *real* outage has travelled the whole path end to end. Staging one needs the collector
+   stopped or the database altered, both of which require Chandan's word. The first genuine
+   outage is the test, and until it happens the ✅ means "built and individually proven",
+   not "proven in anger".
 2. **Do not read 3.2's ✅ as "database growth is handled."** It is handled *eventually*.
    Collection began 2026-06-23; a 90-day rule reaches nothing until about November, and
    the database grows ~82 MB per trading day until then. If disk becomes a real problem

@@ -639,6 +639,53 @@ Unreliable when a 0DTE expiry nears expiration; prefer per-strike IV in the fina
 ### 9.7 Collector Independence & Token Expiry
 Dashboard shows last-collected data if the collector stops (staleness turns yellow/red). Schwab refresh tokens expire ~weekly; the first login uses the manual OAuth flow, then auto-refresh until expiry.
 
+### 9.8 Collector Liveness Monitoring — `scripts/watchdog.py` (M3.4, ADR-045)
+
+**Why it is not part of the dashboard.** The red `TOKEN EXPIRED` banner (`ui/header.py::render_token_banner`) was working correctly on 2026-08-09 while the collector recorded nothing all weekend. Nobody had the page open. **An alarm reachable only through a page you have to open is not an alarm** — hence a separate process on a separate schedule.
+
+**What it does and, as importantly, does not.** Every 10 minutes, all day, every day, Windows Task Scheduler runs `watchdog.py`. It reads the newest `snapshots` timestamp, compares it against what `core.session` says should be arriving, and on a problem raises a desktop notification (PowerShell toast, `ctypes` `MessageBox` fallback) and an email. It **never** writes to the database, restarts the collector, or re-authenticates. Recovery belongs to M8; this component's only job is to be believable when everything else is suspect.
+
+**Anti-cry-wolf controls** (`config.py`), all four of which correspond to a way a naive version fires when nothing is wrong:
+
+| Setting | Default | Prevents |
+|---|---|---|
+| `core.session.session_of` → `None` | — | Alarms overnight, at weekends, on holidays |
+| `WATCHDOG_OPEN_GRACE_MINUTES` | 5 | Alarms at 09:31, when the newest price is legitimately yesterday's close |
+| `WATCHDOG_LATE_MULTIPLE` | 2.5 | Alarms in the moment before every scheduled poll, when the age legitimately *reaches* the interval |
+| `WATCHDOG_REALERT_MINUTES` | 60 | Six emails an hour for one outage |
+
+**`informative` — the false-all-clear guard.** `_result(..., informative=False)` marks the two states in which the watchdog **cannot see**: market shut, and inside the opening grace period. Without it, 16:00 turns a collector that has been dead all afternoon into `ok`, and the state transition fires **"RECOVERED: prices are arriving again."** A false all-clear is the one message that stops you checking. `should_alert` returns `"no news"` for uninformative results, and `main` carries the previous `alarming` flag forward unchanged, so **an all-clear requires positively observing fresh data**. Covered by five tests in `tests/test_watchdog.py`, two of which tie `informative` to the real `check()` path so the rest cannot pass vacuously.
+
+**A negative age is an alarm, not a reassurance.** A snapshot timestamped in the future means the clock is wrong, and every verdict here is a comparison against a clock — so a wrong clock invalidates "collecting normally" just as much as it invalidates the alarms. `age < -60` is its own alarm branch.
+
+**Exit codes** (visible as `LastTaskResult`): `0` all well *or* market shut · `1` a problem was found **and reported** — the watchdog working, not failing · `2` the check itself could not run.
+
+**Configuration.** `ALERT_EMAIL_TO / ALERT_EMAIL_FROM / ALERT_SMTP_HOST / ALERT_SMTP_PORT / ALERT_SMTP_PASSWORD` are read from the environment via `.env` (gitignored); nothing is stored in the repository. Leaving them all blank skips email silently — a legitimate choice. Setting *some* of them is refused loudly, because believing you are covered when you are not is the exact failure this component exists to prevent. Gmail requires an App Password.
+
+**State.** `data/watchdog_state.json` (gitignored) holds "have I already complained about this?" — the alarm flag and the last-alert time.
+
+**Manual use.** `python scripts/watchdog.py --dry-run` prints the verdict and sends nothing; `--test-alert` forces both channels so the delivery path can be proven without an outage. Registration: `powershell -ExecutionPolicy Bypass -File .\scripts\register_watchdog_task.ps1` (no elevation needed — a repeating **time** trigger, unlike `ONLOGON`, does not require it).
+
+### 9.9 `core/session.py` — the single answer about market sessions (M3.4)
+
+`is_trading_day(d, holidays)`, `session_of(now_et, holidays)`, `expected_interval(session, event_secs, normal_secs)`. Pure — it takes the holiday set as an argument because `core/` may not import `config` (enforced by `tests/test_layering.py`).
+
+Extracted from `collector.py` when a third caller appeared. The dashboard header's freshness thresholds are **not** a second policy that happens to agree with the collector's polling cadence — they *are* that cadence, so two copies of the number would eventually disagree, and the disagreement would surface as a dashboard that either cries wolf or stays quiet through a real outage. `collector.get_session` / `_poll_interval` / `_is_trading_day` are now thin wrappers; `tests/test_session.py::test_the_collector_and_the_header_cannot_disagree` compares the two directly.
+
+**`expected_interval` returns `None`, never `0`, for a shut market.** `None` means "no expectation"; a caller reading it as zero concludes a price is due every zero seconds and reports the data as permanently late from 16:00 until 09:30 — a dashboard glowing red all evening and a watchdog emailing at midnight.
+
+Boundaries: `OPEN` 09:30–10:00 (60s) · `MIDDAY` 10:00–15:30 (300s) · `CLOSE` 15:30–16:00 (60s) · otherwise `None`. Collection stops at 16:00 because SPX freezes at the equity close.
+
+### 9.10 Header liveness strip (M3.4)
+
+`ui/header.py::_render_liveness_strip(snap_age_secs, expected_interval)` replaced the `⏱ Next update in: Ns` countdown. It renders `🕐 HH:MM:SS ET · Time since last data: Xm Ys`, ticking client-side via `setInterval` (guarded by `window.__spxLive` so repeated Streamlit reruns cannot stack timers) rather than by per-second reruns, which would collide with BUG-020.
+
+**Why the countdown had to go rather than be improved:** counting *toward* an event has a resting state that reads as healthy. Collector dead, no price for an hour, and it displayed `0s` and sat there. Counting *upward* has no resting state — the longer it is broken, the louder the number.
+
+**What each half proves.** The wall clock proves the browser tab is alive; it would keep ticking if the Streamlit process behind it died, so it proves nothing about freshness. The age proves freshness. Neither replaces the watchdog, because both require somebody looking.
+
+**Colour.** Green → **amber** at `expected_interval` → **red** at `_RED_MULTIPLE` (1.5×). Deliberately not red exactly at the threshold: at the 300-second midday cadence the age reaches 300s immediately before every poll, so a threshold-exact red would flash once per cycle all day and train the reader to ignore it. With `expected_interval is None` the strip reads "— market closed, collector idle".
+
 ---
 
 ## 10. Future Roadmap

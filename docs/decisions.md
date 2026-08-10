@@ -7,6 +7,109 @@ it was recorded here.
 
 ---
 
+## ADR-045 — The watchdog runs outside the dashboard, and "no news" is not "all clear"
+**Date:** 2026-08-09 · **Status:** ACCEPTED · **Closes M3.4** · **Supersedes nothing**
+
+**THE DECISION.** Collector liveness is monitored by `scripts/watchdog.py`, run every 10 minutes
+by Windows Task Scheduler, alerting via a desktop notification and email. It **observes only** —
+it never writes to the database, never restarts the collector, and never re-authenticates.
+
+**WHY, IN ONE FACT.** This session opened with the Schwab token expired and the collector
+recording nothing. The dashboard has had a full-width red `TOKEN EXPIRED` banner since M1
+(`ui/header.py::render_token_banner`) and **it was working perfectly**. Nobody was looking at it.
+The markets were shut, so nothing was lost; Monday would have cost a session, and the broker will
+not sell you last Tuesday's prices.
+
+So the rule this is built around: **an alarm that can only reach you through a page you have to
+open is not an alarm.** The banner is not removed — it is right, and it is free — but it is not
+the monitoring, and M3.4 could not be closed by improving it.
+
+**WHY IT ONLY WATCHES.** A watchdog that restarts things is a second unattended process that can
+go wrong, and this one is meant to be the thing trusted when everything else is suspect. Deciding
+what to do about a dead collector stays with Chandan. The cost is real — a 3 a.m. crash is not
+self-healing — and that is accepted deliberately; it belongs to M8, with a supervisor, not to the
+thing whose job is to tell the truth.
+
+**MOST OF THE WORK WAS IN NOT CRYING WOLF.** A muted alarm is worse than no alarm, because you
+believe you are covered. Four ways a naive version fires when nothing is wrong, all handled:
+
+| Case | Naive behaviour | Handled by |
+|---|---|---|
+| Overnight, weekends, holidays | Alarms every night | `core.session.session_of` returns None = market shut |
+| 09:32, before the first cycle | Alarms every morning — the newest price is legitimately yesterday's close | `WATCHDOG_OPEN_GRACE_MINUTES` |
+| The moment before each poll lands | Age *reaches* the interval every cycle; that is the cadence working | `WATCHDOG_LATE_MULTIPLE` = 2.5, so two missed cycles, not one slow one |
+| One outage, a 10-minute schedule | 6 emails an hour | `WATCHDOG_REALERT_MINUTES` = 60, plus one explicit all-clear |
+
+**THE FALSE ALL-CLEAR — the one that would have mattered most.** Found because Chandan asked
+whether a 10-minute schedule meant an email every 10 minutes; explaining why it did not exposed
+it. At 16:00 the market shuts and the check starts answering *"ok — market closed"*. A collector
+dead all afternoon would therefore flip from alarming to ok, and the watchdog would send
+**RECOVERED: prices are arriving again**. They were not. The market had closed and the watchdog
+had stopped being able to see.
+
+A false all-clear is the worst thing an alarm can say, because it is precisely the message that
+stops you looking. The two blind states — market shut, and the opening grace period — now return
+`informative=False`, meaning *"I have no news"*, not *"all is well"*; the alert decision and the
+saved state both leave the alarm exactly as they found it. **An all-clear now requires positively
+observing fresh data.** Pinned by four tests, and the fix was reverted on a copy to confirm two of
+them fail without it rather than passing by construction.
+
+**A SECOND BUG, FOUND BY PROBING BEFORE ANY TEST EXISTED.** Called with a past timestamp, `check()`
+reported *"collecting normally — newest price -2001584s old"*. A price newer than now means the
+clock is lying, and **every judgement this script makes is a comparison against a clock** — so a
+wrong clock makes the reassuring answers meaningless too, not just the alarming ones. Now an alarm
+in its own right.
+
+**core/session.py — WHY THE SESSION LOGIC MOVED.** Chandan's threshold for the dashboard ("over 5
+minutes midday, over a minute in the first and last half hour") is not a second policy that
+happens to agree with the collector's polling interval. **It IS the collector's polling interval.**
+Two copies of a number that must agree is a number that will eventually disagree, and the
+disagreement shows up as a dashboard that either cries wolf or stays quiet through a real outage.
+So the boundaries and intervals left `collector.py` for a pure `core/` module, handed their
+holiday set because `core/` may not import `config`. Verified by sabotage: changing a boundary on
+a copy failed **both** the new test and the pre-existing collector test, which is the evidence
+that the collector genuinely delegates rather than keeping a copy.
+
+**THE HEADER COUNTDOWN WAS REPLACED, NOT DECORATED (Chandan's call).** `⏱ Next update in: 42s`
+became a ticking wall clock plus **Time since last data**, counting upward. The countdown ran
+*toward* a moment rather than away from one, so its worst case — collector dead, no price for an
+hour — displayed `0s` and sat there, which reads like everything is fine. Counting upward has no
+such resting state: the longer it is broken, the louder the number gets.
+
+One deliberate departure from what was asked, and it was reported rather than done quietly: the
+number turns **amber** at Chandan's threshold and **red** at 1.5× it. At a 300-second cadence the
+age reaches 300 seconds immediately before every new price lands, so turning red exactly on the
+threshold would flash red once per cycle, all day — the muted-alarm failure again, in miniature.
+
+**AND WHAT THE WALL CLOCK DOES NOT PROVE, documented where it lives.** It ticks in the browser, so
+it would keep ticking if the dashboard's Python engine died behind it. It proves the tab is not
+frozen. It does not prove the data is fresh — which is why the age sits beside it, and why neither
+replaces the watchdog.
+
+**ALTERNATIVES REJECTED.**
+- *A louder dashboard banner* — repeats the exact failure of 2026-08-09.
+- *A market-aware schedule* (only run 09:25–16:05 on weekdays) — puts a second copy of the market
+  calendar somewhere nobody updates each January. A dumb schedule and a smart script instead; the
+  script already knows and stays silent. It also means a collector that died at 02:00 is reported
+  at 09:35 rather than found at lunchtime.
+- *A notification library* — an alerting path with a dependency breaks on the day the environment
+  is rebuilt, which is a plausible day for the collector to be down too. Uses only what ships with
+  Windows, with a message box as the fallback.
+- *Restart-on-failure* — see above; belongs to M8.
+
+**CREDENTIALS.** Email settings read from `.env` (gitignored); no password is stored in the
+repository or printed anywhere. An empty mailbox is a valid choice and skips email quietly, but a
+**half-configured** one refuses to send and says so loudly — believing you are covered when you
+are not is the failure this whole ADR is about. Gmail requires an App Password; ordinary Google
+passwords are rejected from scripts.
+
+**STATUS AS SHIPPED.** Desktop and email paths both verified live with `--test-alert`; the
+schedule verified firing (`LastTaskResult 0`). **Not yet proven end to end:** a real outage
+travelling all the way to the phone. That cannot be manufactured without stopping the collector or
+tampering with the database, and both need Chandan's word. The first genuine outage is the test.
+
+---
+
 ## ADR-044 — Retention policy: 90 days past expiry, summaries forever, deletion never automatic
 **Date:** 2026-08-09 · **Status:** ACCEPTED · **Closes M3.1** · **Unblocks M3.2**
 

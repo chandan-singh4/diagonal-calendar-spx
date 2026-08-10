@@ -1,9 +1,9 @@
 # PROJECT STATUS
 
-**Updated:** 2026-08-09 · **Branch:** `main` — **stage 3 under way.**
-**State:** The first two parts of stage 3 are built and checked. 740 checks pass. **This
-session's work is saved on this machine only and is not yet sent to GitHub** — that is the
-first thing to offer next session. Nothing in it has touched the real database.
+**Updated:** 2026-08-09 · **Branch:** `m3-data-hardening` — **stage 3 under way.**
+**State:** Three parts of stage 3 are built and checked. 788 checks pass. The work is saved on
+this machine and **sent to GitHub on a branch, not merged into `main`** — merging is Chandan's
+call. Nothing in it has touched the real database.
 > Self-contained: read this file alone to start a session. Replaced entirely by `/wrap`.
 
 ## What this project is
@@ -26,7 +26,7 @@ checking are in good shape; the screen's known faults are listed below and are n
 ## The 9-stage plan
 
 `0 clean up` **done** → `1 automatic checking` **done** → `2 break up big files` **done** →
-`3 stop database growing` **← here, 2 of 9 parts done** → `4 data service` → `5 decide on rebuilding the screen` →
+`3 stop database growing` **← here, 3 of 9 parts done** → `4 data service` → `5 decide on rebuilding the screen` →
 `6 answer trading questions with real results` → `7 machine learning` → `8 run reliably unattended`
 Order is fixed: **you can't safely rearrange code you can't check automatically.** Stages 6 and 7
 also need ~20 and ~100 real trades; there are 6 practice ones.
@@ -65,6 +65,42 @@ trades. 31 new checks cover it.
 Collection only started 23 June — 47 days ago — so nothing is yet 90 days past expiry. The tool
 had to be built before the data aged into it, but the file keeps growing until then.
 
+**Stage 3, part 4: something now shouts when collection stops — and it isn't the screen.**
+Every 10 minutes, day and night, Windows runs a small check that asks one question: *during market
+hours, is a price arriving as often as it should be?* If not, a pop-up appears on this machine
+**and an email is sent to Chandan's phone**. It only watches — it never restarts anything, never
+renews the permission slip, and never writes to the database. Tested live: pop-up seen, email
+received, and the 10-minute schedule confirmed firing.
+
+**The reason it had to live outside the dashboard.** The red TOKEN EXPIRED banner on the screen was
+working perfectly this morning. Nobody was looking at it. **An alarm you can only hear by opening a
+page is not an alarm.** The banner stays — it is right, and it costs nothing — but it is no longer
+the only thing that tells you.
+
+**Most of the effort went into it staying quiet when nothing is wrong.** An alarm that goes off
+every evening, every weekend, at 09:31 every morning, and once between every pair of price updates
+is an alarm you learn to ignore — and then miss on the day it is right. It stays silent overnight,
+at weekends and on holidays, allows a few minutes at the opening for the first prices to land,
+waits for **two** missed updates rather than one, and repeats itself at most once an hour during a
+single outage.
+
+**One found bug is worth naming, because it was the dangerous kind.** It came out of Chandan asking
+whether a check every 10 minutes meant an email every 10 minutes. At 16:00 the market shuts and the
+check goes quiet — so a collector that had been dead all afternoon would have triggered an email
+saying **"RECOVERED: prices are arriving again."** They were not. The market had simply closed and
+the watchdog had gone blind. **A false all-clear is the worst thing an alarm can say**, because it
+is the message that stops you checking. It now says "I have no news" rather than "all is well", and
+only announces a recovery after actually seeing fresh data.
+
+**The screen now has a ticking clock and counts the other way.** The old *"Next update in: 42s"* is
+gone. In its place: the live time, ticking every second so you can see the page is not frozen, and
+**"Time since last data"** counting upward. The countdown had a resting state that looked healthy —
+with the collector dead it showed `0s` and sat there. Counting upward has no such state: the longer
+it is broken, the bigger the number gets. It turns amber at Chandan's thresholds (1 minute in the
+first and last half hour, 5 minutes midday) and red at half again as long — **deliberately not red
+exactly on the threshold**, because at the 5-minute cadence the age reaches 5 minutes just before
+every single update and would flash red all day for no reason.
+
 **A mistake worth remembering: `git checkout` undid an hour of unsaved work.** It was used to undo
 a deliberate temporary break in a file — and it reverted every other unsaved change in that same
 file with it. The project rule says rehearse on a *copy*; `git checkout` is not a copy, it is the
@@ -72,18 +108,20 @@ opposite. Later checks copied the file aside first and put it back by hand.
 
 ## What to do next
 
-1. **Save this session's work and send it to GitHub** — ask Chandan first. Nothing is committed
-   yet; it is all sitting unsaved in the working folder, which is the state that lost an hour
-   earlier today.
-2. **Build the collector watchdog (part 4 of stage 3) — the most valuable thing left.** Something
-   must notice and say so when collection stops during market hours. Today's expired permission
-   slip is exactly the case it exists for. **Part 8 belongs with it**: write down the renewal
-   steps, since that chore comes round every week.
-3. **Then parts 5 and 6.** The database has recorded every gap in collection since day one and the
+1. **Decide whether `m3-data-hardening` merges into `main`.** The work is on GitHub as a branch.
+   Merging is a one-line job whenever Chandan says so.
+2. **Write down the permission-slip renewal steps (part 8).** The watchdog now tells you the
+   moment collection stops; it does not tell you what to do about it, and that chore comes round
+   about every week. This is the natural pair to what was just built.
+3. **The watchdog has one thing still unproven.** Pop-up, email and schedule are all confirmed
+   working, but a *real* outage has never travelled the whole path — that cannot be staged without
+   stopping the collector or altering the database, both of which need Chandan's word. The first
+   genuine outage is the test.
+4. **Then parts 5 and 6.** The database has recorded every gap in collection since day one and the
    screen has never once shown them. And there is a standing puzzle worth explaining: the collector
    reports **"160 of 3,156 rows discarded" on nearly every cycle**. A number that steady is a
    pattern, not chance.
-4. **After a day of collection, read `collector.log`** for lines beginning `strike window:
+5. **After a day of collection, read `collector.log`** for lines beginning `strike window:
    broker supplied` — they show how much room exists beyond what's kept. Nothing depends on it yet.
 
 ## Open problems
@@ -110,6 +148,9 @@ opposite. Later checks copied the file aside first and put it back by hand.
   cleared, and it never happens on a timer** — only when Chandan runs it and confirms (ADR-044).
   **Reclaiming the disk space needs a separate `VACUUM` step**, which locks the file and needs
   free space equal to the database; the tool prints the command rather than running it.
+- **The watchdog watches and tells you; it never acts.** No restarting, no renewing, no writing.
+  Deciding what to do about a dead collector stays with Chandan — automatic recovery is a stage 8
+  job. And **"no news" is never reported as "all is well"** (ADR-045).
 - **Keeping a saved position's prices is forward-only** — it cannot fill in history from before
   the position was saved. That is why the on-screen warning stays.
 

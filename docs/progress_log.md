@@ -5,7 +5,7 @@ what broke, and what remains.
 
 ----
 
-## 2026-08-09 (session 12) — M3 begun: retention policy decided, entry-IV gate built, pruner shipped
+## 2026-08-09 (session 12) — M3 begun: retention policy decided, entry-IV gate built, pruner shipped, watchdog live
 
 ### Completed
 
@@ -72,13 +72,96 @@ The sabotage had already done its job. Later verification used a file copy in a 
 instead, and that is the pattern to use: **the project rule says rehearse on a copy, and `git
 checkout` is not a copy — it is the opposite.**
 
+### Also completed — M3.4: the collector watchdog (ADR-045)
+
+**Why it could not be a better banner.** The dashboard's red TOKEN EXPIRED banner
+(`ui/header.py::render_token_banner`, M1) was working perfectly this morning. Nobody had the
+dashboard open. **An alarm that can only reach you through a page you have to open is not an
+alarm** — so the monitoring had to leave Streamlit entirely.
+
+`scripts/watchdog.py`, run every 10 minutes all day every day by Task Scheduler
+(`scripts/register_watchdog_task.ps1`), alerting by desktop toast **and** email. It observes only:
+no restart, no re-auth, no database write. Chandan chose the pop-up-plus-email combination
+knowing it means storing an email password locally and sending a message off the machine.
+
+**Most of the work was in not crying wolf.** Four ways a naive version fires when nothing is
+wrong: overnight/weekends/holidays; at 09:31 before the first cycle has landed; in the moment
+before every scheduled poll, when the age legitimately *reaches* the interval; and six times an
+hour during a single outage. Handled by `core.session` returning None for a shut market,
+`WATCHDOG_OPEN_GRACE_MINUTES`, `WATCHDOG_LATE_MULTIPLE = 2.5` and `WATCHDOG_REALERT_MINUTES = 60`.
+A muted alarm is worse than none, because you believe you are covered.
+
+**`core/session.py` extracted.** Chandan's stated dashboard thresholds are not a second policy
+that happens to agree with the collector's poll intervals — **they are those intervals.** Two
+copies of a number that must agree eventually disagree. `is_trading_day`, `session_of` and
+`expected_interval` now live in pure `core/`, handed a holiday set because `core/` may not import
+`config`; `collector.py` delegates. Proved by sabotaging a boundary on a copy and watching **both**
+`tests/test_session.py` and the pre-existing collector test fail — that is the evidence the
+collector really delegates rather than keeping its own copy.
+
+**Header: countdown → clock + age.** `⏱ Next update in: 42s` is gone. In its place a browser-side
+ticking wall clock (proving the tab is not frozen — and explicitly *not* proving the data is
+fresh, since it would tick on happily if the Python behind it died) plus **Time since last data**
+counting upward. The countdown had a resting state that read as healthy: collector dead, no price
+for an hour, display `0s`. Counting upward has none. One deliberate departure from what Chandan
+asked, reported rather than done quietly: amber at his threshold, red at 1.5×, because at the
+300-second cadence the age hits 300s immediately before every poll and would flash red once per
+cycle all day.
+
+### What broke — M3.4
+
+**A false all-clear, and it is the worst kind.** Found not by a test but by answering Chandan's
+question *"does every ten minutes mean an email every ten minutes?"*. At 16:00 the market shuts
+and `check()` starts returning "ok — market closed". A collector dead all afternoon would
+therefore have flipped alarming → ok and sent **"RECOVERED: prices are arriving again."** They
+were not; the market had closed and the watchdog had gone blind. A false all-clear is precisely
+the message that stops you looking. The two blind states now carry `informative=False` — *"no
+news"*, not *"all is well"* — and both the alert decision and the saved state leave the alarm
+untouched. **An all-clear now requires positively observing fresh data.** Reverting the fix on a
+copy confirmed exactly two tests fail without it, so they are not passing by construction.
+
+**A negative age reported as healthy.** Probing `check()` by hand — before any test existed for it
+— produced *"Collecting normally — newest price -2001584s old"*. A price newer than now means the
+clock is lying, and **every judgement this script makes is a comparison against a clock**, so a
+wrong clock invalidates the reassuring verdicts as much as the alarming ones. Now an alarm in its
+own right.
+
+**`[TimeSpan]::MaxValue` is rejected by this Windows 11 build.** The documented idiom for a
+"forever" repetition serialises to `P99999999DT23H59M59S` and the task XML validator calls it out
+of range. Replaced with 3,650 days, with the resulting August-2036 horizon written into the script
+so it is known rather than a surprise.
+
+**A sloppy assertion of my own, caught and fixed:** `assert session_of(...) is expected or
+session_of(...) == expected` — the `or` gave it two ways to pass. Reduced to one `==`.
+
+**Latent bug noted, deliberately not fixed:** `scripts/register_collector_task.ps1` sets
+`$ProjectDir = $PSScriptRoot` and then looks for `start_collector.bat` beside itself, but it lives
+in `scripts/` and the batch file is at the project root. Harmless — that script is documented as
+not the active mechanism — and fixing it inside an unrelated commit is how unrelated things break.
+Recorded in a comment in the new script instead.
+
+**Two untracked files were one careless `git add .` from being published:**
+`data/token.json.bak-20260802-063131` (a live Schwab credential backup) and `collector.log.1`.
+Neither was matched by `.gitignore` — `*token*.json` misses a `.bak-…` suffix and `*.log` misses
+`.log.1`. Both patterns widened with comments naming the actual near-miss, and the backup deleted
+with Chandan's authorisation after confirming the live `data/token.json` was intact.
+
+**Verified live, and what is not.** Desktop pop-up seen twice, email delivered to Chandan's phone
+after he configured `.env`, and the schedule confirmed firing (`LastTaskResult 0`, state file
+written). **Unproven: a real outage travelling the whole path.** That cannot be manufactured
+without stopping the collector or tampering with the database, both of which need his word. The
+first genuine outage is the test.
+
+788 tests pass; `render_check.py` clean on all six tabs; ruff clean on every file authored here.
+
 ### Remaining
 
-M3.3 migrations, 3.4 collector liveness, 3.5 surface `collection_gaps`, 3.6 log the
-`INSERT OR IGNORE` mismatch, 3.7 data-quality checks, 3.8 token re-auth runbook, 3.9 the three
-operations documents. 3.6 has a standing symptom to explain: the collector logs
-**"160 of 3,156 rows DISCARDED"** on nearly every cycle, and a figure that constant is a pattern,
-not random duplicates.
+M3.3 migrations, 3.5 surface `collection_gaps`, 3.6 log the `INSERT OR IGNORE` mismatch, 3.7
+data-quality checks, 3.8 token re-auth runbook, 3.9 the three operations documents. **3.8 is next**
+— the watchdog now announces that collection has stopped and says nothing about what to do, and
+re-auth is a weekly chore performed under time pressure on a market morning. 3.6 has a standing
+symptom to explain: the collector logs **"160 of 3,156 rows DISCARDED"** on nearly every cycle, and
+a figure that constant is a pattern, not random duplicates.
 
 ----
 
