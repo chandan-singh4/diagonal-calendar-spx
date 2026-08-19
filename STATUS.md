@@ -1,9 +1,9 @@
 # PROJECT STATUS
 
 **Updated:** 2026-08-19 · **Branch:** `m3-data-hardening` — **stage 3, 4 of 9 parts done.**
-**State:** 876 checks pass. Eleven commits are saved on this machine and **not yet sent to
-GitHub** (ahead by 11). The collector is running today's earlier fix; it has NOT been restarted
-onto tonight's, which is why the afternoon volatility series is only three readings long so far.
+**State:** 876 checks pass. Everything is **saved to GitHub** — nothing waiting on this machine.
+The collector is running today's earlier fix; it has NOT been restarted onto tonight's, which is
+why the afternoon contract's volatility line is only three readings long so far.
 > Self-contained: read this file alone to start a session. Replaced entirely by `/wrap`.
 
 ## What this project is
