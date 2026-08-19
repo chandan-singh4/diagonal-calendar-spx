@@ -42,31 +42,28 @@ afternoon one has a full extra day of life. Both are now recorded.
 
 **This also solved the standing "160 of 3,156 rows discarded" puzzle** — 2,181 warnings, every one
 reading exactly 160, because 160 = 80 calls + 80 puts = one expiry date. Unexplained for eight weeks.
-
-**The real database was changed for the first time.** A new column on a 2.7 GB file of
-irreplaceable history: backed up, rehearsed on a copy, then done in 31 seconds, zero rows lost.
+**And the real database was changed for the first time:** a new column on a 2.7 GB file of
+irreplaceable history — backed up, rehearsed on a copy, then done in 31 seconds, zero rows lost.
 
 **Two mistakes of my own reached the live system; only checking afterwards caught them.** The
 first would have *deleted* already-collected prices on the next restart. The second: I assumed the
 afternoon contract was the unusual one and told the screen to hide it. It is the reverse — nearly
-every SPX expiry is afternoon-settled, and the morning one exists only on that one monthly date —
-so the instruction hid **94% of all prices**, for three cycles. **Every check passed throughout**,
-because the checks were written against what I believed rather than what the data says. What found
-it was reading the database back and counting rows. Both fixed; the new checks were proved by
-deliberately breaking a copy of the code and watching them fail.
-
-**One earlier conclusion of mine was wrong and is corrected.** I recorded that the old unlabelled
-prices could never be sorted into morning and afternoon. They can, with no guessing: matched on
-**open interest**, which does not move intraday — **170 of 170** were the morning contract.
+every SPX expiry is afternoon-settled, the morning one exists only on that one monthly date — so
+the instruction hid **94% of all prices**, for three cycles. **Every check passed throughout**,
+because they were written against what I believed rather than what the data says; what found it was
+reading the database back and counting rows. Both fixed, the new checks proved by breaking a copy.
+**A third earlier conclusion was wrong too:** I recorded that the old unlabelled prices could never
+be sorted into morning and afternoon. They can — matched on **open interest**, which does not move
+intraday, **170 of 170** were the morning contract.
 
 ## What to do next
 
 1. **Show the afternoon option on screen — the only part a user can see, and it is unfinished.**
-   Both are recorded; the screen still shows one. **Chandan has decided how:** each becomes its
-   own entry in the two expiry dropdowns, the afternoon one **unlabelled** (`21 Aug 2026`) and
-   the morning one **marked** (`21 Aug 2026 (AM)`) — that way round because afternoon is the
-   normal case, so the label marks the exception. This makes an expiry a date *plus* which
-   contract, and that pair must travel everywhere the date currently does (~20 files).
+   Both are recorded; the screen still shows one. **Chandan has decided how:** each becomes its own
+   entry in the two expiry dropdowns, the afternoon one **unlabelled** (`21 Aug 2026`) and the
+   morning one **marked** (`21 Aug 2026 (AM)`) — that way round because afternoon is the normal
+   case, so the label marks the exception. An expiry therefore becomes a date *plus* which
+   contract, a pair that must travel everywhere the date currently does (~20 files).
    **Start with the code that deletes saved positions once they expire**, which assumes the label
    is a plain date; it already refuses to delete what it cannot read, so the worst case is a stale
    entry, not a lost one. Include the old prices (attributable, above) for full history.
@@ -76,14 +73,14 @@ prices could never be sorted into morning and afternoon. They can, with no guess
 
 ## Open problems
 
-- **Blocked on Chandan (small, needs one word):** snapshots 4801–4804 hold 1 of 20 daily summary
-  rows each, from my mistake above. The underlying prices are complete, so the summaries can be
-  rebuilt from them — but that is a database write. Snapshots 4805–4808 are a real ~2-minute gap
-  from restarting the collector, correctly recorded as such; nothing to repair there.
+- **Blocked on Chandan (needs one word):** snapshots 4801–4804 hold 1 of 20 daily summary rows
+  each, from my mistake above. The underlying prices are complete so the summaries can be rebuilt —
+  but that is a database write. 4805–4808 are a real ~2-min gap from restarting the collector,
+  correctly recorded as such; nothing to repair.
 - **ENH-011 (high)** — tab clicks are slow; cause **not established**, measure first.
   **BUG-001 (high, blocked on Chandan)** — old unexplained report; needs a symptom and screenshot.
-  **BUG-018 (medium)** — on expiry day one tile says "set strikes" when they are already set.
-- **DEBT-029** — two screen-library features are past their removal dates, used in ~36 places.
+  **BUG-018 (medium)** — on expiry day one tile says "set strikes" when they already are.
+  **DEBT-029** — two screen-library features are past their removal dates, used in ~36 places.
 
 ## Settled decisions
 
