@@ -1,8 +1,8 @@
 # PROJECT STATUS
 
 **Updated:** 2026-08-19 · **Branch:** `m3-data-hardening` — **stage 3, 4 of 9 parts done.**
-**State:** 819 checks pass. Three commits are saved on this machine and **not yet sent to
-GitHub** (ahead by 3). The collector is running the fixed code and verified recording correctly.
+**State:** 857 checks pass. Eight commits are saved on this machine and **not yet sent to
+GitHub** (ahead by 8). The collector is running the fixed code and verified recording correctly.
 > Self-contained: read this file alone to start a session. Replaced entirely by `/wrap`.
 
 ## What this project is
@@ -58,15 +58,15 @@ intraday, **170 of 170** were the morning contract.
 
 ## What to do next
 
-1. **Show the afternoon option on screen — the only part a user can see, and it is unfinished.**
-   Both are recorded; the screen still shows one. **Chandan has decided how:** each becomes its own
-   entry in the two expiry dropdowns, the afternoon one **unlabelled** (`21 Aug 2026`) and the
-   morning one **marked** (`21 Aug 2026 (AM)`) — that way round because afternoon is the normal
-   case, so the label marks the exception. An expiry therefore becomes a date *plus* which
-   contract, a pair that must travel everywhere the date currently does (~20 files).
-   **Start with the code that deletes saved positions once they expire**, which assumes the label
-   is a plain date; it already refuses to delete what it cannot read, so the worst case is a stale
-   entry, not a lost one. Include the old prices (attributable, above) for full history.
+1. **The afternoon option is now on screen — finish the last two pieces.** Both contracts appear
+   in both expiry dropdowns, the afternoon one plain (`Friday, Aug 21, 2026`) and the morning one
+   marked (`· AM settled`), and every price, chart and saved position follows the one you pick.
+   Checked on the real system: 21 entries, and at the 7750 strike the afternoon contract shows
+   **9.05 against the morning 6.95**. *(a)* The daily summary table has no column saying which
+   contract, so the two share one volatility figure — prices differ, the ratio does not; fixing it
+   changes the database and needs Chandan's word (**BUG-028**). *(b)* The morning contract really
+   stops trading the evening before; both are still treated as ending together, deliberately — the
+   accurate rule **deletes** saved positions sooner (**BUG-027**). Neither blocks daily use.
 2. **Then stage 3 part 8** — write down the weekly broker-permission renewal steps.
 3. **The watchdog has one thing unproven** — no *real* outage has travelled the whole alarm path;
    it cannot be staged without Chandan's word, so the first real one is the test.
