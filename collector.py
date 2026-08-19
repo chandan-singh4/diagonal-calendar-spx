@@ -50,6 +50,7 @@ import pandas as pd
 import config
 import db
 import schwab_client
+from core import contract
 from core import pins as core_pins
 from core import session as core_session
 from state import entry_locks
@@ -426,8 +427,8 @@ def _compute_atm_iv_records(filtered_df: pd.DataFrame,
                               underlying_price: float,
                               snapshot_id: int) -> list[dict]:
     """
-    For each expiry in the filtered DataFrame, compute pre-aggregated ATM IV metrics
-    and return a list of dicts for db.insert_atm_iv_records().
+    For each CONTRACT in the filtered DataFrame, compute pre-aggregated ATM IV
+    metrics and return a list of dicts for db.insert_atm_iv_records().
 
     ATM strike = strike closest to underlying_price at collection time.
     All IVs stored as decimals (÷ 100).
@@ -442,15 +443,21 @@ def _compute_atm_iv_records(filtered_df: pd.DataFrame,
     """
     records = []
 
-    # BUG-023: on the third Friday the frame holds BOTH the a.m. and p.m.
-    # contracts. atm_iv_by_expiry stores one row per expiry per snapshot and has
-    # no uniqueness constraint, so grouping the two together would write two
-    # conflicting rows for that date and silently corrupt the term structure the
-    # whole analytics layer is built on. The a.m. contract keeps the slot on that
-    # one date; every other expiry is p.m.-settled and keeps its own (BUG-026).
-    primary = _shown_contract_only(filtered_df)
+    # BUG-028: on the third Friday the frame holds BOTH the a.m. and p.m.
+    # contracts, so the grouping is by contract and not by date. It used to drop
+    # the p.m. one here to keep atm_iv_by_expiry's one-row-per-date shape, which
+    # meant the whole analytics layer could not see the p.m. contract at all.
+    # The table now carries a settlement column and both rows are written.
+    #
+    # dropna=False because settlement is None on any chain that arrives without
+    # it; groupby would otherwise discard those rows entirely and write nothing.
+    frame = filtered_df
+    if not frame.empty and "settlement" not in frame.columns:
+        frame = frame.assign(settlement=None)
+    grouped = ([] if frame.empty
+               else frame.groupby(["expiry", "settlement"], dropna=False))
 
-    for expiry_date, group in primary.groupby("expiry"):
+    for (expiry_date, settlement), group in grouped:
         dte_val = _safe_int(group["dte"].dropna().iloc[0]) if not group["dte"].dropna().empty else None
         if dte_val is None:
             continue
@@ -481,6 +488,7 @@ def _compute_atm_iv_records(filtered_df: pd.DataFrame,
         records.append({
             "snapshot_id":        snapshot_id,
             "expiry_date":        str(expiry_date),
+            "settlement":         settlement if settlement in (contract.AM, contract.PM) else None,
             "dte":                dte_val,
             "atm_strike":         atm_strike,
             "atm_call_iv":        atm_call_iv,
@@ -490,8 +498,16 @@ def _compute_atm_iv_records(filtered_df: pd.DataFrame,
             "iv_ratio_to_front":  None,   # Computed below after sort
         })
 
-    # Sort ascending by DTE so records[0] is always the front expiry
-    records.sort(key=lambda r: r["dte"])
+    # Sort ascending by DTE so records[0] is always the front expiry. The third
+    # Friday's two contracts share a DTE, so the tie is broken the same way the
+    # dropdown breaks it — a.m. first, because it settles at the open and really
+    # does end first.
+    #
+    # Honest note: groupby already emits "AM" before "PM" because it sorts its
+    # keys, so removing this line does not change today's answer and no test
+    # catches it. It is here to STATE which contract the term structure is
+    # measured from, rather than leave that resting on pandas' key order.
+    records.sort(key=lambda r: (r["dte"], 0 if r["settlement"] == contract.AM else 1))
 
     # Compute spreads and ratios relative to the front expiry
     if records:
@@ -708,7 +724,10 @@ def _run_cycle(client, db_path: str, session: str, poll_interval: int) -> int:
 
         # ── 7. Compute ATM IV records ────────────────────────────────────────
         atm_iv_records      = _compute_atm_iv_records(filtered_df, underlying_price, snapshot_id)
-        actual_expiry_count = len(atm_iv_records)
+        # Distinct DATES, not records. There is one record per CONTRACT now
+        # (BUG-028), so counting records would report 21 of 20 expiries on the
+        # third Friday and make the coverage check below meaningless.
+        actual_expiry_count = len({r["expiry_date"] for r in atm_iv_records})
 
         # ── 8. Determine snapshot status ─────────────────────────────────────
         status    = "COMPLETE"

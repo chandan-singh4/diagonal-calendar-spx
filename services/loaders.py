@@ -89,8 +89,8 @@ def _load_transform_marks(front: str, back: str, call_s: float, put_s: float,
                                          call_s, put_s, days=days)
 
 @st.cache_data(ttl=55, show_spinner=False, max_entries=32)
-def _load_latest_atm_iv(exp_date: str, snapshot_id: int, n: int = 2) -> list:
-    return queries.load_latest_atm_iv(config.DB_PATH, exp_date, n)
+def _load_latest_atm_iv(expiry: str, snapshot_id: int, n: int = 2) -> list:
+    return queries.load_latest_atm_iv(config.DB_PATH, expiry, n)
 
 @st.cache_data(ttl=55, show_spinner=False, max_entries=32)
 def _load_diagonal_hist(front: str, back: str, call_s: float, put_s: float,

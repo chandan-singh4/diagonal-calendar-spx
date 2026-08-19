@@ -125,9 +125,11 @@ def wing_legs(sid: int, **kw) -> list[dict]:
     ]
 
 
-def atm(sid: int, expiry: str, avg_iv: float, *, dte: int = 7) -> dict:
+def atm(sid: int, expiry: str, avg_iv: float, *, dte: int = 7,
+        settlement: str | None = None) -> dict:
     return {
-        "snapshot_id": sid, "expiry_date": expiry, "dte": dte,
+        "snapshot_id": sid, "expiry_date": expiry,
+        "settlement": settlement, "dte": dte,
         "atm_strike": 6000.0,
         "atm_call_iv": avg_iv, "atm_put_iv": avg_iv, "atm_avg_iv": avg_iv,
         "iv_spread_to_front": 0.0, "iv_ratio_to_front": 1.0,

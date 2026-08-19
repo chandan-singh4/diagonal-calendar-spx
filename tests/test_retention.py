@@ -44,7 +44,8 @@ def _add_snapshot(path: str, ts: str = "2026-01-10 15:00:00") -> int:
 
 def _rows(sid: int, expiry: str, n: int) -> list[dict]:
     return [{
-        "snapshot_id": sid, "expiry_date": expiry, "dte": 7,
+        "snapshot_id": sid, "expiry_date": expiry,
+            "settlement": None, "dte": 7,
         "strike": 6000.0 + i, "right": "C" if i % 2 else "P",
         "bid": 1.0, "ask": 1.2, "mark": 1.1, "last": 1.1, "iv": 0.2,
         "delta": 0.5, "gamma": 0.01, "theta": -0.5, "vega": 1.0,
@@ -59,7 +60,8 @@ def _seed(path: str, **counts) -> int:
     for expiry, n in counts.items():
         db.insert_option_rows(path, _rows(sid, expiry, n))
         db.insert_atm_iv_records(path, [{
-            "snapshot_id": sid, "expiry_date": expiry, "dte": 7,
+            "snapshot_id": sid, "expiry_date": expiry,
+            "settlement": None, "dte": 7,
             "atm_strike": 6000.0, "atm_call_iv": 0.2, "atm_put_iv": 0.2,
             "atm_avg_iv": 0.2, "iv_spread_to_front": 0.0,
             "iv_ratio_to_front": 1.0,

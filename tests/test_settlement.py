@@ -451,21 +451,26 @@ def test_the_mark_history_chart_prices_the_two_contracts_apart(two_front_contrac
 
 def test_the_diagonal_scatter_prices_the_two_contracts_apart(two_front_contracts):
     """Same again for the scatter, which additionally joins the daily ATM-IV
-    summary. That table has no settlement column, so both contracts share one
-    IV row (BUG-028) — but the MARKS, which come from option_rows, must still
-    be told apart."""
+    summary. That table carries its own settlement column since BUG-028, so the
+    two contracts get two summary rows — and the two IVs below are deliberately
+    different, because a join that ignored settlement would still find A row and
+    return a chart that looked perfectly fine while quoting the wrong contract.
+    """
     db_path, sid = two_front_contracts
-    db.insert_atm_iv_records(db_path, [atm(sid, e, 0.20)
-                                       for e in (THIRD_FRIDAY, BACK)])
+    db.insert_atm_iv_records(db_path, [
+        atm(sid, THIRD_FRIDAY, 0.30, settlement="AM"),
+        atm(sid, THIRD_FRIDAY, 0.20, settlement="PM"),
+        atm(sid, BACK, 0.20, settlement="PM"),
+    ])
 
     def front_call(key):
         rows = db.get_diagonal_history(db_path, key, BACK,
                                        CALL_S, PUT_S, days=5)
         assert len(rows) == 1, f"{key!r} gave {len(rows)} rows, expected 1"
-        return rows[0]["front_call_mark"]
+        return rows[0]["front_call_mark"], rows[0]["front_iv"]
 
-    assert front_call(THIRD_FRIDAY) == 9.05
-    assert front_call(THIRD_FRIDAY + " (AM)") == 6.95
+    assert front_call(THIRD_FRIDAY) == (9.05, 0.20)
+    assert front_call(THIRD_FRIDAY + " (AM)") == (6.95, 0.30)
 
 
 def test_an_ordinary_weekly_front_is_unaffected(temp_db):
@@ -491,3 +496,172 @@ def test_a_weekly_front_has_no_am_contract_to_chart(temp_db):
 
     assert db.get_transform_mark_history(temp_db, ORDINARY + " (AM)", BACK,
                                          CALL_S, PUT_S, days=5) == []
+
+
+# ---------------------------------------------------------------------------
+# The daily A.T.M. summary (BUG-028)
+#
+# atm_iv_by_expiry held one row per DATE, so on the third Friday the two
+# contracts fought over one slot and whichever the collector wrote last won.
+# Every IV chart, every day-change figure and the scatter's IV ratio read that
+# table, so the number they showed was a coin toss with no way to tell.
+#
+# The column and the reads below close it. These checks run against a real
+# temporary database rather than comparing SQL strings, because a predicate
+# that READS right and SELECTS the wrong row is exactly the failure this
+# session already shipped once.
+# ---------------------------------------------------------------------------
+
+def _atm_chain(*rows):
+    return pd.DataFrame(
+        list(rows),
+        columns=["expiry", "settlement", "strike", "side", "iv", "dte"])
+
+
+def test_the_collector_summarises_both_third_friday_contracts():
+    """One row per CONTRACT, not per date. Before this the p.m. contract had
+    no summary row at all and could not be charted."""
+    df = _atm_chain(
+        (THIRD_FRIDAY, "AM", STRIKE, "CALL", 18.0, 2),
+        (THIRD_FRIDAY, "AM", STRIKE, "PUT",  18.0, 2),
+        (THIRD_FRIDAY, "PM", STRIKE, "CALL", 22.0, 2),
+        (THIRD_FRIDAY, "PM", STRIKE, "PUT",  22.0, 2),
+    )
+    records = collector._compute_atm_iv_records(df, STRIKE, snapshot_id=1)
+
+    assert {(r["expiry_date"], r["settlement"]) for r in records} == {
+        (THIRD_FRIDAY, "AM"), (THIRD_FRIDAY, "PM")}
+    assert {round(r["atm_avg_iv"], 4) for r in records} == {0.18, 0.22}
+
+
+def test_an_ordinary_expiry_still_gets_exactly_one_summary_row():
+    """Nearly every SPX expiry is a p.m. weekly. Splitting by settlement must
+    not multiply those — the count is the whole coverage check the collector
+    uses to decide a snapshot is COMPLETE."""
+    df = _atm_chain(
+        (ORDINARY, "PM", STRIKE, "CALL", 21.0, 5),
+        (ORDINARY, "PM", STRIKE, "PUT",  21.0, 5),
+    )
+    records = collector._compute_atm_iv_records(df, STRIKE, snapshot_id=1)
+    assert len(records) == 1
+    assert records[0]["settlement"] == "PM"
+
+
+def test_a_chain_with_no_settlement_recorded_still_summarises():
+    """pandas' groupby drops null keys unless told not to. If that bit were
+    wrong the collector would write NOTHING on any chain that arrived without
+    settlement, and the snapshot would be marked FAILED with no explanation."""
+    df = _atm_chain(
+        (ORDINARY, None, STRIKE, "CALL", 21.0, 5),
+        (ORDINARY, None, STRIKE, "PUT",  21.0, 5),
+    )
+    records = collector._compute_atm_iv_records(df, STRIKE, snapshot_id=1)
+    assert len(records) == 1
+    assert records[0]["settlement"] is None
+
+
+def test_the_front_of_the_term_structure_is_the_am_contract():
+    """The two share a DTE. Everything downstream is measured as a spread FROM
+    records[0], so which of them holds that slot decides what every spread and
+    ratio in the table means.
+
+    This pins the PROPERTY, not the line that delivers it: pandas' groupby
+    already emits "AM" before "PM", so the explicit tie-break in the collector
+    can be deleted without this failing. Said plainly in collector.py too."""
+    df = _atm_chain(
+        (THIRD_FRIDAY, "PM", STRIKE, "CALL", 22.0, 2),
+        (THIRD_FRIDAY, "PM", STRIKE, "PUT",  22.0, 2),
+        (THIRD_FRIDAY, "AM", STRIKE, "CALL", 18.0, 2),
+        (THIRD_FRIDAY, "AM", STRIKE, "PUT",  18.0, 2),
+        (BACK,         "PM", STRIKE, "CALL", 24.0, 28),
+        (BACK,         "PM", STRIKE, "PUT",  24.0, 28),
+    )
+    records = collector._compute_atm_iv_records(df, STRIKE, snapshot_id=1)
+
+    assert records[0]["settlement"] == "AM"
+    assert records[0]["iv_spread_to_front"] is None
+    assert round(records[1]["iv_spread_to_front"], 4) == 0.04   # 0.22 - 0.18
+
+
+def _two_summaries(temp_db):
+    """One snapshot carrying both third-Friday summary rows, priced apart."""
+    sid = add_snapshot(temp_db, ts_ago(minutes=5))
+    db.insert_atm_iv_records(temp_db, [
+        atm(sid, THIRD_FRIDAY, 0.18, settlement="AM"),
+        atm(sid, THIRD_FRIDAY, 0.22, settlement="PM"),
+    ])
+    db.finalize_snapshot(temp_db, sid, status="COMPLETE", strikes_fetched=4,
+                         expiries_fetched=1, collection_latency_ms=100)
+    return sid
+
+
+def test_the_iv_history_chart_reads_the_contract_it_was_asked_for(temp_db):
+    _two_summaries(temp_db)
+
+    def iv(key):
+        rows = db.get_atm_iv_history(temp_db, key, days=5)
+        assert len(rows) == 1, f"{key!r} gave {len(rows)} rows, expected 1"
+        return round(rows[0]["atm_avg_iv"], 4)
+
+    assert iv(THIRD_FRIDAY) == 0.22
+    assert iv(THIRD_FRIDAY + " (AM)") == 0.18
+
+
+def test_the_day_change_figure_reads_the_contract_it_was_asked_for(temp_db):
+    _two_summaries(temp_db)
+
+    def iv(key):
+        rows = db.get_latest_atm_iv_snapshots(temp_db, key, n=2)
+        assert len(rows) == 1, f"{key!r} gave {len(rows)} rows, expected 1"
+        return round(rows[0]["atm_avg_iv"], 4)
+
+    assert iv(THIRD_FRIDAY) == 0.22
+    assert iv(THIRD_FRIDAY + " (AM)") == 0.18
+
+
+def test_the_read_layer_passes_the_label_through_rather_than_stripping_it(temp_db):
+    """dataaccess/queries.py used to call date_of() here, which threw the label
+    away before the query ever saw it. Both contracts then returned the same
+    series and the split above would have been invisible from the screen."""
+    _two_summaries(temp_db)
+
+    am = queries.load_atm_hist(temp_db, THIRD_FRIDAY + " (AM)", 5)
+    pm = queries.load_atm_hist(temp_db, THIRD_FRIDAY, 5)
+    assert round(am["atm_iv"].iloc[0], 2) == 18.0
+    assert round(pm["atm_iv"].iloc[0], 2) == 22.0
+
+    am_latest = queries.load_latest_atm_iv(temp_db, THIRD_FRIDAY + " (AM)", n=2)
+    pm_latest = queries.load_latest_atm_iv(temp_db, THIRD_FRIDAY, n=2)
+    assert round(am_latest[0]["atm_avg_iv"], 4) == 0.18
+    assert round(pm_latest[0]["atm_avg_iv"], 4) == 0.22
+
+
+def test_a_legacy_summary_row_is_attributed_the_same_way_the_prices_are(temp_db):
+    """Two months of summaries carry no settlement. They must land on the same
+    contract as the option_rows taken in the same cycle, or the IV chart and the
+    price chart would disagree about which contract they are showing."""
+    before = add_snapshot(temp_db, "2026-08-19 15:30:00")
+    on_the_day = add_snapshot(temp_db, "2026-08-21 15:30:00")
+    for sid, iv_val in ((before, 0.18), (on_the_day, 0.22)):
+        db.insert_atm_iv_records(temp_db, [atm(sid, THIRD_FRIDAY, iv_val)])
+        db.finalize_snapshot(temp_db, sid, status="COMPLETE", strikes_fetched=2,
+                             expiries_fetched=1, collection_latency_ms=100)
+
+    def ivs(key):
+        return sorted(round(r["atm_avg_iv"], 4)
+                      for r in db.get_atm_iv_history(temp_db, key, days=3650))
+
+    assert ivs(THIRD_FRIDAY + " (AM)") == [0.18]
+    assert ivs(THIRD_FRIDAY) == [0.22]
+
+
+def test_the_two_contracts_cannot_share_a_summary_slot_again(temp_db):
+    """The constraint, not the convention. Without it a future change that
+    grouped by date again would corrupt the table silently, exactly as before —
+    the whole point of BUG-028 is that nothing complained."""
+    sid = add_snapshot(temp_db, ts_ago(minutes=5))
+    db.insert_atm_iv_records(temp_db, [atm(sid, THIRD_FRIDAY, 0.18, settlement="AM")])
+
+    with pytest.raises(sqlite3.IntegrityError):
+        db.insert_atm_iv_records(temp_db,
+                                 [atm(sid, THIRD_FRIDAY, 0.19, settlement="AM")])

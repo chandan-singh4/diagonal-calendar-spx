@@ -7,6 +7,44 @@ it was recorded here.
 
 ---
 
+## ADR-047 — The daily at-the-money summary names its contract too
+**Date:** 2026-08-19 · **Status:** Accepted
+
+**Context:** ADR-046 taught `option_rows` the difference between the two third-Friday
+contracts, but `atm_iv_by_expiry` — the per-snapshot at-the-money IV summary that every IV
+chart, day-change figure and the scatter's IV ratio reads — still held **one row per DATE**.
+The collector resolved the clash by dropping the p.m. contract before summarising, so the
+p.m. contract had no summary row at all and could not be charted; the scatter showed
+correctly different MARKS beside an identical `iv_ratio`. Nothing complained, because
+nothing could: the table had no uniqueness rule to violate.
+
+**Decision:**
+1. **A `settlement` column on `atm_iv_by_expiry`**, filled the same way and meaning the same
+   thing as on `option_rows` — `'AM'`, `'PM'`, or NULL for "not recorded".
+2. **The collector groups by contract, not by date**, and writes both rows on the third
+   Friday. Every other expiry is a p.m. weekly and still gets exactly one.
+3. **`uq_atm_iv_contract(snapshot_id, expiry_date, COALESCE(settlement, '?'))`** — the
+   constraint that was missing. It is created only when the table holds no duplicates;
+   deleting rows to make an index fit is a data loss nobody asked for, so that case is
+   logged for a human instead.
+4. **The reads take a display key**, narrowed by `core.contract.match_clause` exactly as the
+   price reads are, so the legacy NULL rows are attributed the same way in both tables. If
+   they were not, the IV chart and the price chart could disagree about which contract they
+   were showing.
+5. **`expiries_fetched` still counts DATES.** There is one summary row per contract now, so
+   counting rows would report 21 of 20 expiries on the third Friday and quietly turn the
+   collector's coverage check into a no-op.
+
+**Alternatives rejected:** returning nothing for the a.m. key (honest, but it deletes a
+working chart); keying the summary on the display string (it would have made `expiry_date`
+stop being a date, which is the mistake `core/contract.py` exists to avoid).
+
+**Consequence:** the p.m. series genuinely starts on 2026-08-19 — three points, from
+snapshots 4802-4804 — and grows from the next collector restart. The a.m. series keeps its
+full history through the legacy attribution rule. Closes BUG-028 and BUG-026.
+
+---
+
 ## ADR-046 — The a.m. and p.m. third-Friday options are two different contracts, and the record now says which
 **Date:** 2026-08-19 · **Status:** Accepted
 

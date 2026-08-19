@@ -1,8 +1,9 @@
 # PROJECT STATUS
 
 **Updated:** 2026-08-19 · **Branch:** `m3-data-hardening` — **stage 3, 4 of 9 parts done.**
-**State:** 857 checks pass. Eight commits are saved on this machine and **not yet sent to
-GitHub** (ahead by 8). The collector is running the fixed code and verified recording correctly.
+**State:** 876 checks pass. Eleven commits are saved on this machine and **not yet sent to
+GitHub** (ahead by 11). The collector is running today's earlier fix; it has NOT been restarted
+onto tonight's, which is why the afternoon volatility series is only three readings long so far.
 > Self-contained: read this file alone to start a session. Replaced entirely by `/wrap`.
 
 ## What this project is
@@ -17,7 +18,7 @@ record IS the product** — the screen is just a window onto it.
 | Part | What it does |
 |---|---|
 | **Collector** | Background program. Every 1–5 min while markets are open, records all option prices. Starts with Windows. |
-| **Database** | One file, **2.89 GB** since 23 June, growing ~82 MB a trading day. Irreplaceable — the broker won't sell you last Tuesday's prices. |
+| **Database** | One file, **3.10 GB** since 23 June, growing ~82 MB a trading day. Irreplaceable — the broker won't sell you last Tuesday's prices. |
 | **Dashboard** | Web page, 6 tabs: Scanner, Entry Analysis, Calendar Edge, Strike Detail, Historical Stats, Research. Reads only. |
 | **Journal** | Diary of actual trades. 6 practice entries, to be discarded. |
 
@@ -58,25 +59,23 @@ intraday, **170 of 170** were the morning contract.
 
 ## What to do next
 
-1. **The afternoon option is now on screen — finish the last two pieces.** Both contracts appear
-   in both expiry dropdowns, the afternoon one plain (`Friday, Aug 21, 2026`) and the morning one
-   marked (`· AM settled`), and every price, chart and saved position follows the one you pick.
-   Checked on the real system: 21 entries, and at the 7750 strike the afternoon contract shows
-   **9.05 against the morning 6.95**. *(a)* The daily summary table has no column saying which
-   contract, so the two share one volatility figure — prices differ, the ratio does not; fixing it
-   changes the database and needs Chandan's word (**BUG-028**). *(b)* The morning contract really
-   stops trading the evening before; both are still treated as ending together, deliberately — the
-   accurate rule **deletes** saved positions sooner (**BUG-027**). Neither blocks daily use.
-2. **Then stage 3 part 8** — write down the weekly broker-permission renewal steps.
-3. **The watchdog has one thing unproven** — no *real* outage has travelled the whole alarm path;
+1. **Restart the collector when convenient** (needs Chandan's word). The running copy predates
+   tonight's change, so it still writes one daily volatility row per date. Nothing is lost —
+   the prices behind every chart are recorded in full either way — but the afternoon contract's
+   volatility line stops growing until it restarts.
+2. **One piece of the third-Friday work is deliberately left undone.** The morning contract really
+   stops trading the evening before; both are still treated as ending together, on purpose — the
+   accurate rule **deletes** saved positions a day sooner, and being early destroys the entry price
+   a live position is measured against (**BUG-027**). It does not affect daily use.
+3. **Then stage 3 part 8** — write down the weekly broker-permission renewal steps.
+4. **The watchdog has one thing unproven** — no *real* outage has travelled the whole alarm path;
    it cannot be staged without Chandan's word, so the first real one is the test.
 
 ## Open problems
 
-- **Blocked on Chandan (needs one word):** snapshots 4801–4804 hold 1 of 20 daily summary rows
-  each, from my mistake above. The underlying prices are complete so the summaries can be rebuilt —
-  but that is a database write. 4805–4808 are a real ~2-min gap from restarting the collector,
-  correctly recorded as such; nothing to repair.
+- **The four damaged snapshots are repaired** — 4801–4804, rebuilt tonight from the prices they
+  were derived from, rehearsed first on a copy of the whole 3.10 GB file. 4805–4808 remain a real
+  ~2-minute gap from restarting the collector, correctly recorded; nothing to repair there.
 - **ENH-011 (high)** — tab clicks are slow; cause **not established**, measure first.
   **BUG-001 (high, blocked on Chandan)** — old unexplained report; needs a symptom and screenshot.
   **BUG-018 (medium)** — on expiry day one tile says "set strikes" when they already are.
@@ -84,8 +83,9 @@ intraday, **170 of 170** were the morning contract.
 
 ## Settled decisions
 
-- **The two third-Friday contracts are different options and the record now says which** (ADR-046).
-  A blank means "not recorded", never "morning". Afternoon history begins 2026-08-19.
+- **The two third-Friday contracts are different options and the record now says which** (ADR-046),
+  including the daily volatility summary (ADR-047), which now has one row per contract and a rule
+  stopping them ever sharing one again. A blank means "not recorded", never "morning".
 - **Old prices cleared 90 days past expiry, summaries kept forever, traded expiries never cleared,
   never on a timer** (ADR-044). **The watchdog watches, never acts** (ADR-045). **The screen stays as it is until stage 5.**
 - **Closing a problem means deleting its row.** **Never re-record a failing check to make it pass.**

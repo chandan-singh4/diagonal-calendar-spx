@@ -173,6 +173,9 @@ CREATE TABLE IF NOT EXISTS atm_iv_by_expiry (
     snapshot_id         INTEGER NOT NULL
                             REFERENCES snapshots(snapshot_id) ON DELETE CASCADE,
     expiry_date         TEXT    NOT NULL,
+    -- 'AM' | 'PM' | NULL. NULL is every row written before BUG-028 was fixed;
+    -- core.contract.match_clause attributes those by when they were taken.
+    settlement          TEXT,
     dte                 INTEGER NOT NULL,
     atm_strike          REAL    NOT NULL,
     atm_call_iv         REAL,
@@ -362,6 +365,48 @@ def init_db(db_path: str | None = None) -> None:
                 "contract is no longer discarded (BUG-023)"
             )
 
+        # ── atm_iv_by_expiry settlement migration (BUG-028) ──────────────────
+        # The daily summary had one row per DATE, so on the third Friday the two
+        # contracts shared a slot and whichever was written won. The column
+        # splits them; the unique index stops them ever sharing a slot again.
+        #
+        # The index is NOT created when duplicates are already present. Building
+        # it would fail and take init_db down with it, and the alternative —
+        # deleting rows to make it fit — is a data loss nobody asked for. It is
+        # logged instead, loudly, for a human to decide.
+        _atm_cols = {r["name"]
+                     for r in conn.execute("PRAGMA table_info(atm_iv_by_expiry)")}
+        if "settlement" not in _atm_cols:
+            conn.execute("ALTER TABLE atm_iv_by_expiry ADD COLUMN settlement TEXT")
+            conn.commit()
+            logger.info("atm_iv_by_expiry: added settlement column (BUG-028)")
+
+        _has_atm_uq = conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type = 'index' AND name = 'uq_atm_iv_contract'"
+        ).fetchone()
+        if not _has_atm_uq:
+            _atm_dupes = conn.execute(
+                "SELECT COUNT(*) FROM (SELECT 1 FROM atm_iv_by_expiry "
+                "GROUP BY snapshot_id, expiry_date, COALESCE(settlement, '?') "
+                "HAVING COUNT(*) > 1)"
+            ).fetchone()[0]
+            if _atm_dupes:
+                logger.warning(
+                    "atm_iv_by_expiry holds %d duplicated contract slot(s); "
+                    "uq_atm_iv_contract NOT created (BUG-028)", _atm_dupes,
+                )
+            else:
+                conn.execute(
+                    "CREATE UNIQUE INDEX uq_atm_iv_contract ON atm_iv_by_expiry("
+                    "snapshot_id, expiry_date, COALESCE(settlement, '?'))"
+                )
+                conn.commit()
+                logger.info(
+                    "atm_iv_by_expiry: one summary row per contract enforced "
+                    "(BUG-028)"
+                )
+
         row = conn.execute(
             "SELECT MAX(version) AS v FROM schema_version"
         ).fetchone()
@@ -531,18 +576,24 @@ def insert_option_rows(db_path: str, rows: list[dict]) -> int:
 def insert_atm_iv_records(db_path: str, records: list[dict]) -> None:
     """
     Bulk-insert pre-aggregated ATM IV records.
-    One record per expiry per snapshot — call after insert_option_rows() commits.
+    One record per CONTRACT per snapshot — call after insert_option_rows()
+    commits. On the third Friday that is two rows for the one date, the a.m.
+    contract and the p.m. one (BUG-028).
+
+    A plain INSERT, not INSERT OR IGNORE: uq_atm_iv_contract exists to catch a
+    second row for the same contract, and swallowing that would leave the term
+    structure quietly wrong, which is the failure this table already had once.
     """
     if not records:
         return
 
     sql = """
         INSERT INTO atm_iv_by_expiry (
-            snapshot_id, expiry_date, dte, atm_strike,
+            snapshot_id, expiry_date, settlement, dte, atm_strike,
             atm_call_iv, atm_put_iv, atm_avg_iv,
             iv_spread_to_front, iv_ratio_to_front
         ) VALUES (
-            :snapshot_id, :expiry_date, :dte, :atm_strike,
+            :snapshot_id, :expiry_date, :settlement, :dte, :atm_strike,
             :atm_call_iv, :atm_put_iv, :atm_avg_iv,
             :iv_spread_to_front, :iv_ratio_to_front
         )
@@ -596,21 +647,27 @@ def get_latest_complete_snapshot(db_path: str) -> sqlite3.Row | None:
 
 
 def get_latest_atm_iv_snapshots(db_path: str,
-                                  expiry_date: str,
+                                  expiry: str,
                                   n: int = 2) -> list:
     """
-    Last N ATM IV records for a specific expiry, most recent first.
+    Last N ATM IV records for one CONTRACT, most recent first.
     Used for the day-change metric in the dashboard left panel.
+
+    `expiry` is a display key, so on the third Friday the a.m. and p.m.
+    contracts give two different answers rather than one shared one (BUG-028).
 
     IVs are returned in decimal form (0.18 = 18%) — multiply by 100 for display.
     """
+    expiry_date, settlement = contract.parse(expiry)
+    match = contract.match_clause(expiry_date, settlement, rows="a", snaps="s")
     with get_conn(db_path) as conn:
         return conn.execute(
-            """
+            f"""
             SELECT a.atm_avg_iv, s.snapshot_timestamp
             FROM atm_iv_by_expiry a
             JOIN snapshots s ON s.snapshot_id = a.snapshot_id
             WHERE a.expiry_date = ?
+              AND {match}
               AND s.status      = 'COMPLETE'
             ORDER BY s.snapshot_timestamp DESC
             LIMIT ?
@@ -698,20 +755,25 @@ def get_contract_iv_history(db_path: str, expiry_date: str, strike: float,
         ).fetchall()
 
 
-def get_atm_iv_history(db_path: str, expiry_date: str,
+def get_atm_iv_history(db_path: str, expiry: str,
                         days: int = 30) -> list:
     """
-    ATM IV history for a specific expiry over the last N days.
+    ATM IV history for one CONTRACT over the last N days.
     Primary query for term structure charts and range stats.
+
+    `expiry` is a display key — the third Friday's two contracts return two
+    different series (BUG-028).
 
     IVs are in decimal form — app.py multiplies by 100 at the load boundary.
 
     Performance: uses idx_atm_iv_expiry_snap. Scans ~3,150 rows per 30 days
     rather than scanning option_rows directly (~4.8M rows).
     """
+    expiry_date, settlement = contract.parse(expiry)
+    match = contract.match_clause(expiry_date, settlement, rows="a", snaps="s")
     with get_conn(db_path) as conn:
         return conn.execute(
-            """
+            f"""
             SELECT
                 s.snapshot_timestamp,
                 s.underlying_price,
@@ -722,6 +784,7 @@ def get_atm_iv_history(db_path: str, expiry_date: str,
             FROM atm_iv_by_expiry a
             JOIN snapshots s ON s.snapshot_id = a.snapshot_id
             WHERE a.expiry_date = ?
+              AND {match}
               AND s.status      = 'COMPLETE'
               AND s.snapshot_timestamp >= datetime('now', ?, 'utc')
             ORDER BY s.snapshot_timestamp
@@ -806,16 +869,27 @@ def get_entry_iv_context(db_path: str, entry_ts_utc: str,
         back_iv = _mean([legs.get((back_date, cs, "C")),
                          legs.get((back_date, ps, "P"))])
 
-        atm_rows = conn.execute(
-            """
-            SELECT expiry_date, atm_avg_iv
-            FROM atm_iv_by_expiry
-            WHERE snapshot_id = ? AND expiry_date IN (?, ?)
-            """,
-            (sid, front_date, back_date),
-        ).fetchall()
-        atm = {r["expiry_date"]: r["atm_avg_iv"] for r in atm_rows}
-        atm_front, atm_back = atm.get(front_date), atm.get(back_date)
+        # One read per contract rather than one IN (...) read for both. The two
+        # sides need different settlement clauses, and when front and back land
+        # on the same date keying the result by date alone would collapse them
+        # back into one number — the whole of BUG-028 in miniature.
+        afm = contract.match_clause(front_date, front_settle, rows="a", snaps="s")
+        abm = contract.match_clause(back_date, back_settle, rows="a", snaps="s")
+
+        def _atm(expiry_date: str, match: str):
+            row = conn.execute(
+                f"""
+                SELECT a.atm_avg_iv
+                FROM atm_iv_by_expiry a
+                JOIN snapshots s USING (snapshot_id)
+                WHERE a.snapshot_id = ? AND a.expiry_date = ? AND {match}
+                """,
+                (sid, expiry_date),
+            ).fetchone()
+            return row["atm_avg_iv"] if row else None
+
+        atm_front = _atm(front_date, afm)
+        atm_back = _atm(back_date, abm)
 
     return {
         "snapshot_id": sid,
@@ -942,6 +1016,8 @@ def get_diagonal_history(
         ofp_match = _m("ofp", True)
         obc_match = _m("obc", False)
         obp_match = _m("obp", False)
+        f_match   = _m("f", True)    # the daily summary names its contract
+        b_match   = _m("b", False)   # too now — BUG-028
         return conn.execute(
             f"""
             SELECT
@@ -960,8 +1036,10 @@ def get_diagonal_history(
             FROM snapshots s
             JOIN atm_iv_by_expiry f
                 ON f.snapshot_id = s.snapshot_id AND f.expiry_date = ?
+               AND {f_match}
             JOIN atm_iv_by_expiry b
                 ON b.snapshot_id = s.snapshot_id AND b.expiry_date = ?
+               AND {b_match}
             LEFT JOIN option_rows ofc
                 ON ofc.snapshot_id = s.snapshot_id
                AND ofc.expiry_date = ? AND ofc.strike = ? AND ofc.right = 'C'
@@ -990,7 +1068,7 @@ def get_diagonal_history(
             ORDER BY s.snapshot_timestamp
             """,
             (
-                front_date, back_date,   # atm_iv_by_expiry has no settlement — BUG-028
+                front_date, back_date,   # f / b, each narrowed by its own clause
                 front_date, float(call_strike),
                 back_date,  float(call_strike),
                 front_date, float(put_strike),

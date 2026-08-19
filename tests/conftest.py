@@ -546,7 +546,7 @@ def make_atm_iv_history(db_path, ivs, *, expiry=None, interval_minutes=5,
             underlying_bid=spx - 1, underlying_ask=spx + 1, vix_value=18.5,
         )
         db.insert_atm_iv_records(db_path, [dict(
-            snapshot_id=snapshot_id, expiry_date=expiry, dte=dte,
+            snapshot_id=snapshot_id, expiry_date=expiry, settlement=None, dte=dte,
             atm_strike=spx, atm_call_iv=iv, atm_put_iv=iv, atm_avg_iv=iv,
             iv_spread_to_front=0.0, iv_ratio_to_front=1.0,
         )])

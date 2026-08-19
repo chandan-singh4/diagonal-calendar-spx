@@ -34,14 +34,13 @@ from core import contract
 
 
 def load_atm_hist(db_path, expiry: str, days: int) -> pd.DataFrame:
-    """At-the-money IV history for one expiry.
+    """At-the-money IV history for one contract.
 
-    Takes a display key but reads by DATE, so on the third Friday both
-    contracts return the same series. `atm_iv_by_expiry` is a daily summary
-    with no settlement column, so there is only one row to return — recorded
-    as BUG-028. Everything derived from `option_rows` does tell them apart.
+    `expiry` is a display key and is passed on as one: `atm_iv_by_expiry` now
+    carries a settlement column, so the third Friday's two contracts return two
+    different series rather than sharing one (BUG-028, closed 2026-08-19).
     """
-    rows = db.get_atm_iv_history(db_path, contract.date_of(expiry), days)
+    rows = db.get_atm_iv_history(db_path, expiry, days)
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame([dict(r) for r in rows])
@@ -153,12 +152,12 @@ def load_transform_marks(db_path, front: str, back: str, call_s: float,
     return pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
 
 
-def load_latest_atm_iv(db_path, exp_date: str, n: int = 2) -> list:
-    """The n most recent ATM-IV snapshots for an expiry (as plain dicts).
+def load_latest_atm_iv(db_path, expiry: str, n: int = 2) -> list:
+    """The n most recent ATM-IV snapshots for one contract (as plain dicts).
 
-    Reads by date — see load_atm_hist on why the two contracts share these.
+    Takes a display key — see load_atm_hist.
     """
-    rows = db.get_latest_atm_iv_snapshots(db_path, contract.date_of(exp_date), n=n)
+    rows = db.get_latest_atm_iv_snapshots(db_path, expiry, n=n)
     return [dict(r) for r in rows] if rows else []
 
 
