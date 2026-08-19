@@ -44,6 +44,17 @@ written two conflicting rows for every third Friday and silently corrupted the t
 the whole analytics layer rests on. Storing the p.m. contract without pinning the readers would
 have been a worse bug than the one being fixed.
 
+**Amendment, same day — the legacy rows ARE attributable, at read time.** This ADR originally
+held that the pre-2026-08-19 rows could never be sorted out. That was too pessimistic. The
+attribution is deterministic: a weekly only ever had one contract (p.m.); on a monthly, a row
+recorded *before* expiry day is the a.m. contract, and one recorded *on* expiry day is the p.m.
+one. Verified by matching the unlabelled 21 Aug rows against both labelled contracts on open
+interest — which does not move intraday, so it identifies a contract independently of price:
+**170 of 170 matched a.m., 0 matched p.m.** This is applied **when reading, never by rewriting
+the stored rows** — the stored NULL stays honestly "not recorded", the derivation stays visible
+and arguable, and nothing about it is irreversible. Point 2 above still stands unchanged: NULL in
+the column means "not recorded".
+
 **Alternatives rejected:** *Stamp the legacy rows 'AM'* — wrong on precisely the day that
 matters, because on each past expiry day the a.m. contract had already settled out of the chain
 and the p.m. one took the slot unnoticed (BUG-024). *Store only the p.m. contract* — discards
