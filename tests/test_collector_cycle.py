@@ -389,6 +389,28 @@ class TestFailureHandling:
 # Expiry trimming
 # ─────────────────────────────────────────────────────────────────────────────
 
+
+@pytest.fixture(autouse=True)
+def _no_real_locks_file(tmp_path, monkeypatch):
+    """A cycle test must not read the developer's REAL entry_locks.json.
+
+    Found 2026-08-19. TestExpiryTrimming started failing on this machine and
+    nowhere else, because Chandan had locked a live position on 2026-08-21 at
+    14:25 that afternoon. `collector._load_pins()` reads `config.STATE_DIR`,
+    which is the project root, so the collector kept that expiry past the
+    MAX_EXPIRY_COUNT trim — correctly, by BUG-022 — and the test's expected
+    set no longer matched. The test result depended on a file no test wrote.
+
+    Scoped to this module rather than conftest on purpose: patching STATE_DIR
+    for the whole suite would defeat
+    test_the_pipeline_loader_refuses_to_run_against_the_real_state_dir, which
+    exists precisely to prove nothing patches it globally.
+
+    A test that wants pins writes its own locks file into this tmp_path.
+    """
+    monkeypatch.setattr(collector.config, "STATE_DIR", str(tmp_path))
+
+
 class TestExpiryTrimming:
 
     def test_only_the_nearest_configured_expiries_are_kept(self, fake_client,

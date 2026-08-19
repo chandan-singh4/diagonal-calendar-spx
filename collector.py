@@ -669,7 +669,7 @@ def _run_cycle(client, db_path: str, session: str, poll_interval: int) -> int:
         # A locked expiry the broker returned is kept even if it falls outside
         # the nearest N. Intersected with what actually arrived, so a lock on an
         # expiry beyond the fetch window widens nothing and invents nothing.
-        pinned_expiries = pinned.expiries & (set(all_expiries) - keep_expiries)
+        pinned_expiries = pinned.expiry_dates & (set(all_expiries) - keep_expiries)
         if pinned_expiries:
             logger.info(
                 "keeping %d expiry(ies) beyond the nearest %d because a lock "
@@ -679,7 +679,7 @@ def _run_cycle(client, db_path: str, session: str, poll_interval: int) -> int:
             )
             keep_expiries |= pinned_expiries
 
-        missing = pinned.expiries - set(all_expiries)
+        missing = pinned.expiry_dates - set(all_expiries)
         if missing:
             logger.warning(
                 "a lock depends on expiry(ies) the broker did not return: %s — "

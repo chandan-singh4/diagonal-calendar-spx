@@ -288,3 +288,33 @@ def test_a_missing_lock_file_collects_exactly_as_before(
     patch_schwab(raw_chain=make_raw_chain(strikes=[5900.0, NEAR_STRIKE, 6100.0]))
     snap_id = collector._run_cycle(fake_client, temp_db, "MIDDAY", 300)
     assert _stored(temp_db, snap_id) == {5900.0, NEAR_STRIKE, 6100.0}
+
+
+# ---------------------------------------------------------------------------
+# Display keys (BUG-023). A lock may name the third Friday's a.m. contract, and
+# the collector narrows a chain keyed on the date alone.
+# ---------------------------------------------------------------------------
+
+def test_a_labelled_lock_still_pins_its_expiry_date():
+    """The failure this guards against is silent: the pin simply stops
+    matching, the locked legs drop out of the narrowing, and the prices behind
+    an open position stop being recorded — BUG-022, all over again."""
+    locks = {"a": {"front_expiry": "2026-08-21 (AM)",
+                   "back_expiry": "2026-09-16",
+                   "put_strike": 7500.0, "call_strike": 7550.0}}
+    assert core_pins.from_locks(locks).expiry_dates == {"2026-08-21", "2026-09-16"}
+
+
+def test_the_raw_keys_are_kept_as_they_were():
+    """`expiries` still holds what the lock says, label and all — only the
+    date-shaped view strips it."""
+    locks = {"a": {"front_expiry": "2026-08-21 (AM)", "back_expiry": "2026-09-16"}}
+    assert core_pins.from_locks(locks).expiries == {"2026-08-21 (AM)", "2026-09-16"}
+
+
+def test_both_contracts_of_one_date_pin_that_date_once():
+    locks = {
+        "a": {"front_expiry": "2026-08-21 (AM)", "back_expiry": "2026-09-16"},
+        "b": {"front_expiry": "2026-08-21",      "back_expiry": "2026-09-16"},
+    }
+    assert core_pins.from_locks(locks).expiry_dates == {"2026-08-21", "2026-09-16"}

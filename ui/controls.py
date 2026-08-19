@@ -38,6 +38,7 @@ from dataclasses import dataclass
 import pandas as pd
 import streamlit as st
 
+from core import contract
 from core.format import exp_label
 from core.ranking import nearest_idx
 
@@ -203,7 +204,11 @@ def render(*, chain_df: pd.DataFrame, available_expiries: list,
             st.warning("No CALL strikes available for this expiry pair.")
             call_strike = 0.0
 
-    if back_expiry <= front_expiry:
+    # Compare DATES, not display keys. "2026-08-21 (AM)" sorts after
+    # "2026-08-21" as text, so a plain string compare would quietly accept the
+    # a.m. contract as the BACK leg of a p.m. front — a diagonal whose back
+    # leg expires first. Equal dates are flagged for the same reason.
+    if contract.date_of(back_expiry) <= contract.date_of(front_expiry):
         st.warning("Back expiry ≤ Front — unusual for a diagonal, shown anyway.")
 
     return Selection(
