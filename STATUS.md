@@ -68,8 +68,8 @@ intraday, **170 of 170** were the morning contract.
    is a plain date; it already refuses to delete what it cannot read, so the worst case is a stale
    entry, not a lost one. Include the old prices (attributable, above) for full history.
 2. **Then stage 3 part 8** — write down the weekly broker-permission renewal steps.
-3. **The watchdog has one thing unproven** — no *real* outage has ever travelled the whole alarm
-   path. It cannot be staged without Chandan's word; the first real one is the test.
+3. **The watchdog has one thing unproven** — no *real* outage has travelled the whole alarm path;
+   it cannot be staged without Chandan's word, so the first real one is the test.
 
 ## Open problems
 
