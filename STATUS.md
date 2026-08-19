@@ -86,15 +86,14 @@ intraday, **170 of 170** were the morning contract.
 
 - **The two third-Friday contracts are different options and the record now says which** (ADR-046).
   A blank means "not recorded", never "morning". Afternoon history begins 2026-08-19.
-- **Old prices are cleared 90 days past expiry, summaries kept forever, traded expiries never
-  cleared, and never on a timer** (ADR-044). **The watchdog watches and never acts** (ADR-045).
-- **Closing a problem means deleting its row**, never ticking it off. **Never re-record a failing
-  check to make it pass.** **The screen stays as it is until stage 5.**
+- **Old prices cleared 90 days past expiry, summaries kept forever, traded expiries never cleared,
+  never on a timer** (ADR-044). **The watchdog watches, never acts** (ADR-045). **The screen stays as it is until stage 5.**
+- **Closing a problem means deleting its row.** **Never re-record a failing check to make it pass.**
 
 ## How to work here
 
 **Ask first** before: saving online, any database write, deleting files or rows, changing Windows
-settings or programs, stopping/starting the collector, or sending anything off this machine.
+settings or programs, starting/stopping the collector, or sending anything off this machine.
 **No check may touch the real database. Trade numbers are never reused. Missing price → blank, not
 0. Prove checks by breaking the code on a copy**, never the live file. **And verify on the real
 system after deploying** — today, every check passed while the live screen was wrong.
