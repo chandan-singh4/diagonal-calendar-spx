@@ -52,7 +52,13 @@ pytestmark = pytest.mark.integration
 # ─────────────────────────────────────────────────────────────────────────────
 
 FRONT = "2026-08-07"
-BACK = "2026-08-21"
+# An ordinary weekly, deliberately NOT the third Friday. These fixtures write
+# legacy rows (no settlement recorded), and on the third Friday such a row is
+# attributed to the a.m. contract, so reading it back with a bare date would
+# correctly return nothing — see core/contract.py. The two-contract case is
+# pinned in test_contract_key.py and test_settlement.py; here it would only
+# obscure what these tests are actually about.
+BACK = "2026-08-28"
 CALL_STRIKE = 6050.0
 PUT_STRIKE = 5950.0
 

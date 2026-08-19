@@ -60,6 +60,7 @@ import plotly.graph_objects as go
 
 import config
 import db
+from core import contract
 import iv_engine
 from dataaccess import queries
 from state import eligible_history
@@ -272,6 +273,7 @@ def load_scanner_functions() -> dict:
     # filled in.
     namespace: dict = {
         "pd": pd, "np": np, "math": math, "bisect": bisect,
+        "contract": contract,
         "iv_engine": iv_engine,
         "__builtins__": __builtins__,
     }
@@ -289,6 +291,7 @@ def load_display_functions() -> dict:
     """
     namespace: dict = {
         "pd": pd, "np": np, "math": math, "go": go,
+        "contract": contract,
         "__builtins__": __builtins__,
     }
     return _load_from_app(_DISPLAY_FUNCS, _DISPLAY_CONSTS, namespace, what="display layer")
@@ -312,7 +315,7 @@ def load_mission_control_functions() -> dict:
     finding if that ever changed.
     """
     namespace: dict = {
-        "pd": pd, "np": np, "math": math,
+        "pd": pd, "np": np, "math": math, "contract": contract,
         "db": db, "config": config,
         "__builtins__": __builtins__,
     }
@@ -350,6 +353,7 @@ def load_pipeline() -> dict:
     st = FakeStreamlit()
     namespace: dict = {
         "pd": pd, "np": np, "math": math, "bisect": bisect, "json": json,
+        "contract": contract,
         "Path": Path, "iv_engine": iv_engine, "db": db, "config": config,
         # The nine _load_* wrappers are now memo-and-nothing-else: their bodies
         # call dataaccess.queries. Supplying the REAL module is the point — the

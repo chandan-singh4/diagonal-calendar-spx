@@ -30,11 +30,18 @@ import pandas as pd
 
 import config
 import db
+from core import contract
 
 
 def load_atm_hist(db_path, expiry: str, days: int) -> pd.DataFrame:
-    """At-the-money IV history for one expiry."""
-    rows = db.get_atm_iv_history(db_path, expiry, days)
+    """At-the-money IV history for one expiry.
+
+    Takes a display key but reads by DATE, so on the third Friday both
+    contracts return the same series. `atm_iv_by_expiry` is a daily summary
+    with no settlement column, so there is only one row to return — recorded
+    as BUG-028. Everything derived from `option_rows` does tell them apart.
+    """
+    rows = db.get_atm_iv_history(db_path, contract.date_of(expiry), days)
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame([dict(r) for r in rows])
@@ -69,11 +76,18 @@ def load_atm_hist_fb(db_path, expiry: str, days: int, *, load=None) -> pd.DataFr
 
 def load_contract_hist(db_path, expiry: str, strike: float,
                        side: str, days: int) -> pd.DataFrame:
-    """IV history for one exact contract, widening to 5 days if today is empty."""
+    """IV history for one exact contract, widening to 5 days if today is empty.
+
+    `expiry` is a display key, so the third Friday's two contracts get two
+    different charts rather than one blended one.
+    """
     right_char = "C" if side == "CALL" else "P"
-    rows = db.get_contract_iv_history(db_path, expiry, strike, right_char, days)
+    exp_date, settlement = contract.parse(expiry)
+    rows = db.get_contract_iv_history(db_path, exp_date, strike, right_char,
+                                      days, settlement)
     if not rows and days == 1:
-        rows = db.get_contract_iv_history(db_path, expiry, strike, right_char, 5)
+        rows = db.get_contract_iv_history(db_path, exp_date, strike, right_char,
+                                          5, settlement)
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame([dict(r) for r in rows])
@@ -94,12 +108,27 @@ def load_contract_hist(db_path, expiry: str, strike: float,
 
 
 def load_chain_df(db_path, snapshot_id: int) -> pd.DataFrame:
-    """Full option chain for a snapshot, built into the working DataFrame once."""
+    """Full option chain for a snapshot, built into the working DataFrame once.
+
+    `expiry` is the DISPLAY KEY, not a date: the third Friday appears twice,
+    once as "2026-08-21" for the p.m. contract and once as "2026-08-21 (AM)"
+    for the a.m. one (core/contract.py). Everything downstream keys off this
+    column, so the two contracts stay apart all the way to the screen without
+    every caller needing to know they exist.
+
+    `expiry_date` is kept alongside it as the plain date, because charts and
+    day-count arithmetic need a real date and must not parse the key back.
+    """
     rows = db.get_option_chain(db_path, snapshot_id)
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame([dict(r) for r in rows])
-    df = df.rename(columns={"expiry_date": "expiry"})
+    if "settlement" not in df.columns:
+        df["settlement"] = None
+    df["expiry"] = [
+        contract.key(d, s)
+        for d, s in zip(df["expiry_date"], df["settlement"], strict=True)
+    ]
     df["side"] = df["right"].map({"C": "CALL", "P": "PUT"})
     df["iv"] = df["iv"] * 100  # decimal -> percent, at the load boundary
     return df
@@ -125,8 +154,11 @@ def load_transform_marks(db_path, front: str, back: str, call_s: float,
 
 
 def load_latest_atm_iv(db_path, exp_date: str, n: int = 2) -> list:
-    """The n most recent ATM-IV snapshots for an expiry (as plain dicts)."""
-    rows = db.get_latest_atm_iv_snapshots(db_path, exp_date, n=n)
+    """The n most recent ATM-IV snapshots for an expiry (as plain dicts).
+
+    Reads by date — see load_atm_hist on why the two contracts share these.
+    """
+    rows = db.get_latest_atm_iv_snapshots(db_path, contract.date_of(exp_date), n=n)
     return [dict(r) for r in rows] if rows else []
 
 

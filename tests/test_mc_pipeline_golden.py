@@ -701,10 +701,17 @@ def test_atm_history_fallback_widens_the_window_then_keeps_one_day(pipe):
 
 
 def test_chain_frame_renames_and_converts(pipe):
-    """_load_chain_df is the boundary every other calculation reads from: the
-    column is 'expiry' not 'expiry_date', 'side' is CALL/PUT not C/P, and IV is a
-    percentage. A rename lost here breaks the scanner by KeyError, but the IV
-    conversion fails silently.
+    """_load_chain_df is the boundary every other calculation reads from: 'side'
+    is CALL/PUT not C/P, and IV is a percentage. A rename lost here breaks the
+    scanner by KeyError, but the IV conversion fails silently.
+
+    CHANGED 2026-08-19 (BUG-023 display half): this used to require that
+    'expiry_date' be renamed AWAY, leaving only 'expiry'. Both columns are now
+    kept on purpose and they are different things. 'expiry' is the DISPLAY KEY
+    and is no longer always a date — the third Friday appears twice, as
+    "2026-08-21" and "2026-08-21 (AM)". 'expiry_date' is the plain date that
+    chart and day-count arithmetic needs, so that nobody is tempted to parse
+    the key back into one. See core/contract.py.
     """
     db_path = pipe["_db"]
     make_transform_history(db_path, [6.0])
@@ -712,7 +719,8 @@ def test_chain_frame_renames_and_converts(pipe):
 
     df = pipe["_load_chain_df"](snapshot_id)
 
-    assert "expiry" in df.columns and "expiry_date" not in df.columns
+    assert "expiry" in df.columns and "expiry_date" in df.columns
+    assert "settlement" in df.columns
     assert df["iv"].max() == pytest.approx(18.4), "0.184 stored -> 18.4 charted"
 
     # Assert the MAPPING, not just the vocabulary. `set(df["side"]) <= {"CALL",

@@ -424,6 +424,13 @@ def _mc_legs(snapshot_id: int, gap: float,
             snapshot_id=snapshot_id, expiry_date=expiry, dte=dte,
             strike=float(strike), right=right,
             bid=mark - 0.5, ask=mark + 0.5, mark=mark, last=mark,
+            # Explicitly p.m.-settled. MC_BACK_EXPIRY is a third Friday, the
+            # one date with two contracts, and a row with no settlement
+            # recorded before expiry day is attributed to the a.m. one
+            # (core/contract.py). These fixtures mean today's collection,
+            # which does record it — so say so rather than lean on the
+            # legacy rule.
+            settlement="PM",
             iv=0.184, delta=0.5, gamma=0.01, theta=-0.5, vega=0.2,
             volume=100, open_interest=1000, intrinsic_value=0.0,
             time_value=mark,

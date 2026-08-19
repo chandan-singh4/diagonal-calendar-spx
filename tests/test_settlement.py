@@ -20,9 +20,12 @@ import sqlite3
 
 import pytest
 
+from datetime import date
+
 import db
+from dataaccess import queries
 import schwab_client
-from test_db import add_snapshot, opt, ts_ago
+from test_db import add_snapshot, atm, opt, ts_ago
 
 THIRD_FRIDAY = "2026-08-21"
 STRIKE = 6050.0
@@ -118,7 +121,15 @@ def test_a_caller_that_omits_settlement_gets_a_blank_not_a_crash(temp_db):
     assert db.insert_option_rows(temp_db, [payload]) == 1
 
 
-# ── the readers must not notice ──────────────────────────────────────────────
+# ── the readers keep the two contracts apart ─────────────────────────────────
+#
+# CHANGED 2026-08-19. These checks used to require that every read COLLAPSE the
+# pair down to one row — "store both, show one" — which was the deliberate first
+# step: it got the p.m. prices recorded without disturbing any screen. That step
+# is over. The requirement is now that both survive the read and are told apart
+# by a display key, "2026-08-21" for the p.m. contract and "2026-08-21 (AM)" for
+# the a.m. one (core/contract.py). The old expectations are replaced rather than
+# deleted, so the reversal stays visible to whoever reads this file next.
 
 def _both(sid):
     return [
@@ -127,79 +138,74 @@ def _both(sid):
     ]
 
 
-def test_the_chain_reader_returns_one_row_per_contract(temp_db):
-    """An unguarded read returns TWO rows for this strike, and every six-leg
-    join downstream fans out into the sawtooth."""
-    sid = add_snapshot(temp_db, ts_ago(minutes=5))
-    db.insert_option_rows(temp_db, _both(sid))
-
-    rows = db.get_option_chain(temp_db, sid)
-    assert len(rows) == 1
-    assert rows[0]["mark"] == 2.0, "the a.m. contract is what the dashboard shows"
-
-
 ORDINARY = "2026-08-24"
 
 
-def test_an_ordinary_pm_expiry_is_still_shown(temp_db):
-    """BUG-026 — the mistake that reached production.
-
-    Almost every SPX expiry is an SPXW weekly and therefore P.M.-settled; the
-    a.m. contract exists ONLY on the third-Friday monthly. A guard of
-    `settlement IS NOT 'PM'` therefore hides ~94% of the chain — on the live
-    dashboard it cut a 2,986-row snapshot down to the 160 rows of one expiry.
-    """
-    sid = add_snapshot(temp_db, ts_ago(minutes=5))
-    db.insert_option_rows(temp_db, [
-        opt(sid, ORDINARY, STRIKE, "C", mark=4.0, settlement="PM"),
-    ])
-    rows = db.get_option_chain(temp_db, sid)
-    assert [r["mark"] for r in rows] == [4.0], (
-        "a p.m.-settled weekly with no a.m. twin must still be shown")
-
-
-def test_only_the_shadowed_pm_row_is_hidden(temp_db):
-    """Both rules at once: the monthly shows a.m., the weekly shows p.m."""
-    sid = add_snapshot(temp_db, ts_ago(minutes=5))
-    db.insert_option_rows(temp_db, [
-        opt(sid, THIRD_FRIDAY, STRIKE, "C", mark=2.0, settlement="AM"),
-        opt(sid, THIRD_FRIDAY, STRIKE, "C", mark=9.0, settlement="PM"),
-        opt(sid, ORDINARY,     STRIKE, "C", mark=4.0, settlement="PM"),
-    ])
-    shown = {(r["expiry_date"], r["mark"]) for r in db.get_option_chain(temp_db, sid)}
-    assert shown == {(THIRD_FRIDAY, 2.0), (ORDINARY, 4.0)}
-
-
-def test_a_pm_row_is_hidden_only_for_its_own_strike(temp_db):
-    """The a.m. twin must match strike and side, not merely the expiry date —
-    the monthly lists strikes the a.m. contract does not."""
-    sid = add_snapshot(temp_db, ts_ago(minutes=5))
-    db.insert_option_rows(temp_db, [
-        opt(sid, THIRD_FRIDAY, STRIKE,   "C", mark=2.0, settlement="AM"),
-        opt(sid, THIRD_FRIDAY, STRIKE,   "C", mark=9.0, settlement="PM"),
-        opt(sid, THIRD_FRIDAY, STRIKE+5, "C", mark=7.0, settlement="PM"),
-        opt(sid, THIRD_FRIDAY, STRIKE,   "P", mark=6.0, settlement="PM"),
-    ])
-    shown = sorted(r["mark"] for r in db.get_option_chain(temp_db, sid))
-    assert shown == [2.0, 6.0, 7.0]
-
-
-def test_the_iv_history_reader_ignores_the_shadowed_pm_contract(temp_db):
+def test_the_chain_reader_returns_both_contracts(temp_db):
+    """The whole point of the display half: neither price may be dropped."""
     sid = add_snapshot(temp_db, ts_ago(minutes=5))
     db.insert_option_rows(temp_db, _both(sid))
 
-    history = db.get_contract_iv_history(temp_db, THIRD_FRIDAY, STRIKE, "C")
-    assert [r["iv"] for r in history] == [0.18]
+    rows = db.get_option_chain(temp_db, sid)
+    assert sorted(r["mark"] for r in rows) == [2.0, 9.0]
+    assert sorted(r["settlement"] for r in rows) == ["AM", "PM"]
+
+
+def test_the_chain_reader_leaves_an_ordinary_expiry_with_one_row(temp_db):
+    """A weekly lists one contract and must not sprout a second."""
+    sid = add_snapshot(temp_db, ts_ago(minutes=5))
+    db.insert_option_rows(temp_db, [
+        opt(sid, ORDINARY, STRIKE, "C", mark=4.0, settlement="PM")])
+    assert len(db.get_option_chain(temp_db, sid)) == 1
+
+
+def test_the_load_boundary_gives_the_two_contracts_two_display_keys(temp_db):
+    """Where a row becomes something the screen can offer in a dropdown."""
+    sid = add_snapshot(temp_db, ts_ago(minutes=5))
+    db.insert_option_rows(temp_db, _both(sid) + [
+        opt(sid, ORDINARY, STRIKE, "C", mark=4.0, settlement="PM")])
+
+    df = queries.load_chain_df(temp_db, sid)
+    assert sorted(df["expiry"].unique()) == [
+        "2026-08-21", "2026-08-21 (AM)", "2026-08-24"]
+    # the p.m. contract keeps the bare key, so nothing saved earlier moves
+    bare = df[df["expiry"] == THIRD_FRIDAY]
+    assert bare["mark"].tolist() == [9.0]
+
+
+def test_the_load_boundary_keeps_a_real_date_alongside_the_key(temp_db):
+    """'expiry' stops being parseable as a date; 'expiry_date' must remain so,
+    or every chart that does day arithmetic breaks at once."""
+    sid = add_snapshot(temp_db, ts_ago(minutes=5))
+    db.insert_option_rows(temp_db, _both(sid))
+
+    df = queries.load_chain_df(temp_db, sid)
+    assert set(df["expiry_date"]) == {THIRD_FRIDAY}
+    for value in df["expiry_date"]:
+        date.fromisoformat(value)
+
+
+def test_the_iv_history_reader_separates_the_two_contracts(temp_db):
+    """One chart each, not one blended chart. Passing the display key straight
+    through is what keeps them apart."""
+    sid = add_snapshot(temp_db, ts_ago(minutes=5))
+    db.insert_option_rows(temp_db, _both(sid))
+
+    am = queries.load_contract_hist(temp_db, "2026-08-21 (AM)", STRIKE, "CALL", 5)
+    pm = queries.load_contract_hist(temp_db, "2026-08-21", STRIKE, "CALL", 5)
+    assert am["iv"].tolist() == [18.0]
+    assert pm["iv"].tolist() == [44.0]
 
 
 def test_the_iv_history_reader_still_returns_an_ordinary_pm_expiry(temp_db):
-    """BUG-026 at the chart that drives Strike Detail."""
+    """BUG-026 at the chart that drives Strike Detail: nearly every expiry is
+    p.m.-settled, so this is the common case, not the exotic one."""
     sid = add_snapshot(temp_db, ts_ago(minutes=5))
     db.insert_option_rows(temp_db, [
         opt(sid, ORDINARY, STRIKE, "C", iv=0.21, settlement="PM")])
 
-    history = db.get_contract_iv_history(temp_db, ORDINARY, STRIKE, "C")
-    assert [r["iv"] for r in history] == [0.21]
+    hist = queries.load_contract_hist(temp_db, ORDINARY, STRIKE, "CALL", 5)
+    assert hist["iv"].tolist() == [21.0]
 
 
 def test_legacy_rows_are_still_read(temp_db):
@@ -385,3 +391,103 @@ def test_collector_summary_covers_every_expiry_not_just_the_monthly():
     rows.append((THIRD_FRIDAY, STRIKE, "CALL", "AM", 0.18))
     kept = collector._shown_contract_only(_chain(*rows))
     assert kept["expiry"].nunique() == 21
+
+
+# ── the two mark-history charts ──────────────────────────────────────────────
+#
+# These are the reads behind the Entry Analysis charts, and they are where a
+# display key does the most work: each takes a front AND a back contract, and
+# the front may be the a.m. one while the back is an ordinary weekly. Until
+# 2026-08-19 they collapsed the pair, so the a.m. row won and the p.m. prices
+# were invisible on every chart at once.
+
+BACK = "2026-09-16"          # an ordinary weekly, one contract only
+CALL_S, PUT_S = 6050.0, 5950.0
+
+
+def _six_legs(sid, *, front, front_settlement, front_call_mark):
+    """The six legs both charts need, at one snapshot."""
+    def leg(expiry, strike, right, mark, settlement):
+        return opt(sid, expiry, strike, right, mark=mark, bid=mark - 0.5,
+                   ask=mark + 0.5, settlement=settlement)
+    return [
+        leg(front, CALL_S, "C", front_call_mark, front_settlement),
+        leg(front, PUT_S, "P", 10.0, front_settlement),
+        leg(BACK, CALL_S, "C", 30.0, "PM"),
+        leg(BACK, PUT_S, "P", 30.0, "PM"),
+        leg(front, CALL_S + 5, "C", 5.0, front_settlement),
+        leg(front, PUT_S - 5, "P", 5.0, front_settlement),
+    ]
+
+
+@pytest.fixture()
+def two_front_contracts(temp_db):
+    """One snapshot carrying BOTH third-Friday contracts as the front leg,
+    priced differently — the a.m. one cheaper, as it is in the real chain,
+    because it has a day less of life left."""
+    sid = add_snapshot(temp_db, ts_ago(minutes=5))
+    db.insert_option_rows(temp_db,
+        _six_legs(sid, front=THIRD_FRIDAY, front_settlement="AM",
+                  front_call_mark=6.95)
+        + _six_legs(sid, front=THIRD_FRIDAY, front_settlement="PM",
+                    front_call_mark=9.05))
+    return temp_db, sid
+
+
+def test_the_mark_history_chart_prices_the_two_contracts_apart(two_front_contracts):
+    """The number Chandan reads off the screen. One key must not return the
+    other contract's price, and neither may return a blend of the two."""
+    db_path, _ = two_front_contracts
+
+    def front_call(key):
+        rows = db.get_transform_mark_history(db_path, key, BACK,
+                                             CALL_S, PUT_S, days=5)
+        assert len(rows) == 1, f"{key!r} gave {len(rows)} rows, expected 1"
+        return rows[0]["front_call_mark"]
+
+    assert front_call(THIRD_FRIDAY) == 9.05
+    assert front_call(THIRD_FRIDAY + " (AM)") == 6.95
+
+
+def test_the_diagonal_scatter_prices_the_two_contracts_apart(two_front_contracts):
+    """Same again for the scatter, which additionally joins the daily ATM-IV
+    summary. That table has no settlement column, so both contracts share one
+    IV row (BUG-028) — but the MARKS, which come from option_rows, must still
+    be told apart."""
+    db_path, sid = two_front_contracts
+    db.insert_atm_iv_records(db_path, [atm(sid, e, 0.20)
+                                       for e in (THIRD_FRIDAY, BACK)])
+
+    def front_call(key):
+        rows = db.get_diagonal_history(db_path, key, BACK,
+                                       CALL_S, PUT_S, days=5)
+        assert len(rows) == 1, f"{key!r} gave {len(rows)} rows, expected 1"
+        return rows[0]["front_call_mark"]
+
+    assert front_call(THIRD_FRIDAY) == 9.05
+    assert front_call(THIRD_FRIDAY + " (AM)") == 6.95
+
+
+def test_an_ordinary_weekly_front_is_unaffected(temp_db):
+    """Nearly every chart Chandan draws has a weekly on both legs. The label
+    machinery must be invisible there."""
+    sid = add_snapshot(temp_db, ts_ago(minutes=5))
+    db.insert_option_rows(temp_db,
+        _six_legs(sid, front=ORDINARY, front_settlement="PM",
+                  front_call_mark=7.0))
+
+    rows = db.get_transform_mark_history(temp_db, ORDINARY, BACK,
+                                         CALL_S, PUT_S, days=5)
+    assert [r["front_call_mark"] for r in rows] == [7.0]
+
+
+def test_a_weekly_front_has_no_am_contract_to_chart(temp_db):
+    """Asking for an a.m. contract where none was ever listed returns nothing,
+    rather than quietly handing back the p.m. one under the wrong name."""
+    sid = add_snapshot(temp_db, ts_ago(minutes=5))
+    db.insert_option_rows(temp_db,
+        _six_legs(sid, front=ORDINARY, front_settlement="PM",
+                  front_call_mark=7.0))
+
+    assert db.get_transform_mark_history(temp_db, ORDINARY + " (AM)", BACK,
+                                         CALL_S, PUT_S, days=5) == []

@@ -197,3 +197,51 @@ def test_the_app_purges_before_it_reads_locks():
         "_load_entry_locks no longer purges; expired locks will reappear "
         "everywhere the file is read"
     )
+
+
+# ---------------------------------------------------------------------------
+# The a.m. contract's labelled key (BUG-023 display half)
+#
+# `is_expired` is the only rule whose answer causes records to be DELETED
+# (ADR-039). A display key for the a.m. contract is "2026-08-21 (AM)", which is
+# not a date — and the failure would be silent rather than loud, because
+# entry_locks catches ValueError and KEEPS the lock. So a labelled position
+# would never expire and the locks file would grow forever: exactly the leak
+# that rule was written to stop.
+# ---------------------------------------------------------------------------
+
+AM_KEY = "2026-08-21 (AM)"
+BARE_KEY = "2026-08-21"
+
+
+def _et(y, m, d, hh, mm):
+    return datetime(y, m, d, hh, mm, tzinfo=NY)
+
+
+def test_a_labelled_position_expires_rather_than_lingering_forever():
+    assert expiry_rule.is_expired(AM_KEY, _et(2026, 8, 22, 10, 0)) is True
+
+
+def test_a_labelled_position_is_not_expired_the_day_before():
+    assert expiry_rule.is_expired(AM_KEY, _et(2026, 8, 20, 10, 0)) is False
+
+
+def test_a_labelled_key_expires_at_the_same_moment_as_a_bare_one():
+    """Deliberate, and recorded as BUG-027: the a.m. contract really stops
+    trading the evening before and settles at the open, so it is over earlier.
+    Modelling that DELETES markers sooner, so it is a separate decision."""
+    for now in (_et(2026, 8, 21, 16, 14), _et(2026, 8, 21, 16, 15)):
+        assert expiry_rule.is_expired(AM_KEY, now) == expiry_rule.is_expired(BARE_KEY, now)
+
+
+def test_a_labelled_key_still_refuses_a_naive_clock():
+    """The label must not become a way round the timezone guard."""
+    with pytest.raises(ValueError):
+        expiry_rule.is_expired(AM_KEY, datetime(2026, 8, 22, 10, 0))
+
+
+def test_a_key_that_is_neither_a_date_nor_a_label_still_raises():
+    """Anything unrecognised must stay loud, so the caller keeps the lock for a
+    human rather than quietly treating it as expired."""
+    with pytest.raises(ValueError):
+        expiry_rule.is_expired("not a date at all", _et(2026, 8, 22, 10, 0))

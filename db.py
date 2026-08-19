@@ -51,6 +51,7 @@ from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import config
+from core import contract
 
 logger = logging.getLogger(__name__)
 
@@ -450,33 +451,15 @@ def finalize_snapshot(db_path: str,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Which contract the dashboard shows  (BUG-023 / BUG-026)
+# Which contract does a history read mean?  (BUG-023)
 # ─────────────────────────────────────────────────────────────────────────────
 #
-# Almost every SPX expiry is an SPXW weekly, which is P.M.-settled. Only the
-# third-Friday monthly also lists an A.M.-settled contract. So "settlement != PM"
-# is NOT the rule — it discards ~94% of the chain. The rule that reproduces what
-# the dashboard has always displayed is:
-#
-#     show the a.m. contract where one exists, otherwise show the p.m. one
-#
-# which is exactly "drop a p.m. row only when an a.m. twin exists for the same
-# snapshot, expiry, strike and side". No calendar arithmetic, so nothing has to
-# know which Friday is the third one; it reads the answer off the data.
-#
-# Cost: the subquery's four columns are the leading four of
-# uq_option_rows_contract_settle, so it resolves as an index seek.
-
-def _shown_contract(alias: str) -> str:
-    """SQL predicate selecting the single contract the dashboard displays."""
-    return f"""NOT ({alias}.settlement = 'PM' AND EXISTS (
-                SELECT 1 FROM option_rows _am
-                 WHERE _am.snapshot_id = {alias}.snapshot_id
-                   AND _am.expiry_date = {alias}.expiry_date
-                   AND _am.strike      = {alias}.strike
-                   AND _am.right       = {alias}.right
-                   AND _am.settlement  = 'AM'))"""
-
+# It used to collapse the third Friday's two contracts to one here, so that a
+# caller handing in a date got a single series back. That is what hid the p.m.
+# prices from every screen at once, and it is gone. Every history read below
+# now takes a DISPLAY KEY — a date plus, for the a.m. contract only, a label —
+# and builds its predicate with core.contract.match_clause, which also decides
+# which of the two an old unlabelled row belongs to. See core/contract.py.
 
 def insert_option_rows(db_path: str, rows: list[dict]) -> int:
     """
@@ -655,39 +638,45 @@ def get_option_chain(db_path: str, snapshot_id: int) -> list:
 
     Results ordered by expiry_date, strike, right for consistent display.
     IVs are in decimal form — app.py multiplies by 100 at the load boundary.
+
+    RETURNS BOTH THIRD-FRIDAY CONTRACTS, one row each. Telling them apart is the
+    `settlement` column, and the load boundary turns the pair into one display
+    key per contract (dataaccess/queries.load_chain_df, core/contract.py). This
+    read deliberately does NOT collapse them: doing so here is what hid the p.m.
+    prices from every screen at once, and a reader that silently drops half the
+    contracts is indistinguishable from one that has no data.
     """
     with get_conn(db_path) as conn:
         return conn.execute(
             """
             SELECT * FROM option_rows
             WHERE snapshot_id = ?
-              AND NOT (option_rows.settlement = 'PM' AND EXISTS (
-                  SELECT 1 FROM option_rows _am
-                   WHERE _am.snapshot_id = option_rows.snapshot_id
-                     AND _am.expiry_date = option_rows.expiry_date
-                     AND _am.strike      = option_rows.strike
-                     AND _am.right       = option_rows.right
-                     AND _am.settlement  = 'AM'))
-            ORDER BY expiry_date, strike, right
+            ORDER BY expiry_date, strike, right, settlement
             """,
             (snapshot_id,)
         ).fetchall()
 
 
 def get_contract_iv_history(db_path: str, expiry_date: str, strike: float,
-                              right: str, days: int = 30) -> list:
+                              right: str, days: int = 30,
+                              settlement: str | None = None) -> list:
     """
     IV time-series for a specific option contract over the last N days.
     Drives the 'Selected-Strike IV' chart in the dashboard.
 
     right: 'C' or 'P' (not 'CALL'/'PUT').
+    settlement: 'AM' for the third-Friday morning contract, None for the
+    ordinary one. None also matches rows recorded before 2026-08-19, which
+    carry no settlement at all — see core/contract.py for how those are
+    attributed, and why the rule is read off the calendar date rather than
+    guessed. Callers hand this in already parsed from the display key.
     IVs are in decimal form — app.py multiplies by 100 at the load boundary.
 
     Performance: uses idx_option_rows_contract_snap (covering index).
     """
     with get_conn(db_path) as conn:
         return conn.execute(
-            """
+            f"""
             SELECT
                 s.snapshot_timestamp,
                 s.underlying_price,
@@ -700,13 +689,7 @@ def get_contract_iv_history(db_path: str, expiry_date: str, strike: float,
             WHERE o.expiry_date = ?
               AND o.strike      = ?
               AND o.right       = ?
-              AND NOT (o.settlement = 'PM' AND EXISTS (
-                  SELECT 1 FROM option_rows _am
-                   WHERE _am.snapshot_id = o.snapshot_id
-                     AND _am.expiry_date = o.expiry_date
-                     AND _am.strike      = o.strike
-                     AND _am.right       = o.right
-                     AND _am.settlement  = 'AM'))
+              AND {contract.match_clause(expiry_date, settlement, rows="o", snaps="s")}
               AND s.status      = 'COMPLETE'
               AND s.snapshot_timestamp >= datetime('now', ?, 'utc')
             ORDER BY s.snapshot_timestamp
@@ -775,6 +758,8 @@ def get_entry_iv_context(db_path: str, entry_ts_utc: str,
         return ((f * b) ** 0.5) if (f and b and f > 0 and b > 0) else None
 
     cs, ps = float(call_strike), float(put_strike)
+    front_date, front_settle = contract.parse(front_expiry)
+    back_date, back_settle = contract.parse(back_expiry)
     with get_conn(db_path) as conn:
         snap = conn.execute(
             """
@@ -792,33 +777,34 @@ def get_entry_iv_context(db_path: str, entry_ts_utc: str,
             return None
         sid = snap["snapshot_id"]
 
+        # Each leg carries its own contract, so the match clause goes INSIDE
+        # each branch rather than once around the lot — the front leg may be
+        # the a.m. contract while the back leg is an ordinary p.m. one.
+        fm = contract.match_clause(front_date, front_settle, rows="o", snaps="s")
+        bm = contract.match_clause(back_date, back_settle, rows="o", snaps="s")
         leg_rows = conn.execute(
-            """
-            SELECT expiry_date, strike, right, iv
-            FROM option_rows
-            WHERE snapshot_id = ?
-              AND NOT (option_rows.settlement = 'PM' AND EXISTS (
-                  SELECT 1 FROM option_rows _am
-                   WHERE _am.snapshot_id = option_rows.snapshot_id
-                     AND _am.expiry_date = option_rows.expiry_date
-                     AND _am.strike      = option_rows.strike
-                     AND _am.right       = option_rows.right
-                     AND _am.settlement  = 'AM'))
-              AND ( (expiry_date = ? AND strike = ? AND right = 'C')
-                 OR (expiry_date = ? AND strike = ? AND right = 'P')
-                 OR (expiry_date = ? AND strike = ? AND right = 'C')
-                 OR (expiry_date = ? AND strike = ? AND right = 'P') )
+            f"""
+            SELECT o.expiry_date, o.strike, o.right, o.iv
+            FROM option_rows o JOIN snapshots s USING (snapshot_id)
+            WHERE o.snapshot_id = ?
+              AND ( (o.expiry_date = ? AND o.strike = ? AND o.right = 'C' AND {fm})
+                 OR (o.expiry_date = ? AND o.strike = ? AND o.right = 'P' AND {fm})
+                 OR (o.expiry_date = ? AND o.strike = ? AND o.right = 'C' AND {bm})
+                 OR (o.expiry_date = ? AND o.strike = ? AND o.right = 'P' AND {bm}) )
             """,
-            (sid, front_expiry, cs, front_expiry, ps,
-             back_expiry, cs, back_expiry, ps),
+            (sid, front_date, cs, front_date, ps,
+             back_date, cs, back_date, ps),
         ).fetchall()
 
+        # Keyed on the plain date, not the display key: the clause above has
+        # already picked the right contract, and a legacy row attributed to the
+        # a.m. side still carries no settlement of its own to rebuild a key from.
         legs = {(r["expiry_date"], float(r["strike"]), r["right"]): r["iv"]
                 for r in leg_rows}
-        front_iv = _mean([legs.get((front_expiry, cs, "C")),
-                          legs.get((front_expiry, ps, "P"))])
-        back_iv = _mean([legs.get((back_expiry, cs, "C")),
-                         legs.get((back_expiry, ps, "P"))])
+        front_iv = _mean([legs.get((front_date, cs, "C")),
+                          legs.get((front_date, ps, "P"))])
+        back_iv = _mean([legs.get((back_date, cs, "C")),
+                         legs.get((back_date, ps, "P"))])
 
         atm_rows = conn.execute(
             """
@@ -826,10 +812,10 @@ def get_entry_iv_context(db_path: str, entry_ts_utc: str,
             FROM atm_iv_by_expiry
             WHERE snapshot_id = ? AND expiry_date IN (?, ?)
             """,
-            (sid, front_expiry, back_expiry),
+            (sid, front_date, back_date),
         ).fetchall()
         atm = {r["expiry_date"]: r["atm_avg_iv"] for r in atm_rows}
-        atm_front, atm_back = atm.get(front_expiry), atm.get(back_expiry)
+        atm_front, atm_back = atm.get(front_date), atm.get(back_date)
 
     return {
         "snapshot_id": sid,
@@ -945,9 +931,19 @@ def get_diagonal_history(
     IVs are in decimal form (as stored in atm_iv_by_expiry) — multiply ×100
     at the caller if percentage display is needed.
     """
+    front_date, front_settle = contract.parse(front_expiry)
+    back_date, back_settle = contract.parse(back_expiry)
+    def _m(alias, front):
+        return contract.match_clause(front_date if front else back_date,
+                                     front_settle if front else back_settle,
+                                     rows=alias, snaps="s")
     with get_conn(db_path) as conn:
+        ofc_match = _m("ofc", True)
+        ofp_match = _m("ofp", True)
+        obc_match = _m("obc", False)
+        obp_match = _m("obp", False)
         return conn.execute(
-            """
+            f"""
             SELECT
                 s.snapshot_timestamp,
                 s.underlying_price                              AS spx,
@@ -969,43 +965,19 @@ def get_diagonal_history(
             LEFT JOIN option_rows ofc
                 ON ofc.snapshot_id = s.snapshot_id
                AND ofc.expiry_date = ? AND ofc.strike = ? AND ofc.right = 'C'
-               AND NOT (ofc.settlement = 'PM' AND EXISTS (
-                   SELECT 1 FROM option_rows _am
-                    WHERE _am.snapshot_id = ofc.snapshot_id
-                      AND _am.expiry_date = ofc.expiry_date
-                      AND _am.strike      = ofc.strike
-                      AND _am.right       = ofc.right
-                      AND _am.settlement  = 'AM'))
+               AND {ofc_match}
             LEFT JOIN option_rows obc
                 ON obc.snapshot_id = s.snapshot_id
                AND obc.expiry_date = ? AND obc.strike = ? AND obc.right = 'C'
-               AND NOT (obc.settlement = 'PM' AND EXISTS (
-                   SELECT 1 FROM option_rows _am
-                    WHERE _am.snapshot_id = obc.snapshot_id
-                      AND _am.expiry_date = obc.expiry_date
-                      AND _am.strike      = obc.strike
-                      AND _am.right       = obc.right
-                      AND _am.settlement  = 'AM'))
+               AND {obc_match}
             LEFT JOIN option_rows ofp
                 ON ofp.snapshot_id = s.snapshot_id
                AND ofp.expiry_date = ? AND ofp.strike = ? AND ofp.right = 'P'
-               AND NOT (ofp.settlement = 'PM' AND EXISTS (
-                   SELECT 1 FROM option_rows _am
-                    WHERE _am.snapshot_id = ofp.snapshot_id
-                      AND _am.expiry_date = ofp.expiry_date
-                      AND _am.strike      = ofp.strike
-                      AND _am.right       = ofp.right
-                      AND _am.settlement  = 'AM'))
+               AND {ofp_match}
             LEFT JOIN option_rows obp
                 ON obp.snapshot_id = s.snapshot_id
                AND obp.expiry_date = ? AND obp.strike = ? AND obp.right = 'P'
-               AND NOT (obp.settlement = 'PM' AND EXISTS (
-                   SELECT 1 FROM option_rows _am
-                    WHERE _am.snapshot_id = obp.snapshot_id
-                      AND _am.expiry_date = obp.expiry_date
-                      AND _am.strike      = obp.strike
-                      AND _am.right       = obp.right
-                      AND _am.settlement  = 'AM'))
+               AND {obp_match}
             WHERE s.status = 'COMPLETE'
               AND s.snapshot_timestamp >= datetime('now', ?, 'utc')
               AND COALESCE(ofc.mark, (ofc.bid + ofc.ask) / 2.0) IS NOT NULL
@@ -1018,11 +990,11 @@ def get_diagonal_history(
             ORDER BY s.snapshot_timestamp
             """,
             (
-                front_expiry, back_expiry,
-                front_expiry, float(call_strike),
-                back_expiry,  float(call_strike),
-                front_expiry, float(put_strike),
-                back_expiry,  float(put_strike),
+                front_date, back_date,   # atm_iv_by_expiry has no settlement — BUG-028
+                front_date, float(call_strike),
+                back_date,  float(call_strike),
+                front_date, float(put_strike),
+                back_date,  float(put_strike),
                 f"-{days} days",
             ),
         ).fetchall()
@@ -1058,9 +1030,21 @@ def get_transform_mark_history(
         transform_mark = (back_call_mark + back_put_mark)
                         - (front_wing_call_mark + front_wing_put_mark)
     """
+    front_date, front_settle = contract.parse(front_expiry)
+    back_date, back_settle = contract.parse(back_expiry)
+    def _m(alias, front):
+        return contract.match_clause(front_date if front else back_date,
+                                     front_settle if front else back_settle,
+                                     rows=alias, snaps="s")
     with get_conn(db_path) as conn:
+        ofc_match = _m("ofc", True)
+        ofp_match = _m("ofp", True)
+        owc_match = _m("owc", True)
+        owp_match = _m("owp", True)
+        obc_match = _m("obc", False)
+        obp_match = _m("obp", False)
         return conn.execute(
-            """
+            f"""
             SELECT
                 s.snapshot_timestamp,
                 s.underlying_price                            AS spx,
@@ -1074,63 +1058,27 @@ def get_transform_mark_history(
             LEFT JOIN option_rows ofc
                 ON ofc.snapshot_id = s.snapshot_id
                AND ofc.expiry_date = ? AND ofc.strike = ? AND ofc.right = 'C'
-               AND NOT (ofc.settlement = 'PM' AND EXISTS (
-                   SELECT 1 FROM option_rows _am
-                    WHERE _am.snapshot_id = ofc.snapshot_id
-                      AND _am.expiry_date = ofc.expiry_date
-                      AND _am.strike      = ofc.strike
-                      AND _am.right       = ofc.right
-                      AND _am.settlement  = 'AM'))
+               AND {ofc_match}
             LEFT JOIN option_rows obc
                 ON obc.snapshot_id = s.snapshot_id
                AND obc.expiry_date = ? AND obc.strike = ? AND obc.right = 'C'
-               AND NOT (obc.settlement = 'PM' AND EXISTS (
-                   SELECT 1 FROM option_rows _am
-                    WHERE _am.snapshot_id = obc.snapshot_id
-                      AND _am.expiry_date = obc.expiry_date
-                      AND _am.strike      = obc.strike
-                      AND _am.right       = obc.right
-                      AND _am.settlement  = 'AM'))
+               AND {obc_match}
             LEFT JOIN option_rows ofp
                 ON ofp.snapshot_id = s.snapshot_id
                AND ofp.expiry_date = ? AND ofp.strike = ? AND ofp.right = 'P'
-               AND NOT (ofp.settlement = 'PM' AND EXISTS (
-                   SELECT 1 FROM option_rows _am
-                    WHERE _am.snapshot_id = ofp.snapshot_id
-                      AND _am.expiry_date = ofp.expiry_date
-                      AND _am.strike      = ofp.strike
-                      AND _am.right       = ofp.right
-                      AND _am.settlement  = 'AM'))
+               AND {ofp_match}
             LEFT JOIN option_rows obp
                 ON obp.snapshot_id = s.snapshot_id
                AND obp.expiry_date = ? AND obp.strike = ? AND obp.right = 'P'
-               AND NOT (obp.settlement = 'PM' AND EXISTS (
-                   SELECT 1 FROM option_rows _am
-                    WHERE _am.snapshot_id = obp.snapshot_id
-                      AND _am.expiry_date = obp.expiry_date
-                      AND _am.strike      = obp.strike
-                      AND _am.right       = obp.right
-                      AND _am.settlement  = 'AM'))
+               AND {obp_match}
             LEFT JOIN option_rows owc
                 ON owc.snapshot_id = s.snapshot_id
                AND owc.expiry_date = ? AND owc.strike = ? AND owc.right = 'C'
-               AND NOT (owc.settlement = 'PM' AND EXISTS (
-                   SELECT 1 FROM option_rows _am
-                    WHERE _am.snapshot_id = owc.snapshot_id
-                      AND _am.expiry_date = owc.expiry_date
-                      AND _am.strike      = owc.strike
-                      AND _am.right       = owc.right
-                      AND _am.settlement  = 'AM'))
+               AND {owc_match}
             LEFT JOIN option_rows owp
                 ON owp.snapshot_id = s.snapshot_id
                AND owp.expiry_date = ? AND owp.strike = ? AND owp.right = 'P'
-               AND NOT (owp.settlement = 'PM' AND EXISTS (
-                   SELECT 1 FROM option_rows _am
-                    WHERE _am.snapshot_id = owp.snapshot_id
-                      AND _am.expiry_date = owp.expiry_date
-                      AND _am.strike      = owp.strike
-                      AND _am.right       = owp.right
-                      AND _am.settlement  = 'AM'))
+               AND {owp_match}
             WHERE s.status = 'COMPLETE'
               AND s.snapshot_timestamp >= datetime('now', ?, 'utc')
               AND COALESCE(ofc.mark, (ofc.bid + ofc.ask) / 2.0) IS NOT NULL
@@ -1148,12 +1096,12 @@ def get_transform_mark_history(
             ORDER BY s.snapshot_timestamp
             """,
             (
-                front_expiry, float(call_strike),
-                back_expiry,  float(call_strike),
-                front_expiry, float(put_strike),
-                back_expiry,  float(put_strike),
-                front_expiry, float(call_strike) + 5,
-                front_expiry, float(put_strike)  - 5,
+                front_date, float(call_strike),
+                back_date,  float(call_strike),
+                front_date, float(put_strike),
+                back_date,  float(put_strike),
+                front_date, float(call_strike) + 5,
+                front_date, float(put_strike)  - 5,
                 f"-{days} days",
             ),
         ).fetchall()
