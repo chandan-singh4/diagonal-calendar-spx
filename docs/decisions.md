@@ -7,6 +7,74 @@ it was recorded here.
 
 ---
 
+## ADR-046 — The a.m. and p.m. third-Friday options are two different contracts, and the record now says which
+**Date:** 2026-08-19 · **Status:** Accepted
+
+**Context:** On the third Friday of each month SPX lists two options for the same date and
+strike: the traditional monthly, which settles at the OPENING price and stops trading the
+evening before, and the weekly (SPXW), which trades all day and settles at the CLOSE. On expiry
+day one is already finished while the other has a full session of decay left — for a strategy
+built on the decay gap between two expiries, they are not interchangeable.
+
+Schwab returns both under one expiry key. `chain_to_dataframe` discarded the contract symbol —
+the only field distinguishing them — and `uq_option_rows_contract(snapshot_id, expiry_date,
+strike, right)` had no room for the difference, so `INSERT OR IGNORE` dropped the second.
+**Exactly 160 rows per cycle, 2,181 identical warnings, for the whole life of the project.**
+The steady number was itself the evidence: 160 = 80 calls + 80 puts = precisely one expiry.
+
+**Decision:**
+1. **Store both.** A `settlement` column on `option_rows` holds `'AM'`, `'PM'`, or NULL, read
+   from Schwab's `settlementType` and falling back to the `SPXW` symbol root.
+2. **NULL means "not recorded", never "a.m."** Every pre-2026-08-19 row is NULL.
+3. **Uniqueness now spans settlement**, via `COALESCE(settlement, '?')` — SQLite treats each
+   NULL in a UNIQUE index as distinct, so indexing the bare column would have stopped
+   deduplicating the legacy rows and reopened the six-leg fan-out of ADR-022.
+4. **Every existing read shows one contract per (expiry, strike, side): the a.m. one where an
+   a.m. one exists, otherwise the p.m. one.** `atm_iv_by_expiry` is computed from that same
+   slice. Nothing on screen changes. Showing the shadowed p.m. prices is a separate, deliberate
+   decision.
+5. **That rule is read off the data, never from calendar arithmetic** — a `NOT EXISTS` lookup
+   for an a.m. twin at the same expiry, strike and side. It needs no list of third Fridays, no
+   holiday table, and it stays correct on a monthly whose a.m. contract does not list every
+   strike the p.m. one does.
+
+**Why the readers had to be pinned in the same change:** `atm_iv_by_expiry` stores one row per
+expiry per snapshot and has **no uniqueness constraint**. An unguarded grouping would have
+written two conflicting rows for every third Friday and silently corrupted the term structure
+the whole analytics layer rests on. Storing the p.m. contract without pinning the readers would
+have been a worse bug than the one being fixed.
+
+**Alternatives rejected:** *Stamp the legacy rows 'AM'* — wrong on precisely the day that
+matters, because on each past expiry day the a.m. contract had already settled out of the chain
+and the p.m. one took the slot unnoticed (BUG-024). *Store only the p.m. contract* — discards
+the a.m. contract's much larger open interest and breaks every existing chart. *Keep dropping
+one and document it* — the loss is permanent and unrecoverable; every cycle deferred is p.m.
+data that cannot be bought back.
+
+**The near-miss worth recording, because the first attempt shipped it.** Point 4 was first
+written as `settlement IS NOT 'PM'`, on the assumption that p.m. was the *extra* contract. It is
+the reverse: almost every SPX expiry is an SPXW weekly and therefore p.m.-settled, and the a.m.
+contract exists **only** on the third-Friday monthly. That guard threw away ~94% of the chain.
+It reached the live collector, which reported `ATM IV computed for 1/20 expiries` for three
+cycles before the post-deployment check caught it (BUG-026). **The lesson: a guard phrased as
+"exclude the special case" only works if you have correctly identified which case is special.**
+Phrased as "prefer the a.m. contract where one exists" the rule cannot make that mistake,
+because it names what to keep rather than what to drop.
+
+**Tradeoff:** p.m. history begins 2026-08-19 and there is no way to obtain any earlier. The
+database grows ~5% faster (roughly 160 extra rows per cycle on ~3,000).
+
+**Rehearsed, not assumed:** run against a consistent read-only copy of the real 2.7 GB file —
+**36.2 s, 14,305,769 rows before and after, `PRAGMA integrity_check` ok.** Adding the column is
+O(1) in SQLite; rebuilding the index is the only part that reads the table, and it changes no row.
+
+**Deployment order is load-bearing:** only `collector.py` calls `init_db()`, so the collector
+must be restarted — which runs the migration — **before** the dashboard serves the new code.
+Opening the dashboard first against an unmigrated database fails with `OperationalError: no
+such column: settlement`.
+
+---
+
 ## ADR-045 — The watchdog runs outside the dashboard, and "no news" is not "all clear"
 **Date:** 2026-08-09 · **Status:** ACCEPTED · **Closes M3.4** · **Supersedes nothing**
 

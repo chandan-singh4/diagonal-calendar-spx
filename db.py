@@ -113,6 +113,15 @@ CREATE TABLE IF NOT EXISTS option_rows (
     strike           REAL    NOT NULL,
     right            TEXT    NOT NULL
                          CHECK(right IN ('C', 'P')),
+    -- 'AM' | 'PM' | NULL. NULL means NOT RECORDED, not 'AM' (BUG-023).
+    -- Every row written before 2026-08-19 is NULL: the collector could not tell
+    -- the two apart, so it kept whichever the broker happened to list first.
+    -- That was the a.m. monthly on ordinary days and the p.m. weekly on the
+    -- expiry day itself, when the a.m. contract had already settled and dropped
+    -- out of the chain. Stamping those rows 'AM' would therefore be wrong on
+    -- precisely the day that matters most. They stay blank and honest.
+    settlement       TEXT
+                         CHECK(settlement IS NULL OR settlement IN ('AM', 'PM')),
     bid              REAL,
     ask              REAL,
     mark             REAL,
@@ -150,6 +159,12 @@ CREATE TABLE IF NOT EXISTS option_rows (
 -- current volume each costs 100-220 MB and is maintained on every insert.
 CREATE INDEX IF NOT EXISTS idx_option_rows_contract_snap
     ON option_rows(expiry_date, strike, right, snapshot_id);
+
+-- uq_option_rows_contract_settle is deliberately NOT created here. A UNIQUE
+-- index cannot be built over a table that still holds duplicates, and _DDL runs
+-- BEFORE the deduplication migration below. Creating it here crashes init_db on
+-- exactly the legacy databases the migration exists to repair. It is created in
+-- init_db() instead, after the duplicates are gone — see the BUG-023 block.
 
 -- ── atm_iv_by_expiry ──────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS atm_iv_by_expiry (
@@ -283,9 +298,18 @@ def init_db(db_path: str | None = None) -> None:
         # a sawtooth. Deduplicate ONCE (keeping the earliest row per contract),
         # then create a UNIQUE index so it can never recur. Guarded on the index
         # so the (potentially expensive) DELETE runs only the first time.
+        # The guard must name BOTH indexes (BUG-025). It originally asked only
+        # whether uq_option_rows_contract existed — but the BUG-023 migration
+        # below DROPS that index once it has been superseded. On the next call
+        # the legacy block therefore concluded "never migrated", re-ran this
+        # DELETE, and recreated the superseded index, which then rejected every
+        # p.m. row on arrival. Worse: this DELETE groups WITHOUT settlement, so
+        # a second restart would have deleted the p.m. contract outright,
+        # keeping MIN(id) — the a.m. row — and reported it as deduplication.
+        # A migration guard must survive its own migration.
         _has_uq = conn.execute(
-            "SELECT 1 FROM sqlite_master "
-            "WHERE type = 'index' AND name = 'uq_option_rows_contract'"
+            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name IN "
+            "('uq_option_rows_contract', 'uq_option_rows_contract_settle')"
         ).fetchone()
         if not _has_uq:
             _dupes = conn.execute(
@@ -302,6 +326,39 @@ def init_db(db_path: str | None = None) -> None:
                 "option_rows integrity migration: removed %d duplicate row(s), "
                 "UNIQUE(snapshot_id, expiry_date, strike, right) enforced",
                 _dupes,
+            )
+
+        # ── AM/PM settlement migration (BUG-023) ─────────────────────────────
+        # Adding the column is O(1) in SQLite: it rewrites the table's header,
+        # not its 14.3M rows. The uniqueness rule is the part that matters —
+        # without swapping it the p.m. contract is still rejected on arrival and
+        # the column would sit empty forever.
+        #
+        # COALESCE(settlement, '?') rather than the bare column: SQLite treats
+        # every NULL in a UNIQUE index as distinct from every other NULL, so
+        # indexing the raw column would stop deduplicating the legacy rows and
+        # reopen the six-leg fan-out this index was created to close.
+        _cols = {r["name"] for r in conn.execute("PRAGMA table_info(option_rows)")}
+        if "settlement" not in _cols:
+            conn.execute("ALTER TABLE option_rows ADD COLUMN settlement TEXT")
+            conn.commit()
+            logger.info("option_rows: added settlement column (BUG-023)")
+
+        _has_settle_uq = conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type = 'index' AND name = 'uq_option_rows_contract_settle'"
+        ).fetchone()
+        if not _has_settle_uq:
+            conn.execute(
+                "CREATE UNIQUE INDEX uq_option_rows_contract_settle "
+                "ON option_rows(snapshot_id, expiry_date, strike, right, "
+                "COALESCE(settlement, '?'))"
+            )
+            conn.execute("DROP INDEX IF EXISTS uq_option_rows_contract")
+            conn.commit()
+            logger.info(
+                "option_rows: uniqueness now spans settlement; the p.m. "
+                "contract is no longer discarded (BUG-023)"
             )
 
         row = conn.execute(
@@ -392,6 +449,35 @@ def finalize_snapshot(db_path: str,
         )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Which contract the dashboard shows  (BUG-023 / BUG-026)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Almost every SPX expiry is an SPXW weekly, which is P.M.-settled. Only the
+# third-Friday monthly also lists an A.M.-settled contract. So "settlement != PM"
+# is NOT the rule — it discards ~94% of the chain. The rule that reproduces what
+# the dashboard has always displayed is:
+#
+#     show the a.m. contract where one exists, otherwise show the p.m. one
+#
+# which is exactly "drop a p.m. row only when an a.m. twin exists for the same
+# snapshot, expiry, strike and side". No calendar arithmetic, so nothing has to
+# know which Friday is the third one; it reads the answer off the data.
+#
+# Cost: the subquery's four columns are the leading four of
+# uq_option_rows_contract_settle, so it resolves as an index seek.
+
+def _shown_contract(alias: str) -> str:
+    """SQL predicate selecting the single contract the dashboard displays."""
+    return f"""NOT ({alias}.settlement = 'PM' AND EXISTS (
+                SELECT 1 FROM option_rows _am
+                 WHERE _am.snapshot_id = {alias}.snapshot_id
+                   AND _am.expiry_date = {alias}.expiry_date
+                   AND _am.strike      = {alias}.strike
+                   AND _am.right       = {alias}.right
+                   AND _am.settlement  = 'AM'))"""
+
+
 def insert_option_rows(db_path: str, rows: list[dict]) -> int:
     """
     Bulk-insert option rows for a snapshot in a single transaction.
@@ -427,14 +513,19 @@ def insert_option_rows(db_path: str, rows: list[dict]) -> int:
     if not rows:
         return 0
 
+    # A caller that predates the settlement column gets an honest NULL rather
+    # than a crash. NULL is the correct value for "this code did not know" —
+    # the same thing every pre-2026-08-19 row says (BUG-023).
+    rows = [{"settlement": None, **r} for r in rows]
+
     sql = """
         INSERT OR IGNORE INTO option_rows (
-            snapshot_id, expiry_date, dte, strike, right,
+            snapshot_id, expiry_date, dte, strike, right, settlement,
             bid, ask, mark, last,
             iv, delta, gamma, theta, vega,
             volume, open_interest, intrinsic_value, time_value
         ) VALUES (
-            :snapshot_id, :expiry_date, :dte, :strike, :right,
+            :snapshot_id, :expiry_date, :dte, :strike, :right, :settlement,
             :bid, :ask, :mark, :last,
             :iv, :delta, :gamma, :theta, :vega,
             :volume, :open_interest, :intrinsic_value, :time_value
@@ -570,6 +661,13 @@ def get_option_chain(db_path: str, snapshot_id: int) -> list:
             """
             SELECT * FROM option_rows
             WHERE snapshot_id = ?
+              AND NOT (option_rows.settlement = 'PM' AND EXISTS (
+                  SELECT 1 FROM option_rows _am
+                   WHERE _am.snapshot_id = option_rows.snapshot_id
+                     AND _am.expiry_date = option_rows.expiry_date
+                     AND _am.strike      = option_rows.strike
+                     AND _am.right       = option_rows.right
+                     AND _am.settlement  = 'AM'))
             ORDER BY expiry_date, strike, right
             """,
             (snapshot_id,)
@@ -602,6 +700,13 @@ def get_contract_iv_history(db_path: str, expiry_date: str, strike: float,
             WHERE o.expiry_date = ?
               AND o.strike      = ?
               AND o.right       = ?
+              AND NOT (o.settlement = 'PM' AND EXISTS (
+                  SELECT 1 FROM option_rows _am
+                   WHERE _am.snapshot_id = o.snapshot_id
+                     AND _am.expiry_date = o.expiry_date
+                     AND _am.strike      = o.strike
+                     AND _am.right       = o.right
+                     AND _am.settlement  = 'AM'))
               AND s.status      = 'COMPLETE'
               AND s.snapshot_timestamp >= datetime('now', ?, 'utc')
             ORDER BY s.snapshot_timestamp
@@ -692,6 +797,13 @@ def get_entry_iv_context(db_path: str, entry_ts_utc: str,
             SELECT expiry_date, strike, right, iv
             FROM option_rows
             WHERE snapshot_id = ?
+              AND NOT (option_rows.settlement = 'PM' AND EXISTS (
+                  SELECT 1 FROM option_rows _am
+                   WHERE _am.snapshot_id = option_rows.snapshot_id
+                     AND _am.expiry_date = option_rows.expiry_date
+                     AND _am.strike      = option_rows.strike
+                     AND _am.right       = option_rows.right
+                     AND _am.settlement  = 'AM'))
               AND ( (expiry_date = ? AND strike = ? AND right = 'C')
                  OR (expiry_date = ? AND strike = ? AND right = 'P')
                  OR (expiry_date = ? AND strike = ? AND right = 'C')
@@ -857,15 +969,43 @@ def get_diagonal_history(
             LEFT JOIN option_rows ofc
                 ON ofc.snapshot_id = s.snapshot_id
                AND ofc.expiry_date = ? AND ofc.strike = ? AND ofc.right = 'C'
+               AND NOT (ofc.settlement = 'PM' AND EXISTS (
+                   SELECT 1 FROM option_rows _am
+                    WHERE _am.snapshot_id = ofc.snapshot_id
+                      AND _am.expiry_date = ofc.expiry_date
+                      AND _am.strike      = ofc.strike
+                      AND _am.right       = ofc.right
+                      AND _am.settlement  = 'AM'))
             LEFT JOIN option_rows obc
                 ON obc.snapshot_id = s.snapshot_id
                AND obc.expiry_date = ? AND obc.strike = ? AND obc.right = 'C'
+               AND NOT (obc.settlement = 'PM' AND EXISTS (
+                   SELECT 1 FROM option_rows _am
+                    WHERE _am.snapshot_id = obc.snapshot_id
+                      AND _am.expiry_date = obc.expiry_date
+                      AND _am.strike      = obc.strike
+                      AND _am.right       = obc.right
+                      AND _am.settlement  = 'AM'))
             LEFT JOIN option_rows ofp
                 ON ofp.snapshot_id = s.snapshot_id
                AND ofp.expiry_date = ? AND ofp.strike = ? AND ofp.right = 'P'
+               AND NOT (ofp.settlement = 'PM' AND EXISTS (
+                   SELECT 1 FROM option_rows _am
+                    WHERE _am.snapshot_id = ofp.snapshot_id
+                      AND _am.expiry_date = ofp.expiry_date
+                      AND _am.strike      = ofp.strike
+                      AND _am.right       = ofp.right
+                      AND _am.settlement  = 'AM'))
             LEFT JOIN option_rows obp
                 ON obp.snapshot_id = s.snapshot_id
                AND obp.expiry_date = ? AND obp.strike = ? AND obp.right = 'P'
+               AND NOT (obp.settlement = 'PM' AND EXISTS (
+                   SELECT 1 FROM option_rows _am
+                    WHERE _am.snapshot_id = obp.snapshot_id
+                      AND _am.expiry_date = obp.expiry_date
+                      AND _am.strike      = obp.strike
+                      AND _am.right       = obp.right
+                      AND _am.settlement  = 'AM'))
             WHERE s.status = 'COMPLETE'
               AND s.snapshot_timestamp >= datetime('now', ?, 'utc')
               AND COALESCE(ofc.mark, (ofc.bid + ofc.ask) / 2.0) IS NOT NULL
@@ -934,21 +1074,63 @@ def get_transform_mark_history(
             LEFT JOIN option_rows ofc
                 ON ofc.snapshot_id = s.snapshot_id
                AND ofc.expiry_date = ? AND ofc.strike = ? AND ofc.right = 'C'
+               AND NOT (ofc.settlement = 'PM' AND EXISTS (
+                   SELECT 1 FROM option_rows _am
+                    WHERE _am.snapshot_id = ofc.snapshot_id
+                      AND _am.expiry_date = ofc.expiry_date
+                      AND _am.strike      = ofc.strike
+                      AND _am.right       = ofc.right
+                      AND _am.settlement  = 'AM'))
             LEFT JOIN option_rows obc
                 ON obc.snapshot_id = s.snapshot_id
                AND obc.expiry_date = ? AND obc.strike = ? AND obc.right = 'C'
+               AND NOT (obc.settlement = 'PM' AND EXISTS (
+                   SELECT 1 FROM option_rows _am
+                    WHERE _am.snapshot_id = obc.snapshot_id
+                      AND _am.expiry_date = obc.expiry_date
+                      AND _am.strike      = obc.strike
+                      AND _am.right       = obc.right
+                      AND _am.settlement  = 'AM'))
             LEFT JOIN option_rows ofp
                 ON ofp.snapshot_id = s.snapshot_id
                AND ofp.expiry_date = ? AND ofp.strike = ? AND ofp.right = 'P'
+               AND NOT (ofp.settlement = 'PM' AND EXISTS (
+                   SELECT 1 FROM option_rows _am
+                    WHERE _am.snapshot_id = ofp.snapshot_id
+                      AND _am.expiry_date = ofp.expiry_date
+                      AND _am.strike      = ofp.strike
+                      AND _am.right       = ofp.right
+                      AND _am.settlement  = 'AM'))
             LEFT JOIN option_rows obp
                 ON obp.snapshot_id = s.snapshot_id
                AND obp.expiry_date = ? AND obp.strike = ? AND obp.right = 'P'
+               AND NOT (obp.settlement = 'PM' AND EXISTS (
+                   SELECT 1 FROM option_rows _am
+                    WHERE _am.snapshot_id = obp.snapshot_id
+                      AND _am.expiry_date = obp.expiry_date
+                      AND _am.strike      = obp.strike
+                      AND _am.right       = obp.right
+                      AND _am.settlement  = 'AM'))
             LEFT JOIN option_rows owc
                 ON owc.snapshot_id = s.snapshot_id
                AND owc.expiry_date = ? AND owc.strike = ? AND owc.right = 'C'
+               AND NOT (owc.settlement = 'PM' AND EXISTS (
+                   SELECT 1 FROM option_rows _am
+                    WHERE _am.snapshot_id = owc.snapshot_id
+                      AND _am.expiry_date = owc.expiry_date
+                      AND _am.strike      = owc.strike
+                      AND _am.right       = owc.right
+                      AND _am.settlement  = 'AM'))
             LEFT JOIN option_rows owp
                 ON owp.snapshot_id = s.snapshot_id
                AND owp.expiry_date = ? AND owp.strike = ? AND owp.right = 'P'
+               AND NOT (owp.settlement = 'PM' AND EXISTS (
+                   SELECT 1 FROM option_rows _am
+                    WHERE _am.snapshot_id = owp.snapshot_id
+                      AND _am.expiry_date = owp.expiry_date
+                      AND _am.strike      = owp.strike
+                      AND _am.right       = owp.right
+                      AND _am.settlement  = 'AM'))
             WHERE s.status = 'COMPLETE'
               AND s.snapshot_timestamp >= datetime('now', ?, 'utc')
               AND COALESCE(ofc.mark, (ofc.bid + ofc.ask) / 2.0) IS NOT NULL

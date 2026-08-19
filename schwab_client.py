@@ -191,6 +191,48 @@ def get_option_chain(client, from_date, to_date,
     return resp.json()
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# AM vs PM settlement  (BUG-023)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# On the third Friday of each month SPX lists TWO different options for the same
+# date and strike: the traditional monthly, which settles at the OPENING price
+# and stops trading the evening before, and the weekly (SPXW), which trades all
+# day and settles at the CLOSE. They are not interchangeable — on expiry day one
+# is already finished while the other has a full session of decay left.
+#
+# Schwab returns both under the same expiry key, so before this existed the
+# parser could not tell them apart, and the database — whose uniqueness rule had
+# no room for the difference — silently discarded the second one. Exactly 160
+# rows per cycle, 2,181 times in the log, for the whole life of the project.
+#
+# Two signals, preferred in this order:
+#   settlementType — Schwab's own field: 'A' (a.m.) or 'P' (p.m.)
+#   symbol root    — 'SPXW' prefix means the weekly, hence p.m.
+# The root is the fallback because settlementType is the broker's explicit
+# answer, while the root is an inference from a naming convention.
+#
+# Returns None when neither signal is present. None means "not recorded", NOT
+# "a.m." — see the note on legacy rows in db.py. Guessing here would put a wrong
+# answer into the permanent record, which is worse than an honest blank.
+
+def settlement_of(contract: dict) -> str | None:
+    """Classify one Schwab contract as 'AM', 'PM', or None (unknown)."""
+    raw = (contract.get("settlementType") or "").strip().upper()
+    if raw.startswith("A"):
+        return "AM"
+    if raw.startswith("P"):
+        return "PM"
+
+    symbol = (contract.get("symbol") or "").strip().upper()
+    if symbol.startswith("SPXW"):
+        return "PM"
+    if symbol.startswith("SPX"):
+        return "AM"
+
+    return None
+
+
 def chain_to_dataframe(raw_chain: dict) -> pd.DataFrame:
     """
     Flattens Schwab's nested option chain JSON (callExpDateMap / putExpDateMap,
@@ -198,7 +240,7 @@ def chain_to_dataframe(raw_chain: dict) -> pd.DataFrame:
     DataFrame with one row per contract.
 
     Columns returned:
-        expiry, dte, strike, side (CALL/PUT),
+        expiry, dte, strike, side (CALL/PUT), settlement (AM/PM/None),
         bid, ask, last, volume, open_interest,
         iv (percentage, e.g. 18.4 for 18.4% — caller divides by 100 for storage),
         delta, gamma, theta, vega
@@ -223,6 +265,7 @@ def chain_to_dataframe(raw_chain: dict) -> pd.DataFrame:
                         "dte":            dte,
                         "strike":         float(strike_str),
                         "side":           side,
+                        "settlement":     settlement_of(c),
                         "bid":            c.get("bid"),
                         "ask":            c.get("ask"),
                         "last":           c.get("last"),

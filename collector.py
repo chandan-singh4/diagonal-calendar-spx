@@ -325,6 +325,26 @@ def _safe_int(val) -> int | None:
         return None
 
 
+def _shown_contract_only(df):
+    """The single contract per (expiry, strike, side) the dashboard displays.
+
+    Almost every SPX expiry is an SPXW weekly and therefore P.M.-settled; only
+    the third-Friday monthly also lists an A.M. contract. Filtering on
+    settlement != 'PM' would discard nearly the whole chain (BUG-026). The rule
+    is "prefer the a.m. contract where one exists", read off the data rather
+    than from calendar arithmetic.
+    """
+    if df.empty or "settlement" not in df.columns:
+        return df
+    is_am = df["settlement"].eq("AM")
+    if not is_am.any():
+        return df
+    keys = pd.MultiIndex.from_frame(df[["expiry", "strike", "side"]])
+    has_am_twin = keys.isin(keys[is_am.to_numpy()])
+    shadowed = df["settlement"].eq("PM").to_numpy() & has_am_twin
+    return df[~shadowed]
+
+
 def _get_approx_atm_iv_pct(chain_df: pd.DataFrame, underlying_price: float) -> float | None:
     """
     Quick ATM IV estimate (as a percentage) used for the 2SD informational
@@ -332,7 +352,9 @@ def _get_approx_atm_iv_pct(chain_df: pd.DataFrame, underlying_price: float) -> f
     """
     if chain_df.empty:
         return None
-    calls = chain_df[chain_df["side"] == "CALL"].copy()
+    # One contract only — see _shown_contract_only (BUG-023 / BUG-026).
+    calls = _shown_contract_only(chain_df)
+    calls = calls[calls["side"] == "CALL"].copy()
     if calls.empty:
         return None
     calls["_dist"] = (calls["strike"] - underlying_price).abs()
@@ -349,6 +371,7 @@ def _build_option_rows(filtered_df: pd.DataFrame,
 
     Transformations:
       side 'CALL'/'PUT' → right 'C'/'P'
+      settlement carried through unchanged ('AM'/'PM'/None — see BUG-023)
       iv (Schwab %) ÷ 100 → iv (decimal, e.g. 0.184)
       bid + ask → mark = (bid + ask) / 2
       underlying_price + strike + right → intrinsic_value, time_value
@@ -380,6 +403,7 @@ def _build_option_rows(filtered_df: pd.DataFrame,
             "dte":             _safe_int(row.get("dte")),
             "strike":          strike,
             "right":           right,
+            "settlement":      row.get("settlement"),   # 'AM' | 'PM' | None (BUG-023)
             "bid":             bid,
             "ask":             ask,
             "mark":            mark,
@@ -418,7 +442,15 @@ def _compute_atm_iv_records(filtered_df: pd.DataFrame,
     """
     records = []
 
-    for expiry_date, group in filtered_df.groupby("expiry"):
+    # BUG-023: on the third Friday the frame holds BOTH the a.m. and p.m.
+    # contracts. atm_iv_by_expiry stores one row per expiry per snapshot and has
+    # no uniqueness constraint, so grouping the two together would write two
+    # conflicting rows for that date and silently corrupt the term structure the
+    # whole analytics layer is built on. The a.m. contract keeps the slot on that
+    # one date; every other expiry is p.m.-settled and keeps its own (BUG-026).
+    primary = _shown_contract_only(filtered_df)
+
+    for expiry_date, group in primary.groupby("expiry"):
         dte_val = _safe_int(group["dte"].dropna().iloc[0]) if not group["dte"].dropna().empty else None
         if dte_val is None:
             continue

@@ -85,11 +85,15 @@ def add_snapshot(path: str, ts: str, *, status: str = "COMPLETE",
 def opt(sid: int, expiry: str, strike: float, right: str, *,
         bid: float | None = 1.0, ask: float | None = 3.0,
         mark: float | None = 2.0, iv: float | None = 0.18,
-        dte: int = 7) -> dict:
-    """One option_rows insert payload. All 18 bound parameters must be present."""
+        dte: int = 7, settlement: str | None = None) -> dict:
+    """One option_rows insert payload. All 19 bound parameters must be present.
+
+    settlement defaults to None — the legacy value — so every fixture written
+    before BUG-023 keeps describing exactly the row it always described.
+    """
     return {
         "snapshot_id": sid, "expiry_date": expiry, "dte": dte,
-        "strike": float(strike), "right": right,
+        "strike": float(strike), "right": right, "settlement": settlement,
         "bid": bid, "ask": ask, "mark": mark, "last": mark,
         "iv": iv, "delta": 0.5, "gamma": 0.01, "theta": -0.5, "vega": 1.0,
         "volume": 100, "open_interest": 1000,
@@ -189,15 +193,23 @@ def test_init_db_refuses_a_database_from_newer_code(temp_db):
 
 
 def test_init_db_creates_the_uniqueness_index_on_option_rows(temp_db):
+    """The uniqueness guarantee now spans settlement (BUG-023).
+
+    uq_option_rows_contract is superseded by uq_option_rows_contract_settle and
+    dropped: the old rule could not tell the a.m. and p.m. third-Friday
+    contracts apart and silently discarded one of them. Both names are asserted
+    so a half-applied migration — new index created, old one still present, each
+    fighting the other on every insert — fails here rather than in production.
+    """
     conn = sqlite3.connect(temp_db)
     try:
-        found = conn.execute(
-            "SELECT 1 FROM sqlite_master "
-            "WHERE type = 'index' AND name = 'uq_option_rows_contract'"
-        ).fetchone()
+        names = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index'"
+        )}
     finally:
         conn.close()
-    assert found is not None
+    assert "uq_option_rows_contract_settle" in names
+    assert "uq_option_rows_contract" not in names, "superseded index must be dropped"
 
 
 def test_init_db_deduplicates_pre_existing_option_rows_once(tmp_path):

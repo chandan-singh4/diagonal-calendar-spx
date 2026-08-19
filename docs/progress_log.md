@@ -5,6 +5,84 @@ what broke, and what remains.
 
 ----
 
+## 2026-08-19 (session 13) — the third-Friday p.m. option was being thrown away, every cycle, since day one
+
+**Chandan noticed the dashboard only showed one of the two third-Friday expirations.** He had
+it slightly the other way round — the screen shows the **a.m.** contract and the **p.m.** one
+was never stored — but the substance was exactly right, and it turned out to be the explanation
+for a puzzle that had been sitting in "What to do next" for two weeks.
+
+**What was happening.** SPX lists two options for each third Friday: the traditional monthly,
+settling at the OPENING price and closing for trading the evening before, and the weekly SPXW,
+trading all day and settling at the CLOSE. Schwab returns both under a single expiry key.
+`chain_to_dataframe` threw away the contract symbol — the only field that tells them apart —
+and the uniqueness rule had no room for the difference, so `INSERT OR IGNORE` silently dropped
+the second one.
+
+**The "160 of 3,156 discarded" mystery is solved, and it was the same thing.** 2,181 warnings
+in `collector.log`, and **every single one reads exactly 160** — never any other number.
+160 = 80 calls + 80 puts = precisely one expiry. A number that steady was never chance.
+
+**The worse half, which nobody was looking for.** On ordinary days the stored row was the a.m.
+contract. On the expiry day *itself* the a.m. option had already settled and dropped out of the
+broker's chain — so the p.m. contract quietly took the slot, under the same date, with no
+marker. Measured on the 17 July monthly: total call open interest climbed 148,989 → 266,366
+through the month, then read **99,194** on expiry day. Open interest cannot fall by two-thirds
+overnight. That is not the same option. Logged as BUG-024; those rows are not back-fillable.
+
+**What was built.** A `settlement` column (`AM` / `PM` / NULL), read from Schwab's own
+`settlementType` with the `SPXW` root as fallback; uniqueness widened to span it; and — the
+part that mattered most — **every existing read pinned to one contract per strike: the a.m.
+one where an a.m. one exists, otherwise the p.m. one.** ADR-046 has the reasoning.
+
+**Why pinning the readers was not optional.** `atm_iv_by_expiry` holds one row per expiry per
+snapshot and has **no uniqueness constraint**. Storing the p.m. contract without pinning would
+have written two conflicting rows for every third Friday and silently corrupted the term
+structure the entire analytics layer sits on. Shipping the storage fix alone would have been a
+worse bug than the one being fixed.
+
+**Two bugs of my own reached the live system, and only checking after deployment caught them.**
+The first: the migration drops the old uniqueness index, but the legacy clean-up block still
+tested for that index by name to decide whether it had already run. On the collector restart it
+therefore ran again and **rebuilt the superseded index**, which rejected every p.m. row — and
+its DELETE groups rows without regard to settlement, so one more restart would have deleted p.m.
+data already collected (BUG-025). The second: the reader guard was written as
+`settlement IS NOT 'PM'`, on the assumption that p.m. was the extra contract. It is the reverse
+— nearly every SPX expiry is p.m.-settled, and a.m. exists only on the monthly — so the guard
+hid ~94% of the chain. The collector logged `ATM IV computed for 1/20 expiries` for three
+cycles (BUG-026). Both are fixed, both now have checks that were **proved by breaking a copy of
+the code and watching them fail**, and the total is 819 passing.
+
+**What both had in common: the checks were written against what I believed, not against what the
+data says.** Every check passed while the live system was wrong. The one that found the truth
+was the boring one — read the database back after deploying and count the rows. That is now the
+habit worth keeping, not a better test.
+
+**NULL means "not recorded", not "a.m."** Stamping the old rows `AM` was considered and
+rejected: it is wrong on precisely the day that matters most, for the reason above.
+
+**Two real faults found while building, both from the checks rather than from reading.**
+`_DDL` created the new UNIQUE index *before* the deduplication migration ran, which would have
+crashed `init_db` on exactly the legacy databases the migration exists to repair — the index is
+now created in `init_db()` afterwards. And indexing the bare column would have stopped
+deduplicating the legacy rows, because SQLite treats every NULL in a UNIQUE index as distinct;
+`COALESCE(settlement, '?')` is what prevents that.
+
+**Rehearsed on a copy, per the project rule.** A consistent read-only copy of the real 2.7 GB
+file via SQLite's backup API — not a file copy, since the collector is writing. Migration:
+**36.2 s, 14,305,769 rows before and after, `PRAGMA integrity_check` ok.** 806 checks pass
+(788 + 18 new). **The live database has not been touched.**
+
+**Deployment order is load-bearing.** Only `collector.py` calls `init_db()`, so the collector
+must restart — running the migration — before the dashboard serves the new code. Dashboard
+first against an unmigrated file gives `OperationalError: no such column: settlement`.
+
+**Left deliberately undone:** the p.m. prices are now recorded but still cannot be *seen*.
+How to show them — toggle, second row, separate expiry entry — is a design decision for
+Chandan, not one to make silently while fixing collection (BUG-023).
+
+---
+
 ## 2026-08-09 (session 12) — M3 begun: retention policy decided, entry-IV gate built, pruner shipped, watchdog live
 
 ### Completed

@@ -24,6 +24,10 @@ data/token.json
 *.db
 *.db-wal
 *.db-shm
+# Dated/suffixed database backups — dashboard.db.2026-08-19, .bak, etc.
+# `*.db` alone does not match these: the suffix comes AFTER the extension,
+# and a 2.7 GB file staged by accident is not something to notice late.
+*.db.*
 *.sqlite
 *.sqlite3
 
