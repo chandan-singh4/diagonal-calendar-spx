@@ -188,7 +188,8 @@ between two runs minutes apart as the collector adds snapshots.
 **Goal:** put the data pipeline on a sustainable footing. Bounded growth, monitored collection,
 documented operations.
 
-**Status: started 2026-08-09. 3.1 and 3.2 are done; seven tasks remain.**
+**Status: started 2026-08-09. 3.1, 3.2 and 3.4 are done, and 3.6's standing symptom is
+explained (2026-08-19); six tasks remain.**
 
 **The one thing to understand before reading the table.** Collection began 2026-06-23, so on the
 day the policy was written **the oldest expiry was 47 days past and a 90-day rule deleted nothing**
@@ -205,7 +206,7 @@ concluding the storage problem is behind them will be surprised in October.
 | 3.3 | Proper migration framework (versioned, forward-only, tested) | Not started | The `entry_*` columns went in via the existing add-if-missing `ALTER TABLE` pattern, which now runs **ten** times in `init_trades_table`. That is the argument for this task, not a reason to defer it. |
 | 3.4 | Collector liveness monitoring + alerting on missed cycles | ✅ **Done 2026-08-09** | **ADR-045.** `scripts/watchdog.py`, every 10 minutes all day via Task Scheduler, alerting by desktop toast **and** email. The dashboard's TOKEN EXPIRED banner already worked this morning; nobody was looking at it — **an alarm reachable only through a page you open is not an alarm**, so this had to live outside Streamlit. Observes only: no restart, no re-auth, no DB write. Most of the work was **not crying wolf** — silent overnight/weekend/holiday, an opening grace period, 2.5× the interval rather than 1×, and one alert per hour per outage. **Two bugs found and pinned**: a future-dated price was reported as "collecting normally" (a lying clock poisons the reassuring answers too), and at 16:00 a dead-all-afternoon collector would have emailed **"RECOVERED"** — the blind states now return `informative=False`, so an all-clear requires positively seeing fresh data. Session logic extracted to **`core/session.py`** because the header's threshold *is* the collector's poll interval, not a second policy; delegation proved by sabotage failing both new and pre-existing tests. Header countdown replaced by a ticking clock + **Time since last data** (the countdown's worst case displayed `0s` and sat there). 48 new tests. |
 | 3.5 | Surface `collection_gaps` in the dashboard | Not started | Data collected since day one and never once shown. `db.get_gaps()` already exists and is uncalled. |
-| 3.6 | Log `INSERT OR IGNORE` rowcount mismatches | Not started | **There is a standing symptom to explain here**: the collector logs *"160 of 3,156 rows were DISCARDED"* on nearly every cycle. A figure that constant is a pattern, not random duplicates. See DEBT-008 / ADR-022. |
+| 3.6 | Log `INSERT OR IGNORE` rowcount mismatches | ✅ **Symptom explained and fixed 2026-08-19; the logging itself is still not started** | **ADR-046.** The standing symptom is solved. The discards were never duplicates: SPX lists **two** options for each third Friday — the traditional monthly settling at the OPEN, and the SPXW weekly settling at the CLOSE — and Schwab returns both under one expiry key. The parser threw away the contract symbol, `uq_option_rows_contract` had no room for the difference, and `INSERT OR IGNORE` silently dropped the second. 160 = 80 calls + 80 puts = exactly one expiry, which is why the number never varied across **2,181 identical warnings**. Both contracts are now stored with a `settlement` column. **What remains under this number:** the generic rowcount-mismatch logging, which is what would have surfaced this in week one instead of week eight. Keep it — the lesson is that a constant discard figure deserved investigating the first time it appeared. |
 | 3.7 | Data-quality checks: IV outliers, stale quotes, missing legs | Not started | — |
 | 3.8 | Streamline Schwab token re-auth; document the runbook | Not started | Weekly manual chore. Re-auth was needed on the morning of this session. |
 | 3.9 | `docs/DATABASE.md`, `docs/OPERATIONS.md`, `docs/TROUBLESHOOTING.md` | Not started | Depends on 3.2. `prune.py` and the VACUUM procedure are the first things `OPERATIONS.md` has to describe. |
@@ -216,7 +217,17 @@ concluding the storage problem is behind them will be surprised in October.
 
 ## Immediate next actions
 
-1. **M3 is under way — 3.3, 3.5–3.9 remain; take 3.8 next.** 3.1, 3.2, the entry-IV gate
+0. **First: finish the display half of BUG-023 — it is the only thing a user can see.** Both
+   third-Friday contracts are now *recorded* but the screen still shows one. Chandan's
+   decision: each becomes its own entry in the expiry lists, the p.m. one **unlabelled**
+   (`21 Aug 2026`) and the a.m. one **marked** (`21 Aug 2026 (AM)`) — that way round because
+   p.m. is the normal case and the label should mark the exception. This makes an expiry a
+   date *plus* a contract, a pair that must travel everywhere the date does (~20 files).
+   **Start with the saved-position expiry sweep**, which parses the label as a plain ISO date;
+   it already refuses to delete a lock it cannot parse, so the failure mode is a stale entry
+   rather than a lost one, but it is the piece to check hardest. Fold BUG-024 in: the legacy
+   unlabelled rows **are** attributable at read time (proved 170/170 on open interest).
+1. **M3 is under way — 3.3, 3.5, 3.7–3.9 remain; take 3.8 next.** 3.1, 3.2, the entry-IV gate
    and 3.4 all landed 2026-08-09 (ADR-044, ADR-045). **3.8, the re-auth runbook, is now the
    highest-value item left** precisely *because* 3.4 shipped: the watchdog tells Chandan the
    moment collection stops and says nothing about what to do next, and re-auth is a weekly

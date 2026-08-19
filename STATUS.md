@@ -1,9 +1,8 @@
 # PROJECT STATUS
 
-**Updated:** 2026-08-09 · **Branch:** `m3-data-hardening` — **stage 3 under way.**
-**State:** Three parts of stage 3 are built and checked. 788 checks pass. The work is saved on
-this machine and **sent to GitHub on a branch, not merged into `main`** — merging is Chandan's
-call. Nothing in it has touched the real database.
+**Updated:** 2026-08-19 · **Branch:** `m3-data-hardening` — **stage 3, 4 of 9 parts done.**
+**State:** 819 checks pass. Three commits are saved on this machine and **not yet sent to
+GitHub** (ahead by 3). The collector is running the fixed code and verified recording correctly.
 > Self-contained: read this file alone to start a session. Replaced entirely by `/wrap`.
 
 ## What this project is
@@ -13,152 +12,93 @@ before a set date. His strategy: sell options expiring soon, buy similar ones ex
 the small difference. The soon-expiring ones lose value faster, and that gap is the profit; once
 it's worth enough he restructures into a safer shape that locks the gain and caps the loss. **It's
 all about timing**, and brokers discard today's prices rather than keep them. **So the historical
-record IS the product** — the screen is just a window onto it. **Honest condition:** record and
-checking are in good shape; the screen's known faults are listed below and are now fewer.
+record IS the product** — the screen is just a window onto it.
 
 | Part | What it does |
 |---|---|
 | **Collector** | Background program. Every 1–5 min while markets are open, records all option prices. Starts with Windows. |
-| **Database** | One file, **2.0 GB** since 23 June, growing ~82 MB a trading day. Irreplaceable — the broker won't sell you last Tuesday's prices. |
+| **Database** | One file, **2.89 GB** since 23 June, growing ~82 MB a trading day. Irreplaceable — the broker won't sell you last Tuesday's prices. |
 | **Dashboard** | Web page, 6 tabs: Scanner, Entry Analysis, Calendar Edge, Strike Detail, Historical Stats, Research. Reads only. |
 | **Journal** | Diary of actual trades. 6 practice entries, to be discarded. |
 
 ## The 9-stage plan
 
 `0 clean up` **done** → `1 automatic checking` **done** → `2 break up big files` **done** →
-`3 stop database growing` **← here, 3 of 9 parts done** → `4 data service` → `5 decide on rebuilding the screen` →
-`6 answer trading questions with real results` → `7 machine learning` → `8 run reliably unattended`
+`3 stop database growing` **← here, 4 of 9 parts done** → `4 data service` → `5 decide on rebuilding
+the screen` → `6 answer trading questions with real results` → `7 machine learning` → `8 run unattended`
 Order is fixed: **you can't safely rearrange code you can't check automatically.** Stages 6 and 7
 also need ~20 and ~100 real trades; there are 6 practice ones.
 
 ## This session
 
-**The collector had been blind and nothing said so.** The permission slip the broker issues (the
-"token") had quietly expired. No prices were lost — the markets were shut all weekend — but
-Monday's opening would have been lost in silence. Chandan renewed it. **This is why the next
-piece of work is a watchdog that shouts when collection stops** (see below).
+**Half the third-Friday prices were never being recorded, and never had been, since day one.**
+Chandan spotted it on screen. On the third Friday of each month SPX lists **two** different options
+for the same date and strike: the traditional monthly, settling at the **opening** price and
+stopping trading the evening before, and the weekly, trading all day and settling at the **close**.
+The broker sends both. The program threw away the one field telling them apart, and the rule meant
+to stop duplicates saw them as the same option and dropped one. Today the same strike stood at
+**17.15 for the morning contract and 19.80 for the afternoon one** — 2.65 apart, because the
+afternoon one has a full extra day of life. Both are now recorded.
 
-**Stage 3, part 1: the rule for clearing out old prices — Chandan's decision, written down.**
-Per-strike prices may be deleted **90 days after the option they describe has expired**. The
-daily *summaries* are kept **forever** (all of them together are 5 MB — 0.26% of the file, so
-keeping the whole history costs nothing). **Any expiry a real trade actually used is never
-deleted, at any age** — logging a trade protects its own data automatically, with nothing to
-remember. Recorded in `docs/decisions.md` as ADR-044, along with the alternatives he turned down.
+**This also solved the standing "160 of 3,156 rows discarded" puzzle** — 2,181 warnings, every one
+reading exactly 160, because 160 = 80 calls + 80 puts = one expiry date. Unexplained for eight weeks.
 
-**Something had to be built first, or the rule would have destroyed the journal's memory.**
-The screen worked out the market conditions at the moment a trade was opened by *going back and
-reading the old prices*. Clear those out and that question becomes permanently unanswerable —
-and **silently**: the chart would simply show fewer trades each month with nothing saying why.
-So the answer is now **written onto the trade itself the moment it is saved**, by the saving code
-rather than by the screen, so no future screen can forget to do it. Old trades still fall back to
-the old method.
+**The real database was changed for the first time.** A new column on a 2.7 GB file of
+irreplaceable history: backed up, rehearsed on a copy, then done in 31 seconds, zero rows lost.
 
-**Stage 3, part 2: the clearing-out tool exists — and it deletes nothing unless asked three
-times.** `python scripts/prune.py` **reports** by default; deleting needs `--execute`, which
-refuses to run without a backup newer than the database, and then asks for the **exact number of
-rows in figures**. "y" is rejected on purpose — a number has to be read off the report first. If
-nobody is at the keyboard it cancels. Rehearsed against the real database in report mode: asked
-what it *would* do in December, it correctly held back the 8 expiries belonging to the practice
-trades. 31 new checks cover it.
+**Two mistakes of my own reached the live system; only checking afterwards caught them.** The
+first would have *deleted* already-collected prices on the next restart. The second: I assumed the
+afternoon contract was the unusual one and told the screen to hide it. It is the reverse — nearly
+every SPX expiry is afternoon-settled, and the morning one exists only on that one monthly date —
+so the instruction hid **94% of all prices**, for three cycles. **Every check passed throughout**,
+because the checks were written against what I believed rather than what the data says. What found
+it was reading the database back and counting rows. Both fixed; the new checks were proved by
+deliberately breaking a copy of the code and watching them fail.
 
-**The thing to understand about that: it clears nothing today, and nothing until about November.**
-Collection only started 23 June — 47 days ago — so nothing is yet 90 days past expiry. The tool
-had to be built before the data aged into it, but the file keeps growing until then.
-
-**Stage 3, part 4: something now shouts when collection stops — and it isn't the screen.**
-Every 10 minutes, day and night, Windows runs a small check that asks one question: *during market
-hours, is a price arriving as often as it should be?* If not, a pop-up appears on this machine
-**and an email is sent to Chandan's phone**. It only watches — it never restarts anything, never
-renews the permission slip, and never writes to the database. Tested live: pop-up seen, email
-received, and the 10-minute schedule confirmed firing.
-
-**The reason it had to live outside the dashboard.** The red TOKEN EXPIRED banner on the screen was
-working perfectly this morning. Nobody was looking at it. **An alarm you can only hear by opening a
-page is not an alarm.** The banner stays — it is right, and it costs nothing — but it is no longer
-the only thing that tells you.
-
-**Most of the effort went into it staying quiet when nothing is wrong.** An alarm that goes off
-every evening, every weekend, at 09:31 every morning, and once between every pair of price updates
-is an alarm you learn to ignore — and then miss on the day it is right. It stays silent overnight,
-at weekends and on holidays, allows a few minutes at the opening for the first prices to land,
-waits for **two** missed updates rather than one, and repeats itself at most once an hour during a
-single outage.
-
-**One found bug is worth naming, because it was the dangerous kind.** It came out of Chandan asking
-whether a check every 10 minutes meant an email every 10 minutes. At 16:00 the market shuts and the
-check goes quiet — so a collector that had been dead all afternoon would have triggered an email
-saying **"RECOVERED: prices are arriving again."** They were not. The market had simply closed and
-the watchdog had gone blind. **A false all-clear is the worst thing an alarm can say**, because it
-is the message that stops you checking. It now says "I have no news" rather than "all is well", and
-only announces a recovery after actually seeing fresh data.
-
-**The screen now has a ticking clock and counts the other way.** The old *"Next update in: 42s"* is
-gone. In its place: the live time, ticking every second so you can see the page is not frozen, and
-**"Time since last data"** counting upward. The countdown had a resting state that looked healthy —
-with the collector dead it showed `0s` and sat there. Counting upward has no such state: the longer
-it is broken, the bigger the number gets. It turns amber at Chandan's thresholds (1 minute in the
-first and last half hour, 5 minutes midday) and red at half again as long — **deliberately not red
-exactly on the threshold**, because at the 5-minute cadence the age reaches 5 minutes just before
-every single update and would flash red all day for no reason.
-
-**A mistake worth remembering: `git checkout` undid an hour of unsaved work.** It was used to undo
-a deliberate temporary break in a file — and it reverted every other unsaved change in that same
-file with it. The project rule says rehearse on a *copy*; `git checkout` is not a copy, it is the
-opposite. Later checks copied the file aside first and put it back by hand.
+**One earlier conclusion of mine was wrong and is corrected.** I recorded that the old unlabelled
+prices could never be sorted into morning and afternoon. They can, with no guessing: matched on
+**open interest**, which does not move intraday — **170 of 170** were the morning contract.
 
 ## What to do next
 
-1. **Decide whether `m3-data-hardening` merges into `main`.** The work is on GitHub as a branch.
-   Merging is a one-line job whenever Chandan says so.
-2. **Write down the permission-slip renewal steps (part 8).** The watchdog now tells you the
-   moment collection stops; it does not tell you what to do about it, and that chore comes round
-   about every week. This is the natural pair to what was just built.
-3. **The watchdog has one thing still unproven.** Pop-up, email and schedule are all confirmed
-   working, but a *real* outage has never travelled the whole path — that cannot be staged without
-   stopping the collector or altering the database, both of which need Chandan's word. The first
-   genuine outage is the test.
-4. **Then parts 5 and 6.** The database has recorded every gap in collection since day one and the
-   screen has never once shown them. And there is a standing puzzle worth explaining: the collector
-   reports **"160 of 3,156 rows discarded" on nearly every cycle**. A number that steady is a
-   pattern, not chance.
-5. **After a day of collection, read `collector.log`** for lines beginning `strike window:
-   broker supplied` — they show how much room exists beyond what's kept. Nothing depends on it yet.
+1. **Show the afternoon option on screen — the only part a user can see, and it is unfinished.**
+   Both are recorded; the screen still shows one. **Chandan has decided how:** each becomes its
+   own entry in the two expiry dropdowns, the afternoon one **unlabelled** (`21 Aug 2026`) and
+   the morning one **marked** (`21 Aug 2026 (AM)`) — that way round because afternoon is the
+   normal case, so the label marks the exception. This makes an expiry a date *plus* which
+   contract, and that pair must travel everywhere the date currently does (~20 files).
+   **Start with the code that deletes saved positions once they expire**, which assumes the label
+   is a plain date; it already refuses to delete what it cannot read, so the worst case is a stale
+   entry, not a lost one. Include the old prices (attributable, above) for full history.
+2. **Then stage 3 part 8** — write down the weekly broker-permission renewal steps.
+3. **The watchdog has one thing unproven** — no *real* outage has ever travelled the whole alarm
+   path. It cannot be staged without Chandan's word; the first real one is the test.
 
 ## Open problems
 
-- **ENH-011 (high)** — tab clicks are slow. Cause **not established**; measure first, and don't
-  start by tuning the cache timers. **BUG-001 (high, blocked on Chandan)** — old unexplained
-  report; nothing can be done until he gives a symptom and a screenshot. **BUG-018 (medium)** —
-  on expiry day one tile says "set strikes" when they are already set.
+- **Blocked on Chandan (small, needs one word):** snapshots 4801–4804 hold 1 of 20 daily summary
+  rows each, from my mistake above. The underlying prices are complete, so the summaries can be
+  rebuilt from them — but that is a database write. Snapshots 4805–4808 are a real ~2-minute gap
+  from restarting the collector, correctly recorded as such; nothing to repair there.
+- **ENH-011 (high)** — tab clicks are slow; cause **not established**, measure first.
+  **BUG-001 (high, blocked on Chandan)** — old unexplained report; needs a symptom and screenshot.
+  **BUG-018 (medium)** — on expiry day one tile says "set strikes" when they are already set.
 - **DEBT-029** — two screen-library features are past their removal dates, used in ~36 places.
-  The screen runs only because the old versions still work; any upgrade may break it.
-- **DEBT-034** — data loaded and converted for a column nothing reads. **DEBT-036/037** — a dead
-  file and ~50 lines of unused styling, both left on purpose; deleting needs Chandan's word.
-  **DEBT-038** — problem numbers reused twice, breaking the documented way to look up a closed one.
 
 ## Settled decisions
 
-- **The screen stays as it is until stage 5**; whether to move off the current screen technology
-  is **not pre-committed** — decided with evidence at stage 5, not before.
-- **Closing a problem means deleting its row**, never ticking it off — if the fix leaves a lesson,
-  write it up in `docs/decisions.md` first. **Never re-record a failing check to make it pass.**
-- **Move code first, rename second, separately** (two renames outstanding: DEBT-033, DEBT-035).
-  **The 6 practice trades are blocked** on Chandan at the keyboard with a confirmed backup.
+- **The two third-Friday contracts are different options and the record now says which** (ADR-046).
+  A blank means "not recorded", never "morning". Afternoon history begins 2026-08-19.
 - **Old prices are cleared 90 days past expiry, summaries kept forever, traded expiries never
-  cleared, and it never happens on a timer** — only when Chandan runs it and confirms (ADR-044).
-  **Reclaiming the disk space needs a separate `VACUUM` step**, which locks the file and needs
-  free space equal to the database; the tool prints the command rather than running it.
-- **The watchdog watches and tells you; it never acts.** No restarting, no renewing, no writing.
-  Deciding what to do about a dead collector stays with Chandan — automatic recovery is a stage 8
-  job. And **"no news" is never reported as "all is well"** (ADR-045).
-- **Keeping a saved position's prices is forward-only** — it cannot fill in history from before
-  the position was saved. That is why the on-screen warning stays.
+  cleared, and never on a timer** (ADR-044). **The watchdog watches and never acts** (ADR-045).
+- **Closing a problem means deleting its row**, never ticking it off. **Never re-record a failing
+  check to make it pass.** **The screen stays as it is until stage 5.**
 
 ## How to work here
 
 **Ask first** before: saving online, any database write, deleting files or rows, changing Windows
-settings or installed programs, stopping/starting the collector, or sending anything off this
-machine. **No check may touch the real database. Trade numbers are never reused. Missing price →
-blank, not 0. Prove checks by breaking the code on a copy**, never the live file — the dashboard
-reloads the moment a file is saved, **and that reload rewrites the saved-opportunities file.**
-**Deeper detail:** `docs/` — `plan.md` (stages) · `backlog.md` (open problems only) · `decisions.md` (why) · `progress_log.md` (per session).
+settings or programs, stopping/starting the collector, or sending anything off this machine.
+**No check may touch the real database. Trade numbers are never reused. Missing price → blank, not
+0. Prove checks by breaking the code on a copy**, never the live file. **And verify on the real
+system after deploying** — today, every check passed while the live screen was wrong.
+**Deeper detail:** `docs/` — `plan.md` (stages) · `backlog.md` (open problems) · `decisions.md` (why) · `progress_log.md` (per session).
