@@ -50,7 +50,7 @@ import schwab_client
 # leading underscores for the same reason; both are transitional — see ADR-032.
 # core.charts is gone from here entirely: every chart site moved to views/ in
 # step 2.4, which is what DEBT-030's fix has been waiting for.
-from core import market, position
+from core import contract, market, position
 from core import session as core_session
 from core.charts import to_display_time
 
@@ -203,7 +203,9 @@ if chain_df.empty:
     )
     st.stop()
 
-available_expiries = sorted(chain_df["expiry"].unique())
+# Sorted by when each contract ENDS, not as text — the third Friday's a.m.
+# contract settles at the open and so comes before the p.m. one that day.
+available_expiries = sorted(chain_df["expiry"].unique(), key=contract.sort_key)
 dte_by_expiry = chain_df.groupby("expiry")["dte"].first().astype(int).to_dict()
 
 

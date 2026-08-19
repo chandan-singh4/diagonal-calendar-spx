@@ -45,6 +45,11 @@ class _FakeStreamlit:
     def __init__(self):
         self.session_state: dict = {}
         self.warnings: list[str] = []
+        #: What each selectbox was actually OFFERED, by key. The Back Expiry
+        #: list is now narrowed by the front leg, and "which options existed"
+        #: is the thing to check — a return value alone cannot show that a
+        #: wrong choice was merely not taken rather than not offered.
+        self.options: dict[str, list] = {}
 
     def markdown(self, *_a, **_k):
         pass
@@ -62,6 +67,7 @@ class _FakeStreamlit:
                   index=None, help=None, **_k):
         """Mirrors the one Streamlit behaviour this code is built around: a
         value already in session_state under `key` wins over `index`."""
+        self.options[key] = list(options)
         if key in self.session_state:
             return self.session_state[key]
         chosen = options[index if index is not None else 0]
@@ -192,10 +198,18 @@ def test_the_unusable_value_is_still_discarded(st):
 def test_the_honoured_parts_of_a_partly_dropped_click_still_apply(st):
     """A lock whose strike drifted but whose expiries are both fine should
     still open on those expiries — the notice names what was lost, and the rest
-    of the click is honoured rather than thrown away wholesale."""
-    _stage(st, front_expiry=BACK, back_expiry=BACK, put_strike=5000.0)
+    of the click is honoured rather than thrown away wholesale.
+
+    The staged pair used to be BACK/BACK, which the docstring already called
+    "both fine" and which never was: a back leg expiring with the front is not
+    a diagonal. The old code merely warned about it after the fact. Since
+    2026-08-19 the Back Expiry list only offers what comes AFTER the front, so
+    that pair cannot be produced at all and the fixture now stages a real one.
+    """
+    _stage(st, front_expiry=FRONT, back_expiry=BACK, put_strike=5000.0)
     selection = _render(st)
 
-    assert selection.front_expiry == BACK
+    assert selection.front_expiry == FRONT
+    assert selection.back_expiry == BACK
     assert "Put Strike" in st.warnings[0]
     assert "Front Expiry" not in st.warnings[0]

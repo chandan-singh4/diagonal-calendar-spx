@@ -111,9 +111,6 @@ def render(*, chain_df: pd.DataFrame, available_expiries: list,
     # "not in options" error.
     if "front_expiry_select" in st.session_state and st.session_state["front_expiry_select"] not in available_expiries:
         _drop("front_expiry_select")
-    if "back_expiry_select" in st.session_state and st.session_state["back_expiry_select"] not in available_expiries:
-        _drop("back_expiry_select")
-
     c1, c2, c3, c4 = st.columns(4)
 
     # exp_label takes the expiry table as an argument (ADR-034), and Streamlit
@@ -128,13 +125,43 @@ def render(*, chain_df: pd.DataFrame, available_expiries: list,
             "Front Expiry", available_expiries,
             format_func=_expiry_option_label, key="front_expiry_select", **_fe_kwargs,
         )
-    with c2:
-        _be_kwargs = (
-            {} if "back_expiry_select" in st.session_state
-            else {"index": min(1, len(available_expiries) - 1)}
+    # BACK EXPIRY IS NARROWED TO WHAT COMES AFTER THE FRONT (Chandan, 2026-08-19).
+    # A diagonal whose back leg expires first is not a diagonal, and the old
+    # code only warned about it after the fact — with 21 expiries listed, that
+    # left 20 wrong answers one click away. So the wrong ones are not offered.
+    #
+    # The comparison is on the DATE, which is Chandan's call for the one case
+    # where it is arguable: the third Friday's a.m. contract settles at that
+    # morning's open and the p.m. one that afternoon, so the p.m. contract does
+    # end later — but only by a few hours, and "the first back option is the
+    # next date" is the rule he wants. Same date, either contract: not offered.
+    _back_options = [e for e in available_expiries
+                     if contract.date_of(e) > contract.date_of(front_expiry)]
+
+    if not _back_options:
+        # Only reachable by choosing the furthest expiry collected as the front
+        # leg. Fall back to that same expiry so the page still renders — every
+        # value below is then a zero-width diagonal, which is visibly odd, and
+        # the warning says why rather than leaving it to be puzzled over.
+        _back_options = [front_expiry]
+        st.warning(
+            "**No expiry later than this one is being recorded**, so there is "
+            "no back leg to pair it with. Choose an earlier Front Expiry."
         )
+
+    # A back leg staged by a lock, or left over from the previous front, may not
+    # survive that narrowing — drop it here so the default below takes over
+    # rather than Streamlit raising "not in options" and killing the page.
+    if ("back_expiry_select" in st.session_state
+            and st.session_state["back_expiry_select"] not in _back_options):
+        _drop("back_expiry_select")
+
+    with c2:
+        # index 0 is the very next expiry after the front, which is what the
+        # narrowing above makes the natural default.
+        _be_kwargs = {} if "back_expiry_select" in st.session_state else {"index": 0}
         back_expiry = st.selectbox(
-            "Back Expiry", available_expiries,
+            "Back Expiry", _back_options,
             format_func=_expiry_option_label, key="back_expiry_select", **_be_kwargs,
         )
 
@@ -204,12 +231,10 @@ def render(*, chain_df: pd.DataFrame, available_expiries: list,
             st.warning("No CALL strikes available for this expiry pair.")
             call_strike = 0.0
 
-    # Compare DATES, not display keys. "2026-08-21 (AM)" sorts after
-    # "2026-08-21" as text, so a plain string compare would quietly accept the
-    # a.m. contract as the BACK leg of a p.m. front — a diagonal whose back
-    # leg expires first. Equal dates are flagged for the same reason.
-    if contract.date_of(back_expiry) <= contract.date_of(front_expiry):
-        st.warning("Back expiry ≤ Front — unusual for a diagonal, shown anyway.")
+    # The old "Back expiry ≤ Front — shown anyway" warning is gone: the option
+    # list above can no longer produce that pair, so the warning could only
+    # ever have fired on the no-later-expiry fallback, which says so itself in
+    # plainer words. Nothing here should quietly tolerate the state any more.
 
     return Selection(
         front_expiry=front_expiry,

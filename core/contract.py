@@ -84,6 +84,23 @@ def is_am(display_key: str) -> bool:
     return display_key.endswith(AM_SUFFIX)
 
 
+def sort_key(display_key: str) -> tuple[str, int]:
+    """Order contracts by when they actually STOP EXISTING.
+
+    On the third Friday the a.m. contract settles against the OPENING price and
+    the p.m. one against the close, so the a.m. contract is the earlier of the
+    two — several hours earlier, on the same date. Listing it first is therefore
+    the same rule the rest of the list already follows, not a cosmetic
+    preference: a plain text sort puts "2026-08-21 (AM)" after "2026-08-21",
+    which reads as the later contract and is the wrong way round.
+
+    Use this anywhere display keys are sorted for a human to read or to pick a
+    back leg from.
+    """
+    expiry_date, settlement = parse(display_key)
+    return (expiry_date, 0 if settlement == AM else 1)
+
+
 def is_third_friday(expiry_date: str) -> bool:
     """Is this date a monthly expiry — the only kind with two contracts?
 
