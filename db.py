@@ -506,6 +506,27 @@ def finalize_snapshot(db_path: str,
 # and builds its predicate with core.contract.match_clause, which also decides
 # which of the two an old unlabelled row belongs to. See core/contract.py.
 
+# The columns of an option row, written once. The OR IGNORE form is what the
+# collector uses; the plain form exists only to ask the database why it refused
+# a row (_why_the_database_refused). Building both from one list means the
+# diagnosis can never be run against a different statement from the write.
+_OPTION_COLUMNS = (
+    "snapshot_id", "expiry_date", "dte", "strike", "right", "settlement",
+    "bid", "ask", "mark", "last",
+    "iv", "delta", "gamma", "theta", "vega",
+    "volume", "open_interest", "intrinsic_value", "time_value",
+)
+_OPTION_INSERT_TEMPLATE = (
+    "INSERT {conflict}INTO option_rows ({cols}) VALUES ({binds})"
+).format(
+    conflict="{conflict}",
+    cols=", ".join(_OPTION_COLUMNS),
+    binds=", ".join(f":{c}" for c in _OPTION_COLUMNS),
+)
+_OPTION_INSERT = _OPTION_INSERT_TEMPLATE.format(conflict="OR IGNORE ")
+_PLAIN_OPTION_INSERT = _OPTION_INSERT_TEMPLATE.format(conflict="")
+
+
 def insert_option_rows(db_path: str, rows: list[dict]) -> int:
     """
     Bulk-insert option rows for a snapshot in a single transaction.
@@ -525,11 +546,26 @@ def insert_option_rows(db_path: str, rows: list[dict]) -> int:
       the log would record a healthy cycle indefinitely — while the prices, of
       course, would be gone for good.
 
-      So: compare cursor.rowcount against what was offered and log any
-      shortfall as a WARNING. This does not change what gets stored. It only
-      makes a loss that was previously silent and permanent visible in
-      collector.log. Deciding per-constraint behaviour (keep OR IGNORE for
-      genuine duplicates, raise on everything else) remains M3.6 work.
+      So: compare cursor.rowcount against what was offered, and — M3.6, ADR-050
+      — say WHICH KIND of loss it was, because the two are not remotely alike.
+      A duplicate contract is benign: the row that was kept holds the same
+      prices as the row that was dropped, and nothing is missing. A CHECK or
+      NOT NULL violation is data that is gone for good. Both used to produce
+      the same WARNING, so the one that mattered was indistinguishable from
+      the one that did not — and for eight weeks it was, in exactly that way
+      (2,181 identical warnings, ADR-046).
+
+      The classification is EXACT rather than inferred: after the statement,
+      the unique key of every offered row is looked up in the table. A key that
+      is present was stored (by this row or by the duplicate it collided with);
+      a key that is ABSENT is a row the database threw away. One of the absent
+      rows is then replayed as a plain INSERT inside a SAVEPOINT, so the reason
+      in the log is SQLite's own message rather than this module's guess, and
+      the savepoint is rolled back so the replay stores nothing.
+
+      It still does not RAISE, and that is deliberate. Aborting the cycle over
+      a handful of bad rows would discard the several thousand good ones in the
+      same batch — a much larger loss than the one being reported.
 
       UPDATED 2026-07-26 (BUG-017): the collector used to discard this return
       value and record `strikes_fetched = len(option_rows)` — the offered
@@ -546,31 +582,101 @@ def insert_option_rows(db_path: str, rows: list[dict]) -> int:
     # the same thing every pre-2026-08-19 row says (BUG-023).
     rows = [{"settlement": None, **r} for r in rows]
 
-    sql = """
-        INSERT OR IGNORE INTO option_rows (
-            snapshot_id, expiry_date, dte, strike, right, settlement,
-            bid, ask, mark, last,
-            iv, delta, gamma, theta, vega,
-            volume, open_interest, intrinsic_value, time_value
-        ) VALUES (
-            :snapshot_id, :expiry_date, :dte, :strike, :right, :settlement,
-            :bid, :ask, :mark, :last,
-            :iv, :delta, :gamma, :theta, :vega,
-            :volume, :open_interest, :intrinsic_value, :time_value
-        )
-    """
     with managed_conn(db_path) as conn:
-        inserted = conn.executemany(sql, rows).rowcount
-
-    if inserted < len(rows):
-        logger.warning(
-            "insert_option_rows: %d of %d rows were DISCARDED by the database "
-            "(snapshot_id=%s). A duplicate contract is benign; anything else is "
-            "silent data loss — see DEBT-008 / ADR-022.",
-            len(rows) - inserted, len(rows), rows[0].get("snapshot_id"),
-        )
+        inserted = conn.executemany(_OPTION_INSERT, rows).rowcount
+        if inserted < len(rows):
+            _report_discards(conn, rows, inserted)
 
     return inserted
+
+
+def _unique_key(row: dict) -> tuple:
+    """The row's identity under uq_option_rows_contract_settle.
+
+    Must track that index exactly. COALESCE(settlement, '?') is part of it,
+    which is what lets the two third-Friday contracts coexist (ADR-046); an
+    unlabelled row is its own third possibility, not a match for either.
+    """
+    settlement = row.get("settlement")
+    return (row["snapshot_id"], row["expiry_date"], row["strike"], row["right"],
+            "?" if settlement is None else settlement)
+
+
+def _rows_the_database_kept(conn, snapshot_ids) -> set[tuple]:
+    """The unique keys actually in the table, as plain tuples.
+
+    `tuple(...)` is load-bearing, not tidiness. This connection sets
+    row_factory = sqlite3.Row, and a Row NEVER compares equal to a tuple, so a
+    set of Rows matches nothing: every discard would look like unrecoverable
+    loss and the ERROR below would fire on ordinary duplicates. That is the
+    crying-wolf failure this whole task exists to remove, so it is pinned by
+    test_a_duplicate_is_reported_as_benign_not_as_loss.
+    """
+    keys = set()
+    for sid in snapshot_ids:
+        keys.update(tuple(r) for r in conn.execute(
+            """select snapshot_id, expiry_date, strike, right,
+                      coalesce(settlement, '?')
+               from option_rows where snapshot_id = ?""", (sid,)))
+    return keys
+
+
+def _why_the_database_refused(conn, row: dict) -> str:
+    """SQLite's own words, not ours.
+
+    Replays one lost row as a plain INSERT inside a savepoint that is always
+    rolled back, so asking the question stores nothing and cannot itself lose
+    or duplicate data. A guessed reason would be worse than none: the whole
+    point of this path is that nobody knew what was being discarded.
+    """
+    conn.execute("savepoint diagnose_discard")
+    try:
+        conn.execute(_PLAIN_OPTION_INSERT, row)
+    except sqlite3.Error as exc:
+        return str(exc)
+    else:
+        # It inserts cleanly on its own, so the collision was with another row
+        # in the same batch — a duplicate the key check could not see because
+        # the row that won is indistinguishable from the row that lost.
+        return "no error on replay; it collided with another row in the batch"
+    finally:
+        conn.execute("rollback to diagnose_discard")
+        conn.execute("release diagnose_discard")
+
+
+def _report_discards(conn, rows: list[dict], inserted: int) -> None:
+    """Split a shortfall into 'benign' and 'gone', and log them differently.
+
+    Called only when the counts disagree, which after ADR-046 should be never.
+    """
+    discarded = len(rows) - inserted
+    kept = _rows_the_database_kept(conn, {r["snapshot_id"] for r in rows})
+    lost = [r for r in rows if _unique_key(r) not in kept]
+
+    if not lost:
+        logger.warning(
+            "insert_option_rows: %d of %d rows were duplicates and were "
+            "dropped (snapshot_id=%s). Nothing is missing — every contract "
+            "offered is in the table. Benign (ADR-022, ADR-050).",
+            discarded, len(rows), rows[0].get("snapshot_id"),
+        )
+        return
+
+    logger.error(
+        "insert_option_rows: %d of %d rows were REFUSED BY THE DATABASE and "
+        "those prices are GONE (snapshot_id=%s). This is not a duplicate — "
+        "their contracts are absent from the table. SQLite says: %s. First "
+        "one: expiry=%s strike=%s right=%s settlement=%s. See ADR-050.",
+        len(lost), len(rows), rows[0].get("snapshot_id"),
+        _why_the_database_refused(conn, lost[0]),
+        lost[0].get("expiry_date"), lost[0].get("strike"),
+        lost[0].get("right"), lost[0].get("settlement"),
+    )
+    if discarded > len(lost):
+        logger.warning(
+            "insert_option_rows: the other %d discarded rows were duplicates "
+            "and are benign.", discarded - len(lost),
+        )
 
 
 def insert_atm_iv_records(db_path: str, records: list[dict]) -> None:

@@ -426,9 +426,11 @@ def test_insert_option_rows_still_discards_a_row_failing_the_check(temp_db, bad_
     sqlite3 — a plain INSERT of the same row raises IntegrityError (previous
     test); through insert_option_rows it vanishes.
 
-    That behaviour is DELIBERATELY still here. Deciding per-constraint
-    behaviour is M3.6 (ADR-022 step 2). What changed at M1.5 is that the loss
-    is no longer silent — see the two tests below.
+    That behaviour is DELIBERATELY still here, and M3.6 (ADR-050) did NOT
+    change it. Raising instead would abort the whole batch, discarding the
+    several thousand GOOD rows beside the bad one — a far larger loss than the
+    one being reported. What M3.6 changed is that the loss is now told apart
+    from a harmless duplicate and logged as an ERROR; see the tests below.
     """
     sid = add_snapshot(temp_db, ts_ago(minutes=5))
 
@@ -460,24 +462,106 @@ def test_insert_option_rows_reports_the_rows_actually_stored(temp_db):
     assert len(db.get_option_chain(temp_db, sid)) == 5
 
 
-def test_insert_option_rows_warns_when_the_database_discards_rows(temp_db, caplog):
-    """FIXED — DEBT-008 step 1. The warning is the whole point of the fix.
+# ─────────────────────────────────────────────────────────────────────────────
+# Telling the two kinds of discard apart — M3.6, ADR-050
+#
+# The M1.5 version logged one WARNING for any shortfall. That made a benign
+# duplicate look exactly like data gone for good, and for eight weeks it did:
+# 2,181 identical warnings, every one of them the third-Friday contract being
+# thrown away (ADR-046). A warning you see every cycle is a warning you stop
+# reading, which is precisely when the real one arrives.
+#
+# The pinning test these replace asserted the old single wording. It is
+# rewritten rather than made to pass, because the behaviour it pinned is the
+# behaviour this task exists to change — the only circumstance in which a pin
+# may be rewritten.
+# ─────────────────────────────────────────────────────────────────────────────
 
-    It converts a permanent, unrecoverable data loss into a line in
-    collector.log. The collector still records `strikes_fetched =
-    len(option_rows)` — the optimistic count — so this log line is currently
-    the ONLY signal that anything was dropped.
-    """
+def test_a_row_the_database_refuses_is_reported_as_loss_with_sqlites_reason(
+        temp_db, caplog):
+    """The case that matters. These prices are gone and cannot be re-fetched."""
     sid = add_snapshot(temp_db, ts_ago(minutes=5))
 
     with caplog.at_level(logging.WARNING, logger="db"):
-        db.insert_option_rows(temp_db, [
-            opt(sid, FRONT, 6200, "C"),
-            opt(sid, FRONT, 6300, "CALL"),
+        stored = db.insert_option_rows(temp_db, [
+            opt(sid, FRONT, 6200, "C"),          # valid
+            opt(sid, FRONT, 6300, "CALL"),       # fails the CHECK
         ])
 
-    assert "1 of 2 rows were DISCARDED" in caplog.text
-    assert "DEBT-008" in caplog.text, "the log must point at the explanation"
+    assert stored == 1
+    assert "1 of 2 rows were REFUSED" in caplog.text
+    assert "GONE" in caplog.text
+    # SQLite's own words, not this module's guess at them.
+    assert "CHECK constraint failed" in caplog.text
+    # And enough to identify the row without going back to the broker.
+    assert "strike=6300" in caplog.text
+    assert "right=CALL" in caplog.text
+    assert "ADR-050" in caplog.text
+    assert any(r.levelname == "ERROR" for r in caplog.records),         "unrecoverable loss is an ERROR, not a WARNING"
+
+
+def test_a_duplicate_is_reported_as_benign_not_as_loss(temp_db, caplog):
+    """The half that matters more. Nothing is missing — the contract that was
+    dropped is identical to the one that was kept.
+
+    This is also the test that catches the sqlite3.Row-vs-tuple trap in
+    _rows_the_database_kept: with that wrong, every duplicate reads as
+    catastrophic loss and the ERROR above fires on an ordinary cycle."""
+    sid = add_snapshot(temp_db, ts_ago(minutes=5))
+    db.insert_option_rows(temp_db, [opt(sid, FRONT, CALL_STRIKE, "C")])
+
+    with caplog.at_level(logging.WARNING, logger="db"):
+        stored = db.insert_option_rows(temp_db, [
+            opt(sid, FRONT, CALL_STRIKE, "C", mark=99.0)])
+
+    assert stored == 0
+    assert "duplicates" in caplog.text
+    assert "Nothing is missing" in caplog.text
+    assert "GONE" not in caplog.text
+    assert not any(r.levelname == "ERROR" for r in caplog.records),         "a duplicate must never be logged as data loss"
+
+
+def test_a_mixed_batch_separates_the_two(temp_db, caplog):
+    """Both in one batch, each counted as itself — the loss is not inflated by
+    the duplicates beside it, and the duplicates are not hidden by the loss."""
+    sid = add_snapshot(temp_db, ts_ago(minutes=5))
+    db.insert_option_rows(temp_db, [opt(sid, FRONT, CALL_STRIKE, "C")])
+
+    with caplog.at_level(logging.WARNING, logger="db"):
+        db.insert_option_rows(temp_db, [
+            opt(sid, FRONT, 6200, "C"),                    # stored
+            opt(sid, FRONT, CALL_STRIKE, "C", mark=1.0),   # duplicate
+            opt(sid, FRONT, 6300, "CALL"),                 # refused
+        ])
+
+    assert "1 of 3 rows were REFUSED" in caplog.text
+    assert "the other 1 discarded rows were duplicates" in caplog.text
+
+
+def test_asking_why_stores_nothing(temp_db):
+    """The diagnosis replays a refused row as a plain INSERT to learn SQLite's
+    reason. If its savepoint ever failed to roll back, the act of REPORTING a
+    problem would create one.
+
+    Aimed at the branch that can actually write: a row that raises on replay
+    leaves nothing behind whether or not the rollback runs, so going through
+    insert_option_rows proves nothing here — the first version of this test did
+    exactly that and passed with the rollback deleted. So the valid row is
+    handed straight to the diagnosis, which is the only case where the replay
+    succeeds and the savepoint is the only thing undoing it.
+    """
+    sid = add_snapshot(temp_db, ts_ago(minutes=5))
+    row = {"settlement": None, **opt(sid, FRONT, 6200, "C")}
+
+    conn = db._make_conn(temp_db)
+    try:
+        reason = db._why_the_database_refused(conn, row)
+        conn.commit()
+    finally:
+        conn.close()
+
+    assert "no error on replay" in reason
+    assert db.get_option_chain(temp_db, sid) == [],         "the replay must leave the table exactly as it found it"
 
 
 def test_insert_option_rows_stays_quiet_on_a_clean_write(temp_db, caplog):

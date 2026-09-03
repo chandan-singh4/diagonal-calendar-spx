@@ -7,6 +7,66 @@ it was recorded here.
 
 ---
 
+## ADR-050 — A discarded row is either harmless or unrecoverable, and the log must say which
+**Date:** 2026-09-03 · **Status:** Accepted · **Completes:** M3.6, ADR-022 step 2
+
+**Context.** `insert_option_rows` uses `INSERT OR IGNORE`, chosen to absorb duplicate contracts
+(ADR-004). SQLite does not scope a conflict clause to uniqueness: it applies it to **every**
+constraint on the statement, so a CHECK or NOT NULL violation also skips the row instead of
+raising. M1.5 made the resulting shortfall visible by comparing `cursor.rowcount` against what
+was offered and logging a WARNING.
+
+**That warning was not enough, and we have eight weeks of evidence.** It fired **2,181 times**
+with an identical message and an identical count of 160, every one of them the third-Friday p.m.
+contract being thrown away (ADR-046). Nobody investigated, and the reason is structural rather
+than personal: **a warning that appears every single cycle is indistinguishable from background
+noise.** When a warning that matters eventually arrives, it arrives in a log the reader has
+already been trained to skim. This is BUG-005's crying-wolf lesson reaching a second place.
+
+The two things being reported under one message are not comparable. A duplicate contract is
+**harmless** — the row that was kept holds the same prices as the row that was dropped, and
+nothing is missing from the record. A constraint violation is **prices that are gone for good**,
+because the broker does not sell you last Tuesday's quotes.
+
+**Decision: classify the shortfall, and log the two at different levels.**
+
+Benign duplicates stay a WARNING and say plainly that nothing is missing. A row the database
+actually refused is an **ERROR**, names SQLite's own reason, and identifies the contract.
+
+**The classification is exact, not inferred.** After the statement, the unique key of every
+offered row is looked up in the table. A key that is present was stored — either by this row or
+by the duplicate it collided with. A key that is **absent** is a row that was thrown away. There
+is no heuristic and no threshold. Then one absent row is replayed as a plain `INSERT` inside a
+`SAVEPOINT`, so the reason in the log is the database's own message rather than this module's
+guess at it, and the savepoint is rolled back so that asking the question stores nothing.
+
+**Why guessing was not acceptable.** The entire failure being fixed is that nobody knew what was
+being discarded. A plausible-sounding invented reason would have reproduced that failure in a
+more confident voice — the reader would have stopped looking, which is exactly what happened for
+eight weeks.
+
+**Decision: it still does not raise.** ADR-022 step 2 was written as "keep OR IGNORE for genuine
+duplicates, raise on everything else", and the second half is deliberately not adopted. Raising
+aborts the transaction, which discards the several thousand **good** rows in the same batch — a
+far larger and equally permanent loss than the handful being reported. The collector already
+records the honest stored count (BUG-017), so a batch that lost rows is recorded as having lost
+them. Loud is right; destructive is not.
+
+**Pinned four ways, each proved by sabotage.** Reverting the key set to `sqlite3.Row` objects
+(a Row never compares equal to a tuple, so every duplicate would read as catastrophic loss) fails
+3 tests; removing the benign branch fails 3; guessing the reason instead of asking SQLite fails 1;
+deleting the savepoint's rollback fails 1. **The last of those did not fail at first** — the
+original test drove it through `insert_option_rows`, where the replayed row raises and leaves
+nothing behind whether or not the rollback runs, so it proved nothing. It now calls the diagnosis
+directly with a *valid* row, which is the only case where the replay succeeds and the savepoint is
+the one thing undoing it.
+
+**Consequence.** After ADR-046 the expected number of discards is zero, so in normal operation
+neither message appears at all. That is the point: the next time either one shows up, it will mean
+something.
+
+---
+
 ## ADR-049 — Collection runs to 16:02, so the closing price is actually recorded
 **Date:** 2026-09-03 · **Status:** Accepted
 
