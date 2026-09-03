@@ -72,20 +72,31 @@ class TestSessionSelection:
         (15, 29, "MIDDAY"),
         (15, 30, "CLOSE"),    # MIDDAY ends, CLOSE begins
         (15, 59, "CLOSE"),
-        (16, 0, None),        # the close itself — exclusive
+        (16, 0, "CLOSE"),     # the close itself — captured, not skipped
+        (16, 1, "CLOSE"),     # room for the print to settle
+        (16, 2, None),        # window ends — exclusive
         (16, 30, None),
         (3, 0, None),         # overnight
     ])
     def test_session_boundaries_on_a_trading_day(self, hour, minute, expected):
         assert collector.get_session(et(2026, 7, WED, hour, minute)) == expected
 
-    def test_collection_stops_at_four_not_later(self):
+    def test_collection_stops_just_after_four_and_nowhere_near_four_fifteen(self):
         """Not a style choice. SPX is a cash-settled index and stops updating
         at 16:00, so any IV computed afterwards uses a frozen underlying and is
-        analytically worthless. Collecting past the close would look like more
-        data while being actively misleading."""
+        analytically worthless. Collecting on to 16:15 with the options would
+        look like more data while being actively misleading.
+
+        ADR-049 moved the edge from 16:00 to 16:02 without touching that
+        reasoning. Stopping AT 16:00 made the last price of the day the 15:59
+        poll, so the closing print was never recorded on any day since
+        collection began. The two polls past the bell are the only ones taken
+        against a frozen underlying, and their timestamp says so.
+        """
         assert collector.get_session(et(2026, 7, WED, 15, 59)) == "CLOSE"
-        assert collector.get_session(et(2026, 7, WED, 16, 0)) is None
+        assert collector.get_session(et(2026, 7, WED, 16, 0)) == "CLOSE"
+        assert collector.get_session(et(2026, 7, WED, 16, 2)) is None
+        assert collector.get_session(et(2026, 7, WED, 16, 14)) is None
 
     @pytest.mark.parametrize("day", [SAT, SUN])
     def test_the_market_is_closed_all_weekend(self, day):

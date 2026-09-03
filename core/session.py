@@ -33,7 +33,9 @@ from datetime import date, datetime, time
 OPEN_START = time(9, 30)    # OPEN session begins
 OPEN_END   = time(10, 0)    # OPEN ends / MIDDAY begins
 MIDDAY_END = time(15, 30)   # MIDDAY ends / CLOSE begins
-CLOSE_END  = time(16, 0)    # CLOSE ends — SPX underlying freezes at this point
+CLOSE_END  = time(16, 2)    # CLOSE ends — two minutes PAST the equity close,
+                            # on purpose, to capture the settled closing print
+                            # (ADR-049). See session_of for why not 16:00.
 
 # The sessions that poll at the fast interval: the first and last half hour,
 # when the price moves most and a five-minute gap loses the most.
@@ -53,12 +55,30 @@ def session_of(now_et: datetime, holidays: set[str]) -> str | None:
 
       'OPEN'   → 09:30–10:00 ET
       'MIDDAY' → 10:00–15:30 ET
-      'CLOSE'  → 15:30–16:00 ET
+      'CLOSE'  → 15:30–16:02 ET
       None     → overnight, weekend, or holiday
 
-    Collection stops at 16:00 ET — not 16:15 — because SPX (a cash-settled
-    index) stops updating at equity-market close. IVs computed after 16:00 use
-    a frozen underlying price, making them analytically unreliable.
+    Collection stops at 16:02 ET — not 16:15, and no longer 16:00 (ADR-049).
+
+    It used to stop at 16:00, on the reasoning that SPX is a cash-settled index
+    and freezes at the equity close, so IVs computed later use a frozen
+    underlying and are analytically unreliable. That reasoning still holds, and
+    it is still why collection does not run to 16:15 with the options. **What it
+    got wrong was the boundary.** Stopping AT 16:00 meant the last price of the
+    day was the 15:59 poll: the close itself was never recorded, on any day,
+    since collection began. Chandan spotted it.
+
+    Why 16:02 and not 16:01. The SPX close is not struck at 16:00:00 — the index
+    is computed from its component stocks' closing auction prices, and those
+    print over the following seconds. A poll at 16:00 would very likely still
+    carry the 15:59:59 level and record a "close" that is not the close. Two
+    minutes buys the settled print for the cost of one extra poll.
+
+    **The two extra polls are the only ones taken against a frozen underlying,
+    and they are identifiable by their timestamp alone** — at or after 16:00 ET.
+    Nothing needed a new session name or a schema change to tell them apart.
+    Anything wanting a live-underlying-only series filters on that; anything
+    wanting the closing price now has one.
 
     **None is not a fault.** Everything reading this must treat a closed market
     as the expected state, or the dashboard glows red every evening and the

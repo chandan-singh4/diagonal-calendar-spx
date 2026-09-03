@@ -178,9 +178,10 @@ def market_minutes_between(start_utc: datetime, end_utc: datetime) -> float:
 
     This is the single measurement the gap classifier needs, and it replaces
     three separate heuristics that each guessed at it (BUG-005). Sums the
-    overlap of the window with the 09:30–16:00 ET session of every trading day
+    overlap of the window with the 09:30–16:02 ET session of every trading day
     it touches; weekends and holidays contribute nothing because they are not
-    trading days.
+    trading days. The window runs two minutes past the equity close on purpose
+    (ADR-049), so a full trading day is 392 collectable minutes, not 390.
 
     Returns 0.0 for a window that is entirely outside market hours, however
     long it is — an overnight break and a three-day weekend both cost zero

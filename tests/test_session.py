@@ -72,7 +72,9 @@ def test_a_weekday_holiday_is_not():
     (15, 29, "MIDDAY"),
     (15, 30, "CLOSE"),    # MIDDAY ends, CLOSE begins
     (15, 59, "CLOSE"),
-    (16, 0, None),        # SPX freezes at the equity close
+    (16, 0, "CLOSE"),     # the equity close itself — captured, not skipped
+    (16, 1, "CLOSE"),     # the settled closing print lands in here
+    (16, 2, None),        # window ends; SPX has frozen and options run to 16:15
     (20, 0, None),
     (3, 0, None),
 ])
@@ -86,6 +88,42 @@ def test_seconds_do_not_shift_a_boundary():
     be classified as out of hours."""
     assert session.session_of(et(WED, 9, 30, 47), set()) == "OPEN"
     assert session.session_of(et(WED, 15, 59, 59), set()) == "CLOSE"
+    assert session.session_of(et(WED, 16, 1, 59), set()) == "CLOSE"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The closing print (ADR-049)
+#
+# Until 2026-09-03 the window ended AT 16:00, so the last price of every day
+# was the 15:59 poll and the close itself was never recorded — not once, since
+# collection began. These pin the fix, and the reason it is 16:02 rather than
+# 16:01: the index is struck from component closing auction prints that arrive
+# over the seconds after the bell.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_the_closing_bell_is_inside_the_window_not_outside_it():
+    """The regression that motivated ADR-049. If this fails, the close is being
+    dropped again and nobody will notice for weeks — the data looks complete."""
+    assert session.session_of(et(WED, 16, 0), set()) == "CLOSE"
+
+
+def test_there_is_room_after_the_bell_for_the_print_to_settle():
+    """One minute is not enough; the whole point is polling AFTER 16:00."""
+    assert session.session_of(et(WED, 16, 1), set()) == "CLOSE"
+    assert session.CLOSE_END > __import__("datetime").time(16, 0)
+
+
+def test_the_window_still_closes_well_before_the_options_do():
+    """16:02, not 16:15. Options trade on to 16:15 but SPX is frozen, so IVs
+    computed there are unreliable — that original reasoning is unchanged."""
+    assert session.session_of(et(WED, 16, 2), set()) is None
+    assert session.session_of(et(WED, 16, 14), set()) is None
+
+
+def test_the_closing_polls_run_at_the_fast_interval():
+    """They fall in CLOSE, so they inherit the 60-second cadence rather than
+    the 5-minute one — which is what makes 16:00 and 16:01 both get sampled."""
+    assert session.expected_interval("CLOSE", 60, 300) == 60
 
 
 def test_the_market_is_shut_all_weekend_whatever_the_hour():

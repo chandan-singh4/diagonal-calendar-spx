@@ -7,6 +7,68 @@ it was recorded here.
 
 ---
 
+## ADR-049 — Collection runs to 16:02, so the closing price is actually recorded
+**Date:** 2026-09-03 · **Status:** Accepted
+
+**Context: Chandan noticed the close was missing.** The collection window ran 09:30–16:00 with
+the end exclusive, so the last poll of every day landed at **15:59:5x** and the 4:00 PM close
+was never recorded — **not once, on any day, since collection began on 23 June.** Confirmed by
+query before changing anything: the last snapshot of each of the last ten trading days is
+15:59:50, 15:59:52, 15:59:53, 15:59:14 and so on. Every "closing price" in the record is in fact
+a quote from up to a minute earlier.
+
+**This is the second time the same shape of bug has surfaced in three sessions** — data that was
+never captured, invisible because what *was* captured looked complete. The third-Friday p.m.
+contract (ADR-046) was the first. Nothing in the system can report an absence it was never told
+to expect.
+
+**Decision: `CLOSE_END` moves from 16:00 to 16:02.**
+
+**Why not 16:01, which is what was asked for.** The SPX close is not struck at 16:00:00. SPX is
+a cash index computed from its component stocks, and those components' closing auction prices
+print over the seconds following the bell. A poll at 16:00 would very likely still carry the
+15:59:59 level — it would record a "close" that is not the close, which is worse than recording
+nothing, because it looks right. Two minutes buys the settled print. Sabotaging the constant to
+16:01 fails 15 tests, including one that exists to say exactly this.
+
+**Why not 16:15, where the options actually stop trading.** The original reasoning for stopping
+at the equity close is untouched and still correct: SPX freezes at 16:00, so an IV computed
+against it after that uses a stale underlying while the option marks keep moving. Collecting to
+16:15 would look like 13 more minutes of data while being actively misleading. Sabotaging the
+constant to 16:15 fails 24 tests.
+
+**So the two polls past the bell are the only ones ever taken against a frozen underlying** —
+and **they need no new column, session name or schema change to be identified: their timestamp
+says so.** At or after 16:00 ET is the filter. This matters because `snapshots.market_session`
+carries a `CHECK(market_session IN ('OPEN','MIDDAY','CLOSE'))` constraint, and inventing a
+fourth value would have meant rebuilding a table in the live 3.55 GB database to buy a fact the
+clock already tells us. Anything wanting a live-underlying-only series filters on the time;
+anything wanting the closing price now has one.
+
+**Cost.** Two extra polls a day, at the CLOSE session's 60-second cadence: 126 snapshots a day
+becomes 128, roughly **1.3 MB a day** against ~82 MB. About 1.6%. Chandan's "it wouldn't cost
+too much" was right.
+
+**Consequences, and the one that needed care.** A collectable trading day is now **392 minutes,
+not 390**, which flows into `market_minutes_between` and the gap classifier. The routine-gap
+tolerance of 3.0 minutes is **unchanged and still correct**: it budgets ~1.0 minute of
+uncollectable time at each end of the day, and the last write simply moved from 15:59:xx (up to
+1.0 min before 16:00) to 16:01:xx (up to 1.0 min before 16:02). Both numbers moved together, so
+the budget did not. **Widening the window without moving the expected last write with it would
+have made every ordinary night look like a fault** — precisely the BUG-005 crying-wolf failure,
+reintroduced from the opposite direction — so that property now has its own test.
+
+**Proved by breaking it, three ways.** Reverting to 16:00 fails 19 tests; 16:01 fails 15; 16:15
+fails 24. Six new tests cover the bell being inside the window, the room after it, the window
+still closing well before the options do, the two minutes being collectable, the closing polls
+inheriting the fast cadence, and the ordinary night staying routine.
+
+**Not yet in effect.** The running collector holds the old 16:00 window and will keep stopping
+at 15:59 until it is restarted. Nothing is lost by waiting; the first close this captures is the
+first close after the restart.
+
+---
+
 ## ADR-048 — The a.m. contract is over at the opening print, not the close
 **Date:** 2026-09-03 · **Status:** Accepted · **Closes:** BUG-027
 
