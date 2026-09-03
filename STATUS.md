@@ -1,8 +1,8 @@
 # PROJECT STATUS
 
 **Updated:** 2026-09-03 · **Branch:** `m3-data-hardening` — **stage 3, 5 of 9 parts done.**
-**State:** 912 checks pass, everything **saved to GitHub**. The collector was restarted 12:12 ET
-onto the new 16:02 window. **Today's close should be the first ever recorded — verify it.**
+**State:** 925 checks pass. Collector restarted 12:12 ET onto the new 16:02 window, so **today's
+close should be the first ever recorded — verify it.** This session's work is **not yet pushed.**
 > Self-contained: read this file alone to start a session. Replaced entirely by `/wrap`.
 
 ## What this project is
@@ -31,46 +31,45 @@ also need ~20 and ~100 real trades; there are 6 practice ones.
 
 ## This session
 
-**A short session, and three of its four items closed by checking rather than building.**
-
-**The closing price was never being recorded — not once since 23 June.** Chandan spotted it.
-The window ran to 16:00 with the end excluded, so the last poll of every day landed at
-**15:59:5x** and every "close" in the record is a quote from up to a minute earlier. It now runs
-to **16:02** (ADR-049) — two minutes, not the one asked for, because SPX is struck from its
-components' closing auction prints, which arrive over the seconds *after* the bell; a 16:00 poll
-would record a close that is not the close. **Still not 16:15**, where the options stop: SPX is
-frozen by then and the IVs would be computed against a stale underlying. Costs ~1.3 MB a day.
-**Second time in three sessions that data was never captured and nothing could tell** — the
-record looked complete both times.
+**The closing price was never being recorded — not once since 23 June.** Chandan spotted it. The
+window ran to 16:00 with the end excluded, so the last poll of every day landed at **15:59:5x**
+and every "close" in the record is a quote up to a minute earlier. It now runs to **16:02**
+(ADR-049) — two minutes, not the one asked for, because SPX is struck from its components' closing
+auction prints, which arrive in the seconds *after* the bell. **Not 16:15** either, where the
+options stop: SPX is frozen by then. Costs ~1.3 MB a day.
 
 **Stage 3.7 is done, and it found a bug on its first run.** `scripts/audit.py` asks a question no
 test can: not "does the code work" but **"is the record actually complete?"** Every test passed
-throughout all three silent-data-loss bugs, because they checked what the code was believed to do.
-It reads the real record **read-only by construction** — SQLite refuses a write. On its first run
-it found **BUG-030**: the broker's -9.99 "no value" marker stored as a volatility, 5,127 rows. It also correctly filed the two known ten-week holes
-as *history* rather than faults, and treats a short day the collector already owned up to as a
-note rather than an alarm — an audit that cries wolf gets skimmed.
+throughout all three silent-data-loss bugs — they check what the code is *believed* to do. It reads
+the record **read-only by construction** (SQLite refuses a write), files the two known ten-week
+holes as *history* not faults, and calls a short day the collector owned up to a note, not an
+alarm; an audit that cries wolf gets skimmed.
 
-**BUG-029 is fixed** — printing can no longer stop the watchdog alerting.
+**BUG-030's parser side is now fixed.** Schwab sends **-999.0** when it has no value, and it was
+stored verbatim. Wider than the audit could see: 5,127 rows carry a volatility of -9.99 **and 5,081
+carry each of the four greeks at -999.0**. **Exact equality, deliberately** — -9.99 is an ordinary
+theta and 38 rows really hold it, so a tolerance band would delete real data tidying up a sentinel.
+
+**BUG-029 is fixed** — printing can no longer stop the watchdog alerting. **Its alarm path is
+proven; a real outage already did it** (19 Aug, 12:30 ET; alert 8 min later, then recovery).
 
 **Stage 3.8 is done — the weekly broker-permission runbook.** `scripts/reauth.py` already existed
 (and **puts the old permission back if you abort**) but **nothing in `docs/` mentioned it** — the
-exact failure 3.8 names. `docs/RUNBOOK_REAUTH.md` covers it, including the `get_client()` trap.
-
-**The watchdog's alarm path is proven — a real outage already did it** (19 August, 12:30 ET;
-alert 8 minutes later, then recovery). Staging one in isolation also found BUG-029.
+exact failure 3.8 names. `docs/RUNBOOK_REAUTH.md` covers it, `get_client()` trap included.
 
 ## What to do next
 
-1. **Save this session's work to GitHub** (needs Chandan's word) — eight files touched, nothing
-   pushed since 19 August.
-3. **Then stage 3.5** (show the collection gaps never displayed) **or 3.3** (a proper way to
-   change the database's shape). 3.9 stays last.
+1. **Push, and restart the collector** (both need Chandan's word) — it is still running the OLD
+   parser, so **BUG-030 resumes at 09:30 tomorrow** until it is restarted.
+2. **Repair the ~5,100 marked rows?** (needs Chandan's word) — a write to the live record.
+3. **Verify today's close landed** — after 16:02 ET, snapshots at ~16:00 and ~16:01.
+4. **Then 3.5** (show the collection gaps) **or 3.3** (a way to change the database's shape).
 
 ## Open problems
 
-- **BUG-030 (high, new)** — the -9.99 sentinel stored as a volatility. **ENH-011 (high)** — tab clicks are slow; cause **not established**, measure first.
-  **BUG-001 (high, blocked on Chandan)** — old unexplained report; needs a symptom and screenshot.
+- **BUG-030 (high)** — parser fixed; **old rows unrepaired, collector not yet restarted**.
+  **ENH-011 (high)** — tab clicks slow; cause **not established**, measure first. **BUG-001 (high,
+  blocked on Chandan)** — old unexplained report; needs a symptom and screenshot.
   **BUG-018 (medium)** — on expiry day one tile says "set strikes" when they already are.
   **DEBT-029** — two screen-library features are past their removal dates, used in ~36 places.
 

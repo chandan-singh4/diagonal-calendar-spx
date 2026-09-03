@@ -5,7 +5,7 @@ what broke, and what remains.
 
 ----
 
-## 2026-09-03 (session 14) — three items closed by reading, and the closing price was never recorded
+## 2026-09-03 (session 14) — three items closed by reading, the closing price was never recorded, and an audit that found a bug on its first run
 
 **The session's task list was the four items session 13 left behind. Three of them turned out
 not to need the work they were written for**, and finding that out took less time than the work
@@ -117,7 +117,53 @@ a poll rather than losing one, `collection_gaps` correctly recorded nothing, and
 reported healthy on the next check. **ADR-049 is still unproven in the wild** until the 16:00
 and 16:01 polls are seen landing today.
 
-**876 → 889 checks pass.** Everything is committed and pushed across four commits.
+**6. BUG-029 fixed.** The watchdog now reconfigures both its streams to UTF-8 at the top of
+`main()`, and every print goes through a `_say()` that falls back to ASCII-with-replacements if
+even that fails. A silent watchdog beats a dead one: the alert matters, the emoji does not. Proved
+by driving it through a cp1252 stream and a stream that raises on every write. The same UTF-8
+shim now exists in two places, logged as DEBT-039.
+
+**7. M3.7 done — `scripts/audit.py`, and it found a bug on its first run.** The audit asks a
+question no unit test can: not "does the code work" but **"is the record actually complete?"**
+Every test in the suite passed throughout ADR-046, ADR-048 and ADR-049 — three separate cases of
+data never being captured — because tests check what the code is *believed* to do. **Read-only by
+construction**: the connection is opened `?mode=ro`, and a test asserts that a `delete` against it
+raises. The daily expectation is **derived** by walking `core.session` rather than written down,
+which is why ADR-049's window change carried through with no edit; a test shrinks the window and
+watches the expectation follow. Every check is proved in both directions, and the negative half is
+the half that matters — a short day the collector already recorded a gap for is reported as a
+*note*, not an alarm, because an audit that cries wolf gets skimmed within a week (ADR-045's
+lesson, arriving from a new direction).
+
+**8. BUG-030 — the broker's "no value" marker, stored as data for ten weeks.** The audit's IV
+sanity check found it immediately: **5,127 rows in `option_rows` hold `iv = -9.99`**, and every
+single non-positive IV in the entire 18.7M-row table is exactly that value. Not noise — a
+sentinel. Schwab sends **-999.0** when it has nothing to give, and the collector's ÷100 turned it
+into a volatility of -999%.
+
+**The first backlog entry under-reported it, and reading the record for the fix is what corrected
+that.** The audit only inspects IV, so IV is all the entry named. **Each of `delta`, `gamma`,
+`theta` and `vega` also has 5,081 rows at raw -999.0** — the greeks are not divided, so they kept
+the marker's original shape and no derived column made them conspicuous. They arrive almost
+entirely at 09:30:xx on the longer-dated expiries: at the bell those contracts have not traded, so
+the broker has quotes but nothing to compute from.
+
+**The trap is the other direction, and it is why the comparison is exact equality.** `-9.99` is a
+perfectly ordinary theta — an option losing $9.99 a day — and **38 rows in the real record
+legitimately hold it**. A tolerance band, or a plausible-looking `< -100` rule, would have deleted
+real prices while tidying up a sentinel. `SCHWAB_NO_VALUE` and `_value_or_none()` now blank the
+marker on exactly the five fields Schwab sends it for; `bid`/`ask`/`last` are deliberately left
+alone, being quotes the broker either answers or omits. **Sabotaged three ways** — neutered to a
+passthrough (6 failures), widened to a `< -100` band (1, and it is the -998.9 boundary test that
+catches it), and blanking everything (5).
+
+**Two halves remain, both Chandan's call.** The collector is **still running the old parser**, so
+this resumes at 09:30 tomorrow until it is restarted; and repairing the ~5,100 existing rows is a
+write to the live 3.55 GB record. The rows are identifiable exactly and the value was never
+information, but neither happens without his word.
+
+**876 → 925 checks pass.** Sessions 13-14 work is committed; the 3.7/BUG-029/BUG-030 half is not
+yet pushed.
 
 ----
 

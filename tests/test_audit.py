@@ -212,8 +212,9 @@ def test_full_days_produce_nothing(temp_db):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_the_brokers_no_value_sentinel_is_caught(temp_db):
-    """-9.99 is what Schwab sends when it has no IV to give, and it was being
-    stored as though it were one. This is the check that found it."""
+    """Schwab sends -999.0 when it has no IV to give; the collector's /100
+    turns it into -9.99, and it was stored as though it were a volatility.
+    This is the check that found it (BUG-030)."""
     sid = _snap(temp_db, WED, "09:30:30")
     _iv_row(temp_db, sid, "2026-08-05", "PM", -9.99)
     found = _findings(audit.check_iv_sanity, temp_db)

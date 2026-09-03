@@ -86,6 +86,38 @@ def _safe_float(val) -> float | None:
         return None
 
 
+# Schwab's "I have no value for this" marker, sent in place of a number for
+# implied volatility and every greek. BUG-030.
+#
+# It is not a near-miss or a rounding artefact: across 18.7M stored rows, every
+# single non-positive IV was exactly this value after the collector's /100, and
+# every poisoned greek was exactly this before it. It arrives mostly at 09:30 on
+# the longer-dated expiries, which have not traded yet when the bell rings — the
+# broker has quotes for them but nothing to compute a volatility from.
+#
+# Storing it verbatim broke the standing "missing price -> blank, not 0" rule
+# with something considerably worse than 0: as an IV it reads as -999%, and it
+# dominates any average, minimum or ratio it enters.
+SCHWAB_NO_VALUE = -999.0
+
+
+def _value_or_none(val) -> float | None:
+    """A Schwab numeric field, with the no-value marker turned into a blank.
+
+    EXACT equality, deliberately. -9.99 is a perfectly ordinary theta — an
+    option losing $9.99 a day — and 38 rows in the record legitimately hold it.
+    A tolerance band, or testing `< -100`, would delete real data to tidy up a
+    sentinel. Only the marker itself is a marker.
+    """
+    try:
+        v = float(val)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(v):
+        return None
+    return None if v == SCHWAB_NO_VALUE else v
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Quotes
 # ─────────────────────────────────────────────────────────────────────────────
@@ -249,6 +281,13 @@ def chain_to_dataframe(raw_chain: dict) -> pd.DataFrame:
     The collector divides by 100 before writing to the database (stored as
     decimal: 0.184). This conversion happens in collector.py, not here, so
     app.py code that reads from the legacy schema remains unaffected.
+
+    Note on missing values (BUG-030): iv and the four greeks come back as
+    SCHWAB_NO_VALUE when the broker has nothing to give — typically at 09:30,
+    on expiries that have not traded yet. Those arrive here as None, not as a
+    number, so nothing downstream has to know the marker exists. That /100 is
+    also why the marker used to land in the database as -9.99 for IV while
+    staying -999.0 for the greeks: same marker, one of them scaled.
     """
     rows = []
     for side, key in (("CALL", "callExpDateMap"), ("PUT", "putExpDateMap")):
@@ -271,11 +310,16 @@ def chain_to_dataframe(raw_chain: dict) -> pd.DataFrame:
                         "last":           c.get("last"),
                         "volume":         c.get("totalVolume"),
                         "open_interest":  c.get("openInterest"),
-                        "iv":             c.get("volatility"),  # percentage, e.g. 18.4
-                        "delta":          c.get("delta"),
-                        "gamma":          c.get("gamma"),
-                        "theta":          c.get("theta"),
-                        "vega":           c.get("vega"),        # added: sensitivity to IV change
+                        # BUG-030: these five are the fields Schwab answers with
+                        # SCHWAB_NO_VALUE when it has nothing, so they are the
+                        # five that go through _value_or_none. bid/ask/last are
+                        # left alone — they are quotes, and the broker sends a
+                        # real number or nothing at all for those.
+                        "iv":             _value_or_none(c.get("volatility")),
+                        "delta":          _value_or_none(c.get("delta")),
+                        "gamma":          _value_or_none(c.get("gamma")),
+                        "theta":          _value_or_none(c.get("theta")),
+                        "vega":           _value_or_none(c.get("vega")),
                     })
 
     return pd.DataFrame(rows)
