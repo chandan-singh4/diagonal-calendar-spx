@@ -5,6 +5,83 @@ what broke, and what remains.
 
 ----
 
+## 2026-09-03 (session 14) — three of the four items closed by reading rather than building
+
+**The session's task list was the four items session 13 left behind. Three of them turned out
+not to need the work they were written for**, and finding that out took less time than the work
+would have.
+
+**1. The collector did not need restarting.** STATUS said the running copy predated the 19 August
+fix, so the p.m. contract's daily volatility line had stopped growing. Before stopping a process
+that was collecting live prices, the claim was checked against the database: `atm_iv_by_expiry`
+grouped by capture day and settlement shows **both AM and PM rows every single day from 20
+August** — 126 and 2,520 yesterday — and unlabelled `None` rows only on 19 August and earlier.
+The process itself started 26 August. It had already been restarted, twice over. Restarting
+mid-session would have cost a real ~2-minute hole in today's prices to achieve nothing, so it
+was left running. **This is the second consecutive session in which the written record was wrong
+and the database was right**, which is now recorded in STATUS's working rules.
+
+**2. M3.8 done — but the half that was missing was not the half the task named.** 3.8 reads
+"streamline Schwab token re-auth; document the runbook". The streamlining already existed:
+`scripts/reauth.py` moves the old token aside, runs the flow, and **restores it on abort or
+failure** — the safety net that makes the chore safe to start. What did not exist was any
+mention of it: **`docs/` and `README.md` between them contained zero references to the script**,
+so the only way to know it was there was to have written it. That is exactly the failure 3.8
+exists to prevent, and it makes the point that a tool nobody can find has not shipped.
+`docs/RUNBOOK_REAUTH.md` is the runbook: the three independent ways you learn it is due (banner
+from day 6, watchdog pop-up and email, `--check`), the seven steps, the failure modes, and the
+`get_client()` trap recorded as a thing never to do. **Nothing was streamlined further** — the
+7-day clock is Schwab's and the browser login is a deliberate security boundary, so "streamline"
+can only mean *safe and documented*, never *automatic*.
+
+**3. The watchdog's alarm path had already been proven — by a real outage nobody wrote down.**
+Chandan remembered getting the pop-up and the email on both a stop and a recovery, and the
+record confirms it: `collector.log` has four consecutive cycle failures from 12:30 ET on 19
+August (a pandas logical-ops error), `watchdog_state.json` has `last_alert_utc` 8 minutes later
+— one watchdog cycle — and `alarming: false` for the recovery. **The M3.4 caveat had been
+discharged on the day it was written and the fact never reached a file.**
+
+Detection was staged anyway, because the caveat's *premise* was wrong. It said staging an outage
+needs the collector stopped or the database altered. **Both `DB_PATH` and `STATE_DIR` are
+environment-overridable**, so a throwaway database holding one genuine `snapshots` row
+timestamped three hours back reproduced it in complete isolation — nothing real touched. The
+real `check()` returned "🚨 No prices for 3h 0m — collection has stopped", named the MIDDAY
+session and its 12m 30s limit, and `should_alert()` decided to send; a control run against the
+live database in the same breath returned ✅ and would have sent nothing. **The thing that
+"could not be staged" took ten minutes and found a bug.**
+
+**BUG-029, found by that rehearsal.** `watchdog.py` prints its headline — which starts with an
+emoji — *before* it reaches the alerting block. On Windows a redirected stdout defaults to
+cp1252, so that print raises `UnicodeEncodeError` and the process dies at exit 1: **detection
+succeeded, no alert sent, and the wreckage looks like the watchdog itself being broken.** The
+live alarm is unaffected and always has been (`register_watchdog_task.ps1` redirects nothing,
+and the state file shows healthy checks throughout), so this is logged rather than rushed. But
+an alarm that dies on its own console output is the one failure mode a watchdog cannot have.
+
+**4. BUG-027 closed — the one item that was real work (ADR-048).** The a.m. third-Friday
+contract settles on the opening print but was being carried until 4:15 PM like everything else,
+about a session too long. It was left open in session 13 on purpose: `is_expired` is the only
+rule in the program whose answer **deletes** a record (ADR-039), and every accurate alternative
+deletes *earlier*. **Chandan chose the opening print, 9:30 New York**, over the contract's true
+last trade the evening before — the later of the two correct answers, because being late costs a
+stale row in a popover and being early destroys the entry price a live position is measured
+against.
+
+`MARKET_OPEN` joins `MARKET_CLOSE` in `core/expiry.py` and `contract.is_am` picks between them.
+**The pinning test was replaced, not made to pass**: it recorded BUG-027 as a deliberate
+inaccuracy awaiting exactly this decision, so rule and pin moved together — the only circumstance
+in which a pin may be rewritten. **Proved by sabotage twice:** reverting to a single 4:15 cutoff
+fails 2 tests; applying 9:30 to *every* contract fails 6, which is the mistake that matters,
+since p.m. is ~94% of expiries and that slip would delete nearly every marker at half past nine.
+**Verified on the live system as well as in tests** — `entry_locks.json` holds one lock, on a
+bare p.m. key already expired under both rules, so **nothing is deleted today**; the change first
+bites on 18 September.
+
+**876 → 879 checks pass** (one test replaced by four). **Nothing is pushed** — eight files
+touched and the branch has not been saved to GitHub since 19 August.
+
+----
+
 ## 2026-08-19 (session 13) — the third-Friday p.m. option was being thrown away, every cycle, since day one
 
 **Chandan noticed the dashboard only showed one of the two third-Friday expirations.** He had

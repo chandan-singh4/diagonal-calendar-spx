@@ -188,8 +188,8 @@ between two runs minutes apart as the collector adds snapshots.
 **Goal:** put the data pipeline on a sustainable footing. Bounded growth, monitored collection,
 documented operations.
 
-**Status: started 2026-08-09. 3.1, 3.2 and 3.4 are done, and 3.6's standing symptom is
-explained (2026-08-19); six tasks remain.**
+**Status: started 2026-08-09. 3.1, 3.2, 3.4 and 3.8 are done, and 3.6's standing symptom is
+explained (2026-08-19); four tasks remain — 3.3, 3.5, 3.7, 3.9.**
 
 **The one thing to understand before reading the table.** Collection began 2026-06-23, so on the
 day the policy was written **the oldest expiry was 47 days past and a 90-day rule deleted nothing**
@@ -208,7 +208,7 @@ concluding the storage problem is behind them will be surprised in October.
 | 3.5 | Surface `collection_gaps` in the dashboard | Not started | Data collected since day one and never once shown. `db.get_gaps()` already exists and is uncalled. |
 | 3.6 | Log `INSERT OR IGNORE` rowcount mismatches | ✅ **Symptom explained and fixed 2026-08-19; the logging itself is still not started** | **ADR-046.** The standing symptom is solved. The discards were never duplicates: SPX lists **two** options for each third Friday — the traditional monthly settling at the OPEN, and the SPXW weekly settling at the CLOSE — and Schwab returns both under one expiry key. The parser threw away the contract symbol, `uq_option_rows_contract` had no room for the difference, and `INSERT OR IGNORE` silently dropped the second. 160 = 80 calls + 80 puts = exactly one expiry, which is why the number never varied across **2,181 identical warnings**. Both contracts are now stored with a `settlement` column. **What remains under this number:** the generic rowcount-mismatch logging, which is what would have surfaced this in week one instead of week eight. Keep it — the lesson is that a constant discard figure deserved investigating the first time it appeared. |
 | 3.7 | Data-quality checks: IV outliers, stale quotes, missing legs | Not started | — |
-| 3.8 | Streamline Schwab token re-auth; document the runbook | Not started | Weekly manual chore. Re-auth was needed on the morning of this session. |
+| 3.8 | Streamline Schwab token re-auth; document the runbook | ✅ **Done 2026-09-03** | Both halves. The streamlining had in fact already shipped as `scripts/reauth.py` (moves the old token aside, runs the flow, **restores it on abort or failure**, reports the new expiry) — but it was reachable only by knowing it existed: **no file in `docs/` or `README.md` mentioned it**, which is the whole failure mode 3.8 names. `docs/RUNBOOK_REAUTH.md` is now the runbook: the three ways you find out it is due (banner from day 6, watchdog pop-up and email, `--check`), the seven steps, what to do when it goes wrong, and the `get_client()` trap written down as a thing never to do. **Not done here:** no change to the 7-day clock — Schwab sets it and the interactive login is a deliberate security boundary, so “streamline” can only ever mean *safe and documented*, not *automatic*. |
 | 3.9 | `docs/DATABASE.md`, `docs/OPERATIONS.md`, `docs/TROUBLESHOOTING.md` | Not started | Depends on 3.2. `prune.py` and the VACUUM procedure are the first things `OPERATIONS.md` has to describe. |
 
 **Exit:** bounded DB growth; monitored collection; documented operations.
@@ -227,18 +227,28 @@ concluding the storage problem is behind them will be surprised in October.
    it already refuses to delete a lock it cannot parse, so the failure mode is a stale entry
    rather than a lost one, but it is the piece to check hardest. Fold BUG-024 in: the legacy
    unlabelled rows **are** attributable at read time (proved 170/170 on open interest).
-1. **M3 is under way — 3.3, 3.5, 3.7–3.9 remain; take 3.8 next.** 3.1, 3.2, the entry-IV gate
+1. **M3 is under way — 3.3, 3.5, 3.7 and 3.9 remain; 3.8 landed 2026-09-03.** 3.1, 3.2, the entry-IV gate
    and 3.4 all landed 2026-08-09 (ADR-044, ADR-045). **3.8, the re-auth runbook, is now the
    highest-value item left** precisely *because* 3.4 shipped: the watchdog tells Chandan the
    moment collection stops and says nothing about what to do next, and re-auth is a weekly
    chore performed under time pressure on a market morning. 3.9 is last because
    `OPERATIONS.md` has to describe `prune.py`, and documenting a procedure before it has
    been run in anger writes fiction.
-   **One caveat on 3.4's ✅:** pop-up, email and schedule are each verified live, but no
-   *real* outage has travelled the whole path end to end. Staging one needs the collector
-   stopped or the database altered, both of which require Chandan's word. The first genuine
-   outage is the test, and until it happens the ✅ means "built and individually proven",
-   not "proven in anger".
+   **The caveat on 3.4's ✅ is now mostly discharged (2026-09-03).** It used to read: no
+   *real* outage has travelled the whole path, and staging one needs the collector stopped
+   or the database altered. **That premise was wrong** — `DB_PATH` and `STATE_DIR` are both
+   environment-overridable, so an outage can be staged in complete isolation without
+   touching the collector, the real database or the real state file. Done: a throwaway
+   database holding one genuine `snapshots` row timestamped three hours back, with the
+   market open. The real `check()` returned **"🚨 No prices for 3h 0m — collection has
+   stopped"**, correctly named the MIDDAY session and its 12m 30s limit, folded in the token
+   note, and `should_alert()` decided to **send a new alert** — against a control run on the
+   live database in the same breath returning ✅ and sending nothing. **What that leaves
+   unproven is only the join** between "decided to alert" and "sent", one call away from
+   two channels `--test-alert` already verifies. It also **found BUG-029**: the headline is
+   printed *before* the alert is sent, and that print kills the process on a redirected
+   stdout. The lesson is the same one as 2026-08-19 — the rehearsal that "could not be
+   staged" was staged in ten minutes and found a real defect.
 2. **Do not read 3.2's ✅ as "database growth is handled."** It is handled *eventually*.
    Collection began 2026-06-23; a 90-day rule reaches nothing until about November, and
    the database grows ~82 MB per trading day until then. If disk becomes a real problem
