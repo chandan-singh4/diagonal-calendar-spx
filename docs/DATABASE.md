@@ -133,6 +133,34 @@ That is what `scripts/repair_bug030.py` does, and it commits in 0.1 seconds.
 
 ---
 
+## Does the size slow the dashboard down? No.
+
+Asked directly, and checked against the code rather than assumed. **Nothing reads the whole
+record.** Every query is bounded, in one of two ways.
+
+**Most of the screen reads exactly one poll.** `app.py` takes the newest complete snapshot and
+`get_option_chain` fetches `WHERE snapshot_id = ?` — about **3,000 rows out of 18.9 million**. The
+strike tiles, the transform marks, the scanner and the Iron Condor legs all work from that same id.
+
+**The history charts are bounded by days**, with a clause like
+`s.snapshot_timestamp >= datetime('now', '-90 days', 'utc')`. The term-structure charts ask for 90
+days; the Historical Statistics tab asks for 1, 5, 10 and 20. There is an index behind it, so
+SQLite seeks to the start of the window rather than walking forward from June.
+
+**And those charts do not touch `option_rows` at all** — they read `atm_iv_by_expiry`, which is
+what that table is *for*: ~3,150 rows per 30 days instead of millions. On top of that every loader
+is wrapped in `st.cache_data` for 55-300 seconds, so moving between tabs re-uses the answer.
+
+**So old data costs disk, not speed.** ~82 MB a trading day, ~20 GB a year — which is what
+`scripts/prune.py` is for, and it is a storage decision rather than a performance one. If the
+dashboard ever feels slow, the age of the database is not the cause (see ENH-011, where the cause
+is still not established).
+
+**The 90 days is a number in the code**, not a control on the screen. A two-year IV chart would
+mean raising it — and `atm_iv_by_expiry` is what would keep that fast.
+
+---
+
 ## Backing it up
 
 `VACUUM INTO` produces a consistent copy while the collector is running, and compacts it:

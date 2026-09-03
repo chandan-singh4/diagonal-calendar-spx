@@ -2291,3 +2291,11 @@ BUG-005, but it was an unintended write.
   end-to-end smoke test against real data exercises `atm_iv`, `term_structure`,
   `interpret_curve`, `strike_contract`, `atm_straddle_price`, `normalized_debit`,
   `theta_differential`, `liquidity_score`, and four `db` readers; collector starts clean.
+
+**15. Session wrap — where the dashboard's reads actually go.** Chandan asked whether opening the
+dashboard reads everything back to June. It does not, and the answer is now in `DATABASE.md` rather
+than only in a conversation. Most of the screen reads **one snapshot** — ~3,000 rows of 18.9
+million — and the history charts are bounded by a `-N days` clause against `atm_iv_by_expiry`, not
+`option_rows`. Every `option_rows` reader in `db.py` was checked: each is filtered by `snapshot_id`
+or by a days window; there is no unbounded read. **Old data costs disk, not speed** — which is the
+distinction that decides whether `prune.py` is a performance tool (it is not) or a storage one.

@@ -1,9 +1,9 @@
 # PROJECT STATUS
 
 **Updated:** 2026-09-03 · **Branch:** `m3-data-hardening` — **stage 3 COMPLETE bar 3.5.**
-**State:** 925 checks pass. **The close was captured for the first time ever today** — 16:00 and
-16:01, and the old 15:59 "close" was wrong by 2.39 points. BUG-030 fixed, record repaired, collector
-restarted 16:35 onto the fixed code. **Not yet pushed.**
+**State:** 942 checks pass, all pushed (`b7168c9`). **The close was captured for the first time
+ever today** — 16:00 and 16:01, and the old 15:59 "close" was wrong by 2.39 points. BUG-030 fixed,
+record repaired, collector restarted 16:35 onto the fixed code.
 > Self-contained: read this file alone to start a session. Replaced entirely by `/wrap`.
 
 ## What this project is
@@ -64,7 +64,6 @@ longer stop the watchdog alerting; its alarm path is proven on a real 19 Aug out
    happens on the next collector start or dashboard open. Proved a no-op by test.
 3. **Then stage 4** (the data service) — or **3.5**, which is Chandan's call: he considers the
    alerting need met by the watchdog, and what 3.5 adds is the gap *history* on screen.
-4. **Then 3.5** (show the collection gaps) **or 3.3** (a way to change the database's shape).
 
 ## Open problems
 
