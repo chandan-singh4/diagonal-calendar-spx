@@ -45,6 +45,7 @@ Exit codes: 0 all well (or market shut), 1 a problem was found and reported,
 from __future__ import annotations
 
 import argparse
+import contextlib
 import ctypes
 import json
 import smtplib
@@ -269,7 +270,7 @@ def save_state(state: dict) -> None:
     try:
         STATE_PATH.write_text(json.dumps(state, indent=2), encoding="utf-8")
     except Exception as exc:
-        print(f"  (could not save watchdog state: {type(exc).__name__}: {exc})")
+        _say(f"  (could not save watchdog state: {type(exc).__name__}: {exc})")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -297,7 +298,7 @@ def notify_desktop(title: str, message: str) -> bool:
                        check=True, capture_output=True, timeout=30)
         return True
     except Exception as exc:
-        print(f"  desktop notification failed ({type(exc).__name__}); "
+        _say(f"  desktop notification failed ({type(exc).__name__}); "
               f"falling back to a message box")
         return _message_box(title, message)
 
@@ -310,7 +311,7 @@ def _message_box(title: str, message: str) -> bool:
         ctypes.windll.user32.MessageBoxW(0, message, title, 0x40 | 0x1000)
         return True
     except Exception as exc:
-        print(f"  message box failed too ({type(exc).__name__})")
+        _say(f"  message box failed too ({type(exc).__name__})")
         return False
 
 
@@ -328,10 +329,10 @@ def notify_email(subject: str, body: str) -> bool:
     believe you are covered.
     """
     if not config.ALERT_EMAIL_TO:
-        print("  email: not configured (ALERT_EMAIL_TO empty in .env) — skipped")
+        _say("  email: not configured (ALERT_EMAIL_TO empty in .env) — skipped")
         return False
     if not config.ALERT_SMTP_PASSWORD:
-        print("  email: ALERT_EMAIL_TO is set but ALERT_SMTP_PASSWORD is empty — "
+        _say("  email: ALERT_EMAIL_TO is set but ALERT_SMTP_PASSWORD is empty — "
               "NOT SENT. Half-configured is the dangerous state; finish .env.")
         return False
 
@@ -347,17 +348,52 @@ def notify_email(subject: str, body: str) -> bool:
             s.login(config.ALERT_EMAIL_FROM or config.ALERT_EMAIL_TO,
                     config.ALERT_SMTP_PASSWORD)
             s.send_message(msg)
-        print(f"  email: sent to {config.ALERT_EMAIL_TO}")
+        _say(f"  email: sent to {config.ALERT_EMAIL_TO}")
         return True
     except Exception as exc:
         # The password is never echoed, here or anywhere.
-        print(f"  email: FAILED — {type(exc).__name__}: {exc}")
+        _say(f"  email: FAILED — {type(exc).__name__}: {exc}")
         return False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CLI
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _configure_output() -> None:
+    """Make stdout safe to write to, whatever it happens to be attached to.
+
+    Under Task Scheduler there is no console and nothing redirects, so this
+    changes nothing there. It matters when the output goes to a file or a pipe:
+    on Windows that defaults to cp1252, which cannot encode the icons below.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        # Not every stream is reconfigurable (pytest capture, a plain object).
+        # _say below is the guarantee; this is only the tidy path.
+        with contextlib.suppress(AttributeError, ValueError, OSError):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
+def _say(text: str = "") -> None:
+    """Print — but never let printing be the reason an alarm does not go out.
+
+    BUG-029. The headline is printed BEFORE the alert is sent, and it begins
+    with an emoji. A bare print() to a cp1252 pipe raises UnicodeEncodeError,
+    which killed the process at exit 1 with the check already complete and the
+    alert unsent — and the wreckage looked like the watchdog itself failing,
+    which is the most misleading way for an alarm to break.
+
+    _configure_output should stop that ever arising. This is here because
+    "should" is not good enough for the one program whose job is to still work
+    when everything else is broken. Output is a nicety; alerting is the point.
+    """
+    try:
+        print(text)
+    except (UnicodeEncodeError, OSError, ValueError):
+        # A silent watchdog beats a dead one.
+        with contextlib.suppress(Exception):
+            print(text.encode("ascii", "replace").decode("ascii"))
+
 
 _ICON = {"ok": "✅", "warn": "⚠️", "alarm": "🚨"}
 
@@ -370,33 +406,37 @@ def main(argv: list[str] | None = None) -> int:
                    help="send a pop-up and an email now, to prove they work")
     args = p.parse_args(argv)
 
+    # Before anything is printed. BUG-029: on Windows a redirected stdout is
+    # cp1252, and the icons below are not encodable in it.
+    _configure_output()
+
     if args.test_alert:
-        print("Sending a TEST alert on both channels...")
+        _say("Sending a TEST alert on both channels...")
         d = notify_desktop("SPX watchdog — test",
                            "This is a test. Collection is not affected.")
         e = notify_email("SPX watchdog — test alert",
                          "This is a test of the collector watchdog's email path.\n"
                          "If you are reading this, alerts will reach you.\n"
                          "Nothing is wrong.")
-        print(f"\n  desktop: {'ok' if d else 'FAILED'}   email: {'ok' if e else 'not sent'}")
+        _say(f"\n  desktop: {'ok' if d else 'FAILED'}   email: {'ok' if e else 'not sent'}")
         return 0 if d else 2
 
     now = datetime.now(UTC)
     try:
         result = check(now)
     except Exception as exc:
-        print(f"🚨 The watchdog itself failed: {type(exc).__name__}: {exc}")
+        _say(f"🚨 The watchdog itself failed: {type(exc).__name__}: {exc}")
         return 2
 
-    print(f"{_ICON[result['severity']]} {result['headline']}")
+    _say(f"{_ICON[result['severity']]} {result['headline']}")
     for line in result["detail"].splitlines():
-        print(f"   {line}")
+        _say(f"   {line}")
 
     state = load_state()
     send, kind = should_alert(result, now, state)
 
     if args.dry_run:
-        print(f"\n  --dry-run: would {'SEND a ' + kind + ' alert' if send else 'send nothing'}.")
+        _say(f"\n  --dry-run: would {'SEND a ' + kind + ' alert' if send else 'send nothing'}.")
         return 0 if result["ok"] else 1
 
     if send:
@@ -408,7 +448,7 @@ def main(argv: list[str] | None = None) -> int:
             title = f"SPX collector: {result['headline']}"
             body = (f"{result['headline']}\n\n{result['detail']}\n\n"
                     f"Checked at {now:%Y-%m-%d %H:%M:%S} UTC.")
-        print(f"\n  alerting ({kind}):")
+        _say(f"\n  alerting ({kind}):")
         notify_desktop(title, body)
         notify_email(title, body)
 

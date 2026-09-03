@@ -278,3 +278,100 @@ def test_a_corrupt_state_file_does_not_stop_the_check(tmp_path, monkeypatch):
     bad.write_text("{not json", encoding="utf-8")
     monkeypatch.setattr(watchdog, "STATE_PATH", bad)
     assert watchdog.load_state() == {}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BUG-029 — printing must never be the reason an alarm does not go out
+#
+# Found 2026-09-03 while rehearsing an outage. main() printed the headline
+# BEFORE it reached the alerting block, and the headline starts with an emoji.
+# On Windows a redirected stdout defaults to cp1252, which cannot encode it, so
+# `python scripts/watchdog.py > out.txt` died at exit 1 with the check already
+# complete and no alert sent — and the wreckage looked like the watchdog itself
+# being broken, which is the most misleading way for an alarm to fail.
+#
+# The live alarm was never affected: register_watchdog_task.ps1 redirects
+# nothing. The exposure was any log capture, supervisor, or human piping the
+# output to read it.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _FrozenDatetime(datetime):
+    """Pins main()'s clock so the 3-hour-old snapshot below lands in MIDDAY."""
+
+    @classmethod
+    def now(cls, tz=None):
+        return MIDDAY
+
+
+class _Cp1252Stream:
+    """A stdout that behaves like a Windows pipe: ASCII only, and loud."""
+
+    def __init__(self):
+        self.written = []
+
+    def write(self, text):
+        text.encode("cp1252")       # raises UnicodeEncodeError on the icons
+        self.written.append(text)
+        return len(text)
+
+    def flush(self):
+        pass
+
+
+class _DeadStream:
+    """A stdout that cannot be written to at all, by any encoding."""
+
+    def write(self, text):
+        raise OSError("the pipe is gone")
+
+    def flush(self):
+        pass
+
+
+def test_say_survives_a_stream_that_cannot_encode_the_icons(monkeypatch):
+    """The direct reproduction. A bare print() here is what used to raise."""
+    stream = _Cp1252Stream()
+    monkeypatch.setattr(sys, "stdout", stream)
+    watchdog._say("🚨 No prices for 3h 0m — collection has stopped")
+    assert stream.written, "the message should still get through, degraded"
+    assert "collection has stopped" in "".join(stream.written)
+
+
+def test_say_survives_a_stream_that_is_gone_entirely(monkeypatch):
+    """The fallback has a fallback. Output is a nicety; not raising is the
+    contract, because the caller is about to send an alert."""
+    monkeypatch.setattr(sys, "stdout", _DeadStream())
+    watchdog._say("🚨 anything at all")      # must not raise
+
+
+def test_the_alert_is_still_sent_when_the_headline_cannot_be_printed(
+        wd_db, monkeypatch):
+    """THE test for BUG-029. Everything above is about not crashing; this is
+    about the alarm still arriving, which is the only thing that matters.
+
+    Drives main() end to end with an unprintable stdout and a database whose
+    newest price is hours old, and asserts both channels were called.
+    """
+    _snapshot_at(wd_db, MIDDAY - timedelta(hours=3))
+    monkeypatch.setattr(watchdog, "STATE_PATH", Path(wd_db).parent / "wd_state.json")
+    monkeypatch.setattr(watchdog, "datetime", _FrozenDatetime)
+
+    sent = []
+    monkeypatch.setattr(watchdog, "notify_desktop",
+                        lambda t, b: sent.append(("desktop", t)) or True)
+    monkeypatch.setattr(watchdog, "notify_email",
+                        lambda t, b: sent.append(("email", t)) or True)
+    monkeypatch.setattr(sys, "stdout", _Cp1252Stream())
+
+    rc = watchdog.main([])
+
+    assert rc == 1, "a stopped collector is exit 1, not a crash at exit 1"
+    assert [c for c, _ in sent] == ["desktop", "email"], \
+        "both channels must fire even though the headline could not be printed"
+
+
+def test_configure_output_does_not_blow_up_on_an_odd_stream(monkeypatch):
+    """It is called before anything is printed, so it must tolerate whatever
+    stdout happens to be — including pytest's capture object."""
+    monkeypatch.setattr(sys, "stdout", _DeadStream())
+    watchdog._configure_output()     # must not raise
