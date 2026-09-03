@@ -45,7 +45,7 @@ the record **read-only by construction** (SQLite refuses a write), files the two
 holes as *history* not faults, and calls a short day the collector owned up to a note, not an
 alarm; an audit that cries wolf gets skimmed.
 
-**BUG-030's parser side is now fixed.** Schwab sends **-999.0** when it has no value, and it was
+**BUG-030 is fixed and the record is repaired.** Schwab sends **-999.0** when it has no value, and it was
 stored verbatim. Wider than the audit could see: 5,127 rows carry a volatility of -9.99 **and 5,081
 carry each of the four greeks at -999.0**. **Exact equality, deliberately** — -9.99 is an ordinary
 theta and 38 rows really hold it, so a tolerance band would delete real data tidying up a sentinel.
@@ -59,15 +59,15 @@ exact failure 3.8 names. `docs/RUNBOOK_REAUTH.md` covers it, `get_client()` trap
 
 ## What to do next
 
-1. **Push, and restart the collector** (both need Chandan's word) — it is still running the OLD
-   parser, so **BUG-030 resumes at 09:30 tomorrow** until it is restarted.
-2. **Repair the ~5,100 marked rows?** (needs Chandan's word) — a write to the live record.
-3. **Verify today's close landed** — after 16:02 ET, snapshots at ~16:00 and ~16:01.
+1. **Restart the collector** (needs Chandan's word) — started 12:12, *before* the BUG-030 fix, so
+   **the marker returns at 09:30 tomorrow** until it does. Then delete BUG-030's row.
+2. **Verify today's close landed** — after 16:02 ET, snapshots at ~16:00 and ~16:01.
+3. **Push** (needs Chandan's word).
 4. **Then 3.5** (show the collection gaps) **or 3.3** (a way to change the database's shape).
 
 ## Open problems
 
-- **BUG-030 (high)** — parser fixed; **old rows unrepaired, collector not yet restarted**.
+- **BUG-030 (high)** — parser fixed, rows repaired; **only the collector restart remains**.
   **ENH-011 (high)** — tab clicks slow; cause **not established**, measure first. **BUG-001 (high,
   blocked on Chandan)** — old unexplained report; needs a symptom and screenshot.
   **BUG-018 (medium)** — on expiry day one tile says "set strikes" when they already are.

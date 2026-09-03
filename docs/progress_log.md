@@ -162,6 +162,36 @@ this resumes at 09:30 tomorrow until it is restarted; and repairing the ~5,100 e
 write to the live 3.55 GB record. The rows are identifiable exactly and the value was never
 information, but neither happens without his word.
 
+**9. The 5,127 poisoned rows were repaired, at Chandan's word.** He asked for it directly, so the
+only questions left were *how carefully* and *how much of the record it could disturb*.
+
+**Backed up first** — `dashboard.db.2026-09-03-pre-bug030`, 3.50 GB via `VACUUM INTO`, and the
+backup was opened and `quick_check`ed rather than merely being a file of about the right size.
+
+**The repair was split in two, and that split is the interesting part.** The obvious form is one
+`UPDATE ... WHERE iv = -9.99 OR ...`, and it would have been wrong: that statement holds the write
+lock for its entire 18.7M-row scan, ~50 seconds, and **`db.py:227` gives the collector a 15-second
+timeout**. A live poll landing in that window would have failed, and the repair would have punched
+a hole in the very record it was tidying. Instead the scan ran on a **read-only** connection, which
+under WAL takes no write lock at all, and only the ids came back; the write was then `where id in
+(...)` against the primary key. **It committed in 0.1 seconds**, with 70 seconds still to spare
+before the next poll.
+
+`iv_spread_to_front` and `iv_ratio_to_front` went to NULL with the values they were derived from —
+they read -10.18 and a ratio of **-52**, which is not a number anyone should ever see, and keeping
+them would have left the corruption in its most misleading form.
+
+**Verified against the live record afterwards, in both directions:** zero marked rows in either
+table, **the 38 legitimate `theta = -9.99` rows untouched**, no non-positive IV anywhere, no gap
+row, the next poll COMPLETE, and the audit that found the bug this morning now reports **3 findings,
+0 needing attention** — the other three are the known ADR-046/049 history it correctly files as
+history.
+
+**One half of BUG-030 is still open and it is the operational half.** The collector process was
+started at 12:12, before the parser fix existed, so it is still running the old
+`chain_to_dataframe`. Until it is restarted the marker returns at 09:30 tomorrow — the repaired rows
+would simply be joined by new ones.
+
 **876 → 925 checks pass.** Sessions 13-14 work is committed; the 3.7/BUG-029/BUG-030 half is not
 yet pushed.
 
