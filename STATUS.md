@@ -33,9 +33,8 @@ also need ~20 and ~100 real trades; there are 6 practice ones.
 
 **A short session, and three of its four items closed by checking rather than building.**
 
-**The restart this session opened with was not needed.** STATUS claimed the collector ran pre-fix
-code; the database disproved it — every day from 20 August has both morning and afternoon rows.
-**The written record was wrong and the data was right, again.**
+**The restart this session opened with was not needed** — STATUS claimed pre-fix code; the
+database showed both morning and afternoon rows every day since 20 August.
 
 **The closing price was never being recorded — not once since 23 June.** Chandan spotted it.
 The window ran to 16:00 with the end excluded, so the last poll of every day landed at
@@ -70,8 +69,8 @@ so the outage the old note said needed the collector stopped took ten minutes an
 
 ## Open problems
 
-- **BUG-029 (medium, new today)** — the watchdog crashes on redirected output, before it alerts.
-- **ENH-011 (high)** — tab clicks are slow; cause **not established**, measure first.
+- **BUG-029 (medium, new)** — the watchdog crashes on redirected output, before it alerts.
+  **ENH-011 (high)** — tab clicks are slow; cause **not established**, measure first.
   **BUG-001 (high, blocked on Chandan)** — old unexplained report; needs a symptom and screenshot.
   **BUG-018 (medium)** — on expiry day one tile says "set strikes" when they already are.
   **DEBT-029** — two screen-library features are past their removal dates, used in ~36 places.
