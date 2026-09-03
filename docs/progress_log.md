@@ -266,11 +266,66 @@ chore, the 7-day re-auth — because a runbook that implies constant vigilance g
 repeating it. **Every command and flag in all three was checked against the scripts rather than
 recalled**, which is the same discipline that the BUG-031 mistake earlier today came from skipping.
 
-**Stage 3 now has one piece left: 3.3, the migration framework.** 3.5 is Chandan's call — he
-considers the alerting need met by the 3.4 watchdog, which is fair; what 3.5 would add on top is
-the gap *history* on screen.
+**14. M3.3 done — schema changes are versioned, forward-only and loud (ADR-051).** The thing being
+replaced was this, ten times over:
 
-**876 → 928 checks pass.**
+```python
+try:
+    conn.execute("ALTER TABLE trades ADD COLUMN close_type TEXT")
+except Exception:
+    pass  # column already exists
+```
+
+**The comment is a guess.** `except Exception: pass` cannot tell "already there" from a full disk,
+a locked database, a misspelled type, or a missing table — all four were silently successful. It is
+this project's signature failure aimed at the container rather than the contents. And it left **no
+record**: ten changes had been applied to the live 3.5 GB file while `schema_version` still said 1,
+so the only way to answer "what shape is this database in?" was to open it and look.
+
+`schema.py` is a numbered list of migrations and a runner. Every step has a description and a row
+recording when it was applied. `SCHEMA_VERSION` is **derived** from the list, because a constant
+maintained beside a list is one edit from disagreeing with it, silently. `add_column` asks
+`PRAGMA table_info`, so the only condition suppressed is the one actually checked for.
+
+**No `down()`, deliberately.** A down-migration is a promise to reverse a change to the one
+irreplaceable file here — written when nobody is looking at it, and run when something is already
+going wrong. Restoring the backup taken beforehand is a real answer; an undo script is an
+aspirational one.
+
+**The version row is written in the same transaction as its change.** Half-applied is the worst
+available outcome: the version would say one thing, the shape another, and the next startup would
+trust the version. Each migration commits separately, so a failure stops where it failed and
+everything before it stays applied.
+
+**The journal's table joined the version number, and the test asserting it should not was
+rewritten.** `init_trades_table` was kept separate "so the collector's schema path and version
+number are unaffected by it" — and that separation is exactly what made the version meaningless.
+One database, one version. Rule and pin moved together.
+
+**What it deliberately does NOT own:** the conditional unique-index creation in `init_db`, which
+inspects for duplicate contract slots and declines to build the index if it finds any (BUG-028).
+A forward-only migration must succeed or raise, and "found duplicates, warned, carried on" is
+neither. Folding it in would have produced either a migration that lies about succeeding or one
+that takes startup down over old data.
+
+**Migrations 2 and 3 check before they act, which a clean framework would not need to.** That is a
+one-time debt with a named cause: every existing database already had those columns, added by the
+old code, while still stamped v1 — the two states are indistinguishable from the version alone.
+From 4 onward, migrations may assume what their predecessors left.
+
+**Sabotage-proved five ways:** restoring the swallow-everything `except` fails 1 test; recording
+the version before applying the change fails 2; dropping the newer-database guard fails 2; skipping
+the order and gap check fails 3; re-applying every migration on every startup fails 3.
+
+**The live database is still at v1 and migrating it will add nothing** — every column is already
+there. That is not an assumption: a test rewinds a database into exactly that state, migrates it,
+and asserts the column sets are unchanged while the version advances. It will happen on the next
+collector start or dashboard open.
+
+**Stage 3 is complete apart from 3.5**, which is Chandan's call — he considers the alerting need
+met by the 3.4 watchdog, which is fair; what 3.5 would add on top is the gap *history* on screen.
+
+**876 → 942 checks pass.**
 
 ----
 

@@ -25,7 +25,7 @@ and the specific ways it has been got wrong.
 | `atm_iv_by_expiry` | 126,238 | The at-the-money volatility per expiry per poll — the summary the analytics actually read. | **Forever** |
 | `collection_gaps` | 48 | Every stretch of market hours where nothing was collected, and why. | **Forever** |
 | `trades` | 6 | The trade journal. Currently six practice entries. | **Forever** |
-| `schema_version` | 1 | Which shape the database is in. | **Forever** |
+| `schema_version` | one per migration | Which shape the database is in, and when each change was applied. | **Forever** |
 
 `snapshots` is the spine: everything else points at a `snapshot_id`, with
 `ON DELETE CASCADE`, so deleting a snapshot deletes its option rows and its IV summary with it.
@@ -152,10 +152,35 @@ holds recent writes and a plain file copy will miss them.
 
 ## Changing its shape
 
-There is no migration framework yet — that is **M3.3**, and it is the last real piece of stage 3.
-Columns are currently added by an add-if-missing `ALTER TABLE` pattern that now runs **ten times**
-on every startup. One-off structural changes live in `migrations/` as standalone scripts, each
-with a dry-run default.
+**`schema.py` holds a numbered list of migrations and the runner that applies them** (ADR-051).
+To change the schema, add a `Migration` to the end of `MIGRATIONS` with the next number and a
+description. That is the whole procedure.
+
+- **Forward-only.** There is no `down()`. Reversing a change to this file means restoring the
+  backup you took before making it — which is a real answer, unlike an undo script written when
+  nobody was looking at it.
+- **It records what it did.** One row per migration in `schema_version`, with a timestamp and a
+  description, written in the *same transaction* as the change, so the version and the shape can
+  never disagree.
+- **It fails loudly.** A migration that raises is rolled back; the database is never left
+  half-changed, and earlier migrations stay applied.
+- **Old code will not open a newer database.** It raises rather than writing rows in a shape it
+  does not understand.
+- **`SCHEMA_VERSION` is derived from the list**, never written down beside it.
+
+Use `schema.add_column(conn, table, column, decl)` rather than a bare `ALTER`. It asks
+`PRAGMA table_info` first, so "already there" is *known* while a full disk, a locked database or a
+misspelled type still raise. The pattern it replaced — `try: ALTER ... except Exception: pass` —
+treated all four as success, and left the live database at version 1 after ten changes.
+
+Migrations 2 and 3 check whether their columns exist before adding them. That is a one-time debt,
+not the pattern: existing databases already had those columns while still stamped v1, so the two
+states are indistinguishable from the version. **Migrations from 4 onward may assume the state
+their predecessors left.**
+
+One-off structural repairs that are not schema changes — deduplicating rows, reclassifying values
+— live in `migrations/` as standalone scripts with a dry-run default. Those are a different thing
+from a schema version and stay separate.
 
 **A `CHECK` constraint cannot be altered in place.** `snapshots.market_session` allows exactly
 `'OPEN'`, `'MIDDAY'`, `'CLOSE'`; adding a fourth value would mean rebuilding a table inside a

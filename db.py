@@ -51,6 +51,7 @@ from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import config
+import schema
 from core import contract
 
 logger = logging.getLogger(__name__)
@@ -61,7 +62,9 @@ logger = logging.getLogger(__name__)
 # function. The init_db() version check will detect the mismatch on startup.
 # ─────────────────────────────────────────────────────────────────────────────
 
-SCHEMA_VERSION = 1
+# Owned by schema.py, which derives it from the migration list. Re-exported
+# here because callers have always imported it from db.
+SCHEMA_VERSION = schema.SCHEMA_VERSION
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DDL — Snapshot-Anchored Schema
@@ -292,7 +295,15 @@ def init_db(db_path: str | None = None) -> None:
     conn = _make_conn(path)
     try:
         conn.executescript(_DDL)
+        # The journal's table is part of this database's schema whoever opens
+        # it, and keeping it outside the version number is what made the shape
+        # of a given file unanswerable (M3.3, ADR-051).
+        conn.executescript(_TRADES_DDL)
         conn.commit()
+
+        # Columns first, and loudly. Everything below this line may assume the
+        # settlement columns exist.
+        schema.migrate(conn)
 
         # ── Foundational integrity migration ─────────────────────────────────
         # option_rows historically had no uniqueness guarantee on
@@ -342,12 +353,6 @@ def init_db(db_path: str | None = None) -> None:
         # every NULL in a UNIQUE index as distinct from every other NULL, so
         # indexing the raw column would stop deduplicating the legacy rows and
         # reopen the six-leg fan-out this index was created to close.
-        _cols = {r["name"] for r in conn.execute("PRAGMA table_info(option_rows)")}
-        if "settlement" not in _cols:
-            conn.execute("ALTER TABLE option_rows ADD COLUMN settlement TEXT")
-            conn.commit()
-            logger.info("option_rows: added settlement column (BUG-023)")
-
         _has_settle_uq = conn.execute(
             "SELECT 1 FROM sqlite_master "
             "WHERE type = 'index' AND name = 'uq_option_rows_contract_settle'"
@@ -374,13 +379,6 @@ def init_db(db_path: str | None = None) -> None:
         # it would fail and take init_db down with it, and the alternative —
         # deleting rows to make it fit — is a data loss nobody asked for. It is
         # logged instead, loudly, for a human to decide.
-        _atm_cols = {r["name"]
-                     for r in conn.execute("PRAGMA table_info(atm_iv_by_expiry)")}
-        if "settlement" not in _atm_cols:
-            conn.execute("ALTER TABLE atm_iv_by_expiry ADD COLUMN settlement TEXT")
-            conn.commit()
-            logger.info("atm_iv_by_expiry: added settlement column (BUG-028)")
-
         _has_atm_uq = conn.execute(
             "SELECT 1 FROM sqlite_master "
             "WHERE type = 'index' AND name = 'uq_atm_iv_contract'"
@@ -407,30 +405,8 @@ def init_db(db_path: str | None = None) -> None:
                     "(BUG-028)"
                 )
 
-        row = conn.execute(
-            "SELECT MAX(version) AS v FROM schema_version"
-        ).fetchone()
-        current = row["v"] if row and row["v"] is not None else 0
-
-        if current == 0:
-            conn.execute(
-                "INSERT INTO schema_version (version, applied_at, description) "
-                "VALUES (?, ?, ?)",
-                (SCHEMA_VERSION, _utcnow(),
-                 "Snapshot-anchored schema: snapshots, option_rows, "
-                 "atm_iv_by_expiry, collection_gaps")
-            )
-            conn.commit()
-            logger.info("Schema v%d created at %s", SCHEMA_VERSION, path)
-
-        elif current > SCHEMA_VERSION:
-            raise RuntimeError(
-                f"Database schema version {current} is newer than "
-                f"code version {SCHEMA_VERSION}. Update the codebase."
-            )
-
-        else:
-            logger.info("Schema v%d verified at %s", current, path)
+        logger.info("Schema v%d verified at %s", schema.current_version(conn),
+                    path)
 
     finally:
         conn.close()
@@ -1465,32 +1441,27 @@ CREATE INDEX IF NOT EXISTS idx_trades_entry_date ON trades(entry_date);
 
 def init_trades_table(db_path: str) -> None:
     """
-    Create the trades table and indexes if they don't exist.
-    Safe to call on every journal.py startup — all DDL uses IF NOT EXISTS.
-    Intentionally separate from init_db() so the main dashboard schema path
-    and version number are unaffected.
+    Create the trades table and indexes if they don't exist, then bring the
+    schema up to date. Safe to call on every journal.py startup.
+
+    The ten columns this used to add itself, each inside its own
+    `try: ALTER ... except Exception: pass`, are now migrations 2 and 3
+    (M3.3, ADR-051). That pattern could not tell "the column is already there"
+    from a full disk, a locked database or a misspelled type — all four were
+    silently successful — and it left `schema_version` saying 1 after ten
+    changes had been applied.
+
+    It is no longer separate from init_db()'s version number, deliberately.
+    Keeping the journal's schema outside the version was what made "what shape
+    is this database in?" unanswerable.
     """
-    with managed_conn(db_path) as conn:
+    conn = _make_conn(db_path)
+    try:
         conn.executescript(_TRADES_DDL)
-
-        # v3.1 column migrations — safe to run on existing databases
-        try:
-            conn.execute("ALTER TABLE trades ADD COLUMN transform_commissions REAL")
-        except Exception:
-            pass  # column already exists
-
-        try:
-            conn.execute("ALTER TABLE trades ADD COLUMN close_type TEXT")
-        except Exception:
-            pass  # column already exists
-
-        # M3 entry-IV snapshot columns (ADR-044). Same add-if-missing pattern as
-        # above; existing rows keep NULL and fall back to reconstruction.
-        for _col, _type in ENTRY_IV_COLUMNS.items():
-            try:
-                conn.execute(f"ALTER TABLE trades ADD COLUMN {_col} {_type}")
-            except Exception:
-                pass  # column already exists
+        conn.commit()
+        schema.migrate(conn)
+    finally:
+        conn.close()
 
     logger.info("Trades table verified at %s", db_path)
 

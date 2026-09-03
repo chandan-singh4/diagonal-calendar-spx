@@ -7,6 +7,83 @@ it was recorded here.
 
 ---
 
+## ADR-051 — Schema changes are versioned, forward-only, and loud
+**Date:** 2026-09-03 · **Status:** Accepted · **Completes:** M3.3
+
+**Context.** Columns were added by this, ten times over:
+
+```python
+try:
+    conn.execute("ALTER TABLE trades ADD COLUMN close_type TEXT")
+except Exception:
+    pass  # column already exists
+```
+
+**The comment is a guess.** `except Exception: pass` cannot tell "the column is already there"
+from "the disk is full", "the database is locked", "the type name is misspelled" or "the table
+does not exist". All four are silently successful. This project's recurring failure is data that
+was never captured while everything reported healthy — ADR-046, ADR-048, ADR-049, BUG-030 — and a
+schema change that fails silently is that same failure aimed at the container instead of the
+contents.
+
+**It also left no record.** Ten changes had been applied to the live database and `schema_version`
+still said **1**, so "what shape is this file actually in?" could only be answered by inspecting
+it. Two machines could hold the same version number and different databases.
+
+**Decision: `schema.py` — a numbered list of migrations and a runner.**
+
+**Versioned.** Every change has a number, a description, and a row in `schema_version` recording
+when it was applied. `SCHEMA_VERSION` is **derived** from the list rather than maintained beside
+it, because a constant next to a list is one edit away from disagreeing with it, silently.
+
+**Forward-only. There is no `down()`, and that is a decision rather than an omission.** A
+down-migration is a promise to reverse a change to the one irreplaceable file in this project. It
+would be written when nobody is looking at it and run when something is already going wrong.
+Reversing a mistake here means restoring the backup taken before the change — which is a real
+answer, and is what `docs/DATABASE.md` tells you to take.
+
+**Loud.** A migration that fails rolls back and raises. `add_column` asks `PRAGMA table_info`
+rather than inferring from an exception, so the *only* condition suppressed is the one actually
+checked for.
+
+**Atomic per step.** The version row is written inside the same transaction as the change it
+describes. Half-applied is the worst possible outcome: the version would say one thing and the
+shape another, and the next startup would trust the version. Each migration commits separately, so
+a failure stops at the step that failed and everything before it stays applied.
+
+**Ordered and gapless, checked at import.** A duplicated or skipped number is a startup error, not
+a database that quietly diverges between two machines.
+
+**Why migrations 2 and 3 check before they act.** A clean framework would not need to. This is a
+one-time debt with a specific cause: every database in existence already had those columns, added
+by the old code, while still stamped version 1 — so the two states cannot be told apart from the
+version alone. Rather than guess, they converge both. **Migrations from 4 onward may assume the
+state their predecessors left.**
+
+**The journal's table joins the version number.** `init_trades_table` was deliberately separate
+"so the collector's schema path and version number are unaffected by it", and that separation is
+precisely what made the version meaningless. `init_db` now creates the trades table too. One
+database, one version, one place to look. The test asserting the old separation was **rewritten
+with the rule it pinned**, which is the only circumstance in which a pin may be rewritten.
+
+**What this deliberately does not own.** The conditional unique-index creation in `init_db` stays
+where it is. It inspects the table for duplicate contract slots and declines to build the index if
+it finds any (BUG-028). A forward-only migration must either succeed or raise, and "found
+duplicates, warned, carried on" is neither — folding it in would have meant either a migration
+that lies about succeeding or one that takes startup down over old data.
+
+**Proved by sabotage, five ways.** Restoring the swallow-everything `except` fails 1 test;
+recording the version before applying the change fails 2; dropping the newer-database guard fails
+2; skipping the list's order/gap check fails 3; re-applying every migration on every startup fails
+3.
+
+**Consequence for the live database.** It is at v1 with every column already present. Migrating it
+adds **nothing** and stamps v2 and v3 — proved by a test that rewinds a database into exactly that
+state and asserts the column sets are unchanged. It happens on the next `init_db`, which is the
+next collector start or dashboard open.
+
+---
+
 ## ADR-050 — A discarded row is either harmless or unrecoverable, and the log must say which
 **Date:** 2026-09-03 · **Status:** Accepted · **Completes:** M3.6, ADR-022 step 2
 

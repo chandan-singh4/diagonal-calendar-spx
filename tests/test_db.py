@@ -166,21 +166,29 @@ def test_init_db_creates_every_expected_table(temp_db):
             "atm_iv_by_expiry", "collection_gaps"} <= table_names(temp_db)
 
 
-def test_init_db_does_not_create_the_trades_table(temp_db):
-    """Deliberate separation: init_trades_table() is called from journal.py, so
-    the collector's schema path and version number are unaffected by it."""
-    assert "trades" not in table_names(temp_db)
+def test_init_db_now_creates_the_trades_table_too(temp_db):
+    """REVERSED at M3.3 (ADR-051), deliberately — this test used to assert the
+    opposite and was rewritten with the rule it pinned.
+
+    The old separation kept the journal's schema out of the version number so
+    that "the collector's schema path is unaffected by it". The cost was that
+    no version could describe the database: ten columns had been added to the
+    live file while `schema_version` still said 1. One database, one version.
+    """
+    assert "trades" in table_names(temp_db)
 
 
-def test_init_db_is_idempotent_and_records_exactly_one_version_row(temp_db):
+def test_init_db_is_idempotent_and_records_each_version_exactly_once(temp_db):
     db.init_db(temp_db)
     db.init_db(temp_db)
     conn = sqlite3.connect(temp_db)
     try:
-        rows = conn.execute("SELECT version FROM schema_version").fetchall()
+        rows = [r[0] for r in conn.execute(
+            "SELECT version FROM schema_version ORDER BY version")]
     finally:
         conn.close()
-    assert [r[0] for r in rows] == [db.SCHEMA_VERSION]
+
+    assert rows == list(range(1, db.SCHEMA_VERSION + 1)),         "one row per migration, in order, and no repeats however often it runs"
 
 
 def test_init_db_refuses_a_database_from_newer_code(temp_db):
@@ -1679,10 +1687,16 @@ def test_init_trades_table_adds_every_entry_iv_column(trades_db):
 def test_entry_iv_columns_are_added_to_a_pre_existing_trades_table(temp_db):
     """The migration path, not the fresh-schema path. An existing database has
     a trades table built before these columns existed; init_trades_table() must
-    bring it forward without touching the rows already in it."""
+    bring it forward without touching the rows already in it.
+
+    Rewound to the state a REAL old database is in, which is the state the live
+    3.5 GB file was in until M3.3: the old table, and a version of 1 because
+    nothing recorded the columns the add-if-missing code had been adding."""
     conn = sqlite3.connect(temp_db)
     try:
         conn.executescript(
+            "DROP TABLE IF EXISTS trades;"
+            "DELETE FROM schema_version WHERE version > 1;"
             "CREATE TABLE trades (trade_id TEXT PRIMARY KEY, entry_date TEXT, "
             "entry_time TEXT, status TEXT, contracts INTEGER, initial_legs TEXT, "
             "total_debit REAL, created_at TEXT, updated_at TEXT);"

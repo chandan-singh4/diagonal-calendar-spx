@@ -1,6 +1,6 @@
 # PROJECT STATUS
 
-**Updated:** 2026-09-03 · **Branch:** `m3-data-hardening` — **stage 3, 8 of 9 parts done.**
+**Updated:** 2026-09-03 · **Branch:** `m3-data-hardening` — **stage 3 COMPLETE bar 3.5.**
 **State:** 925 checks pass. **The close was captured for the first time ever today** — 16:00 and
 16:01, and the old 15:59 "close" was wrong by 2.39 points. BUG-030 fixed, record repaired, collector
 restarted 16:35 onto the fixed code. **Not yet pushed.**
@@ -25,7 +25,7 @@ record IS the product** — the screen is just a window onto it.
 ## The 9-stage plan
 
 `0 clean up` **done** → `1 automatic checking` **done** → `2 break up big files` **done** →
-`3 stop database growing` **← here, 8 of 9 parts done** → `4 data service` → `5 decide on rebuilding
+`3 stop database growing` **← done bar 3.5** → `4 data service` → `5 decide on rebuilding
 the screen` → `6 answer trading questions with real results` → `7 machine learning` → `8 run unattended`
 Order is fixed: **you can't safely rearrange code you can't check automatically.** Stages 6 and 7
 also need ~20 and ~100 real trades; there are 6 practice ones.
@@ -39,30 +39,31 @@ and every "close" in the record is a quote up to a minute earlier. It now runs t
 auction prints, which arrive in the seconds *after* the bell. **Not 16:15** either, where the
 options stop: SPX is frozen by then. Costs ~1.3 MB a day.
 
-**3.6, 3.7, 3.8 and 3.9 all landed; stage 3 has one piece left.** **3.7** — `scripts/audit.py` asks
-what no test can: not "does the code work" but **"is the record complete?"** Read-only by
-construction, it files the two known ten-week holes as *history* not faults. **3.6 (ADR-050)** — a
-discarded row is now told apart as *harmless duplicate* or *prices gone for good*, exactly rather
-than by guesswork, with SQLite's own reason logged; one message for both is what let **2,181
-identical warnings** go unread for eight weeks. **3.8** — `reauth.py` already existed and **nothing
-in `docs/` mentioned it**, the exact failure 3.8 names. **3.9** — `OPERATIONS.md`,
-`TROUBLESHOOTING.md` (by symptom, not cause) and `DATABASE.md`, written last so they describe what
-was actually built.
+**3.3, 3.6, 3.7, 3.8 and 3.9 all landed — stage 3 is done bar 3.5.** **3.3 (ADR-051)** —
+schema changes are now a numbered, forward-only list with a runner. It replaces
+`try: ALTER ... except Exception: pass`, **ten times over**, whose "column already exists" comment
+was a *guess*: it could not tell that from a full disk, a locked database or a misspelled type, and
+called all of them success. It also left **no record** — ten changes applied to the live file and
+`schema_version` still saying 1. **3.7** — `scripts/audit.py` asks what no test can:
+not "does the code work" but **"is the record complete?"**, read-only by construction. **3.6 (ADR-050)** — a discarded
+row is now told apart as *harmless duplicate* or *prices gone for good*, with SQLite's own reason
+logged; one message for both is what let **2,181 identical warnings** go unread for eight weeks.
+**3.8** — `reauth.py` existed and **nothing in `docs/` mentioned it**. **3.9** — `OPERATIONS.md`,
+`TROUBLESHOOTING.md` (by symptom, not cause) and `DATABASE.md`.
 
-**BUG-030 fixed, record repaired.** Schwab sends **-999.0** when it has no value; it was stored
-verbatim. Wider than the audit could see: 5,127 rows at -9.99 volatility **and 5,081 in each of the
-four greeks**. **Exact equality, deliberately** — -9.99 is an ordinary theta and 38 rows hold it, so
-a tolerance band would delete real data tidying up a sentinel. **BUG-029 fixed** — printing can no
+**BUG-030 fixed, record repaired** — Schwab's **-999.0** "no value" marker was stored verbatim:
+5,127 rows at -9.99 volatility **and 5,081 in each of the four greeks**. **Exact equality,
+deliberately** — -9.99 is an ordinary theta and 38 rows hold it. **BUG-029 fixed** — printing can no
 longer stop the watchdog alerting; its alarm path is proven on a real 19 Aug outage.
 
 ## What to do next
 
 1. **At 09:30 tomorrow, run `scripts/audit.py`** — the first live morning on the fixed parser, and
    the only real proof BUG-030 is closed.
-2. **Then 3.3, the last piece of stage 3** — a proper way to change the database's shape. The
-   add-if-missing pattern now runs **ten times** on every startup, and stage 4 sits behind it.
-3. **3.5 is Chandan's call** — he considers the alerting need met by the watchdog. What 3.5 adds is
-   the *history* of gaps on screen; `db.get_gaps()` is still called from nowhere.
+2. **The live database is still at schema v1.** Migrating it adds nothing and stamps v2/v3; it
+   happens on the next collector start or dashboard open. Proved a no-op by test.
+3. **Then stage 4** (the data service) — or **3.5**, which is Chandan's call: he considers the
+   alerting need met by the watchdog, and what 3.5 adds is the gap *history* on screen.
 4. **Then 3.5** (show the collection gaps) **or 3.3** (a way to change the database's shape).
 
 ## Open problems
