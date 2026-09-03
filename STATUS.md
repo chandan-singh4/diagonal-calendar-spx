@@ -17,7 +17,7 @@ record IS the product** — the screen is just a window onto it.
 
 | Part | What it does |
 |---|---|
-| **Collector** | Background program. Every 1–5 min while markets are open, records all option prices. **Does NOT start with Windows — BUG-031.** |
+| **Collector** | Background program. Every 1–5 min while markets are open, records all option prices. Starts with Windows (a Startup-folder shortcut, not a scheduled task). |
 | **Database** | One file, **3.55 GB** since 23 June, growing ~82 MB a trading day. Irreplaceable — the broker won't sell you last Tuesday's prices. |
 | **Dashboard** | Web page, 6 tabs: Scanner, Entry Analysis, Calendar Edge, Strike Detail, Historical Stats, Research. Reads only. |
 | **Journal** | Diary of actual trades. 6 practice entries, to be discarded. |
@@ -60,15 +60,14 @@ exact failure 3.8 names. `docs/RUNBOOK_REAUTH.md` covers it, `get_client()` trap
 
 ## What to do next
 
-1. **Register the collector to start at logon** (needs Chandan's word — a Windows setting).
-   `scripts/register_collector_task.ps1`. Verify by an actual logout, not by a task appearing.
-2. **Push** (needs Chandan's word).
-3. **At 09:30 tomorrow, run `scripts/audit.py`** — the first live morning on the fixed parser.
+1. **Push** (needs Chandan's word) — three commits plus this correction.
+2. **At 09:30 tomorrow, run `scripts/audit.py`** — the first live morning on the fixed parser, and
+   the only real proof BUG-030 is closed.
+3. **Then 3.5** (show the collection gaps) **or 3.3** (a way to change the database's shape).
 4. **Then 3.5** (show the collection gaps) **or 3.3** (a way to change the database's shape).
 
 ## Open problems
 
-- **BUG-031 (high, new)** — **the collector does not restart after a reboot**; the task was never registered.
   **ENH-011 (high)** — tab clicks slow; cause **not established**, measure first. **BUG-001 (high,
   blocked on Chandan)** — old unexplained report; needs a symptom and screenshot.
   **BUG-018 (medium)** — on expiry day one tile says "set strikes" when they already are.
@@ -95,6 +94,6 @@ exact failure 3.8 names. `docs/RUNBOOK_REAUTH.md` covers it, `get_client()` trap
 settings or programs, starting/stopping the collector, or sending anything off this machine.
 **No check may touch the real database. Trade numbers are never reused. Missing price → blank, not
 0. Prove checks by breaking the code**, never the live file. **Verify on the real system after
-deploying.** The written record has now been wrong **four** times where the system was right —
-**when they disagree, read the database, or ask the machine.**
+deploying.** The written record has been wrong where the data was right three times —
+**when they disagree, read the database.** And a check of one place finding nothing proves nothing.
 **Deeper detail:** `docs/` — `plan.md` · `backlog.md` · `decisions.md` · `progress_log.md` · `RUNBOOK_REAUTH.md`.

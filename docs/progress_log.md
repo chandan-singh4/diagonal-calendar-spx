@@ -207,16 +207,25 @@ Today recorded 127 snapshots rather than 128, and that is the 12:12 restart, not
 cadence shifted from :x0:55 to :x2:17, losing one five-minute slot across the afternoon. No gap row,
 no incomplete snapshot, and 127/128 is nowhere near the audit's short-day threshold.
 
-**11. BUG-031, found by needing to restart the collector.** There was no obvious way to restart it,
-which turned out to be the finding: **`Get-ScheduledTask` lists `SPX Collector Watchdog` and no
-`SPX Diagonal Collector`.** The registration script exists and is correct; it has evidently never
-been run, or the task was removed. The process running today had a parent PID that no longer exists
-— started by hand from a shell long since closed. **So the collector does not come back after a
-reboot.** Not silent, since the watchdog is registered and its alarm path is proven, but recovery is
-manual. `STATUS.md` said "Starts with Windows". **That is the fourth time this session's family of
-findings has been the written record being wrong where the system was right**, and it is the reason
-the rule "when the two disagree, read the database" is in STATUS at all — it now needs extending
-past the database to the machine.
+**11. BUG-031 was raised and withdrawn the same day, and the mistake is worth more than the bug.**
+Needing a way to restart the collector, I checked Task Scheduler, found `SPX Collector Watchdog` and
+no `SPX Diagonal Collector`, and concluded the collector does not start with Windows — contradicting
+`STATUS.md`, which I then "corrected". **Chandan said he had watched it start after a reboot, and he
+was right.** It starts from a **Startup-folder shortcut** created 22 June, the day before collection
+began, enabled in Task Manager, targeting `.venv\Scripts\python.exe collector.py` — **the exact
+command line of the process that was running this morning**, which I had already seen and did not
+follow up.
+
+**The error is the same shape as the one M3.7 exists to prevent: a check that looked in one place,
+found nothing, and was read as proof of absence.** Task Scheduler is one of at least four ways
+Windows starts a program. Worse, the written record was right and the reasoning that overruled it
+was "the record has been wrong three times before" — a prior turned into a conclusion. The rule in
+STATUS is *read the database when the two disagree*, not *assume the file is wrong*.
+
+What survives is small and is logged as **DEBT-040**, not a bug: `scripts/register_collector_task.ps1`
+registers a scheduled task that does not exist and is not used, so the repo documents a mechanism the
+machine does not run — which is what made the wrong conclusion so easy to reach. Startup works today
+and nothing needs doing urgently.
 
 **876 → 925 checks pass.** Sessions 13-14 work is committed; the 3.7/BUG-029/BUG-030 half is not
 yet pushed.
