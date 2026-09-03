@@ -5,7 +5,7 @@ what broke, and what remains.
 
 ----
 
-## 2026-09-03 (session 14) — three of the four items closed by reading rather than building
+## 2026-09-03 (session 14) — three items closed by reading, and the closing price was never recorded
 
 **The session's task list was the four items session 13 left behind. Three of them turned out
 not to need the work they were written for**, and finding that out took less time than the work
@@ -77,8 +77,41 @@ since p.m. is ~94% of expiries and that slip would delete nearly every marker at
 bare p.m. key already expired under both rules, so **nothing is deleted today**; the change first
 bites on 18 September.
 
-**876 → 879 checks pass** (one test replaced by four). **Nothing is pushed** — eight files
-touched and the branch has not been saved to GitHub since 19 August.
+**5. The closing price was never being recorded, on any day, since 23 June (ADR-049).** Chandan
+raised it: "we only collect until 3:59 pm, why not add one more minute and get the final close
+price." He was exactly right, and the query said so before anything changed — the last snapshot
+of each of the last ten trading days is 15:59:50, 15:59:52, 15:59:53, 15:59:14. The window ran
+09:30–16:00 with the end excluded, so **every "close" in the record is a quote from up to a
+minute earlier.**
+
+**Two minutes, not the one he asked for.** SPX is a cash index struck from its components'
+closing auction prints, and those arrive over the seconds *after* the bell. A poll at 16:00
+would very likely still carry the 15:59:59 level and record a close that is not the close —
+worse than recording nothing, because it looks right. Sabotaging the constant to 16:01 fails 15
+tests, one of which exists to say precisely this.
+
+**Still not 16:15**, where the options actually stop trading: SPX freezes at 16:00, so IVs
+computed later use a stale underlying while option marks keep moving. That original reasoning
+was untouched — only its boundary was wrong. Sabotage to 16:15 fails 24 tests; back to 16:00,
+19.
+
+**No schema change was needed and that was the point.** `snapshots.market_session` carries a
+CHECK constraint over three values, so a fourth would have meant rebuilding a table inside the
+live 3.55 GB database — to buy a fact the timestamp already carries. The two polls past the bell
+are the only ones taken against a frozen underlying and "at or after 16:00" identifies them.
+
+**The subtle part was the gap classifier.** A collectable day is now 392 minutes, not 390. The
+3.0-minute routine-gap tolerance is unchanged and still correct, because it budgets ~1.0 minute
+at each end and the last write simply moved from 15:59:xx to 16:01:xx — both numbers moved with
+the window. **Widening the window without moving the expected last write with it would have made
+every ordinary night look like a fault**, which is BUG-005's crying wolf reintroduced from the
+opposite direction. That property now has its own test.
+
+**Cost:** two extra polls a day, 126 snapshots becoming 128, ~1.3 MB against ~82 MB. **Not yet
+in effect** — the running collector holds the old window and keeps stopping at 15:59 until it is
+restarted.
+
+**876 → 889 checks pass.** Everything is committed and pushed across four commits.
 
 ----
 

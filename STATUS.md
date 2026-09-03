@@ -1,8 +1,8 @@
 # PROJECT STATUS
 
 **Updated:** 2026-09-03 · **Branch:** `m3-data-hardening` — **stage 3, 5 of 9 parts done.**
-**State:** 879 checks pass. Work since 2026-08-19 is **on this machine only, not yet saved to
-GitHub.** The collector is running normally and was deliberately **not** restarted — see below.
+**State:** 889 checks pass, everything **saved to GitHub**. The collector is running normally but
+**now needs a restart it did not need this morning** — it holds the old 16:00 window (ADR-049).
 > Self-contained: read this file alone to start a session. Replaced entirely by `/wrap`.
 
 ## What this project is
@@ -33,28 +33,30 @@ also need ~20 and ~100 real trades; there are 6 practice ones.
 
 **A short session, and three of its four items closed by checking rather than building.**
 
-**The collector did not need restarting.** The previous STATUS said it was running pre-fix code
-and its afternoon volatility line had stopped growing. **Reading the database back disproved
-that** — every day from 20 August has both morning and afternoon rows (yesterday: 126 and 2,520);
-only 19 August and earlier are unlabelled. It had already been restarted. Restarting mid-session
-would have cost a real ~2-minute hole in today's prices for nothing, so it was left alone.
-**Same lesson as last session: the written record was wrong and the data was right.**
+**The restart this session opened with was not needed.** STATUS claimed the collector ran pre-fix
+code; the database disproved it — every day from 20 August has both morning and afternoon rows.
+**The written record was wrong and the data was right, again.**
 
-**Stage 3.8 is done — the weekly broker-permission runbook.** The *streamlining* half turned out
-to be built already (`scripts/reauth.py`, which sets the old permission aside and **puts it back
-if you abort**). But **nothing in `docs/` or `README.md` mentioned that it existed**, which is
-precisely the failure 3.8 names. `docs/RUNBOOK_REAUTH.md` now covers the three ways you find out
-it is due, the seven steps, what to do when it goes wrong, and the `get_client()` trap written
-down as a thing never to do. **The 7 days is Schwab's and cannot be automated away.**
+**The closing price was never being recorded — not once since 23 June.** Chandan spotted it.
+The window ran to 16:00 with the end excluded, so the last poll of every day landed at
+**15:59:5x** and every "close" in the record is a quote from up to a minute earlier. It now runs
+to **16:02** (ADR-049) — two minutes, not the one asked for, because SPX is struck from its
+components' closing auction prints, which arrive over the seconds *after* the bell; a 16:00 poll
+would record a close that is not the close. **Still not 16:15**, where the options stop: SPX is
+frozen by then and the IVs would be computed against a stale underlying. Costs ~1.3 MB a day.
+**Second time in three sessions that data was never captured and nothing could tell** — the
+record looked complete both times.
 
-**The watchdog's alarm path is proven, and a real outage already proved it.** Chandan recalls
-receiving both the pop-up and the email on a stop *and* the recovery, and the record bears it
-out: four consecutive collector failures at 12:30 ET on 19 August, `last_alert_utc` 8 minutes
-later — one watchdog cycle — then recovery. Separately, an outage was **staged in isolation** to
-test detection: the old note said that needed the collector stopped, but `DB_PATH` and
-`STATE_DIR` are both overridable, so a throwaway database with one three-hour-old price did it
-without touching anything real. It correctly returned "no prices for 3h 0m", against a control
-run on the live database returning ✅ in the same breath.
+**Stage 3.8 is done — the weekly broker-permission runbook.** The *streamlining* half was built
+already (`scripts/reauth.py`, which **puts the old permission back if you abort**), but **nothing
+in `docs/` or `README.md` mentioned it existed** — precisely the failure 3.8 names.
+`docs/RUNBOOK_REAUTH.md` covers how you learn it is due, the steps, the failure modes, and the
+`get_client()` trap. **The 7 days is Schwab's and cannot be automated away.**
+
+**The watchdog's alarm path is proven — a real outage already did it.** Four collector failures
+at 12:30 ET on 19 August, `last_alert_utc` 8 minutes later, then recovery; Chandan remembers both
+messages. Detection was also **staged in isolation** — `DB_PATH` and `STATE_DIR` are overridable,
+so the outage the old note said needed the collector stopped took ten minutes and found BUG-029.
 
 ## What to do next
 
@@ -62,10 +64,9 @@ run on the live database returning ✅ in the same breath.
    pushed since 19 August.
 2. **Then stage 3.5** (show the collection gaps the dashboard has never displayed) **or 3.3**
    (a proper way to change the database's shape). 3.7 and 3.9 also remain; 3.9 stays last.
-3. **BUG-029, found today** — the watchdog kills itself on its own output if that output is sent
-   to a file or a pipe, and it dies *before* alerting. **The live alarm is unaffected and always
-   has been** — the scheduled task redirects nothing — but any future log capture would silence
-   it. A watchdog that dies printing its own headline is the one failure it cannot have.
+3. **BUG-029, found today** — the watchdog kills itself on its own output if that output goes to
+   a file or a pipe, and it dies *before* alerting. **The live alarm is unaffected** — the
+   scheduled task redirects nothing — but any future log capture would silence it.
 
 ## Open problems
 
@@ -82,10 +83,12 @@ run on the live database returning ✅ in the same breath.
   true last trade the evening before, because **this rule is the only one that DELETES a record**
   and the open is the later, safer of the two accurate answers. Verified against the live locks
   file: nothing is deleted today; it first matters on **18 September**.
-- **The two third-Friday contracts are different options and the record says which** (ADR-046),
-  including the daily volatility summary (ADR-047). A blank means "not recorded", never "morning".
-- **Old prices cleared 90 days past expiry, summaries kept forever, traded expiries never cleared,
-  never on a timer** (ADR-044). **The watchdog watches, never acts** (ADR-045). **The screen stays as it is until stage 5.**
+- **The two third-Friday contracts are different options and the record says which** (ADR-046,
+  ADR-047). A blank means "not recorded", never "morning".
+- **Collection runs 09:30–16:02** (ADR-049) so the settled close is captured; a trading day is
+  392 collectable minutes, not 390. **Old prices cleared 90 days past expiry, summaries kept
+  forever, traded expiries never cleared, never on a timer** (ADR-044). **The watchdog watches,
+  never acts** (ADR-045). **The screen stays as it is until stage 5.**
 - **Closing a problem means deleting its row.** **Never re-record a failing check to make it pass.**
 
 ## How to work here
@@ -93,7 +96,7 @@ run on the live database returning ✅ in the same breath.
 **Ask first** before: saving online, any database write, deleting files or rows, changing Windows
 settings or programs, starting/stopping the collector, or sending anything off this machine.
 **No check may touch the real database. Trade numbers are never reused. Missing price → blank, not
-0. Prove checks by breaking the code on a copy**, never the live file. **And verify on the real
-system after deploying.** Twice now the written record has been wrong where the data was right —
+0. Prove checks by breaking the code**, never the live file. **Verify on the real system after
+deploying.** The written record has now been wrong where the data was right three times —
 **when the two disagree, read the database.**
-**Deeper detail:** `docs/` — `plan.md` (stages) · `backlog.md` (open problems) · `decisions.md` (why) · `progress_log.md` (per session) · `RUNBOOK_REAUTH.md` (the weekly chore).
+**Deeper detail:** `docs/` — `plan.md` · `backlog.md` · `decisions.md` · `progress_log.md` · `RUNBOOK_REAUTH.md`.
