@@ -1,8 +1,8 @@
 # PROJECT STATUS
 
 **Updated:** 2026-09-03 · **Branch:** `m3-data-hardening` — **stage 3, 5 of 9 parts done.**
-**State:** 889 checks pass, everything **saved to GitHub**. The collector is running normally but
-**now needs a restart it did not need this morning** — it holds the old 16:00 window (ADR-049).
+**State:** 889 checks pass, everything **saved to GitHub**. The collector was restarted 12:12 ET
+onto the new 16:02 window and is collecting normally. **Today's close is the first ever recorded.**
 > Self-contained: read this file alone to start a session. Replaced entirely by `/wrap`.
 
 ## What this project is

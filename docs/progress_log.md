@@ -107,9 +107,15 @@ the window. **Widening the window without moving the expected last write with it
 every ordinary night look like a fault**, which is BUG-005's crying wolf reintroduced from the
 opposite direction. That property now has its own test.
 
-**Cost:** two extra polls a day, 126 snapshots becoming 128, ~1.3 MB against ~82 MB. **Not yet
-in effect** — the running collector holds the old window and keeps stopping at 15:59 until it is
-restarted.
+**Cost:** two extra polls a day, 126 snapshots becoming 128, ~1.3 MB against ~82 MB.
+
+**Restarted 12:12 ET, at Chandan's word, and it cost nothing.** He asked for it to be slipped
+into the five-minute MIDDAY gap. Timed off the cycle: a poll had landed 59 seconds earlier, so
+the process was idle in `sleep` rather than mid-write, and there were ~240 seconds of headroom.
+The new snapshot landed at 12:12:18, **83 seconds after the previous one** — the restart gained
+a poll rather than losing one, `collection_gaps` correctly recorded nothing, and the watchdog
+reported healthy on the next check. **ADR-049 is still unproven in the wild** until the 16:00
+and 16:01 polls are seen landing today.
 
 **876 → 889 checks pass.** Everything is committed and pushed across four commits.
 
