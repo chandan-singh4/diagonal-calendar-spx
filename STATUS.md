@@ -33,8 +33,6 @@ also need ~20 and ~100 real trades; there are 6 practice ones.
 
 **A short session, and three of its four items closed by checking rather than building.**
 
-**The restart this session opened with was not needed** — the database showed both contracts' rows every day since 20 August.
-
 **The closing price was never being recorded — not once since 23 June.** Chandan spotted it.
 The window ran to 16:00 with the end excluded, so the last poll of every day landed at
 **15:59:5x** and every "close" in the record is a quote from up to a minute earlier. It now runs
@@ -48,25 +46,19 @@ record looked complete both times.
 **Stage 3.7 is done, and it found a bug on its first run.** `scripts/audit.py` asks a question no
 test can: not "does the code work" but **"is the record actually complete?"** Every test passed
 throughout all three silent-data-loss bugs, because they checked what the code was believed to do.
-It reads the real record **read-only by construction** — SQLite refuses a write, and a test proves
-it. On its first run it found **BUG-030**: the broker's -9.99 "no value" marker stored as a real
-volatility, 5,127 rows, unknown until today. It also correctly filed the two known ten-week holes
+It reads the real record **read-only by construction** — SQLite refuses a write. On its first run
+it found **BUG-030**: the broker's -9.99 "no value" marker stored as a volatility, 5,127 rows. It also correctly filed the two known ten-week holes
 as *history* rather than faults, and treats a short day the collector already owned up to as a
 note rather than an alarm — an audit that cries wolf gets skimmed.
 
-**BUG-029 is fixed** — the watchdog can no longer be killed by its own output. Two defences: the
-encoding, and a guarantee that printing can never stop an alert going out.
+**BUG-029 is fixed** — printing can no longer stop the watchdog alerting.
 
-**Stage 3.8 is done — the weekly broker-permission runbook.** The *streamlining* half was built
-already (`scripts/reauth.py`, which **puts the old permission back if you abort**), but **nothing
-in `docs/` or `README.md` mentioned it existed** — precisely the failure 3.8 names.
-`docs/RUNBOOK_REAUTH.md` covers how you learn it is due, the steps, the failure modes, and the
-`get_client()` trap. **The 7 days is Schwab's and cannot be automated away.**
+**Stage 3.8 is done — the weekly broker-permission runbook.** `scripts/reauth.py` already existed
+(and **puts the old permission back if you abort**) but **nothing in `docs/` mentioned it** — the
+exact failure 3.8 names. `docs/RUNBOOK_REAUTH.md` covers it, including the `get_client()` trap.
 
-**The watchdog's alarm path is proven — a real outage already did it.** Four collector failures
-at 12:30 ET on 19 August, `last_alert_utc` 8 minutes later, then recovery; Chandan remembers both
-messages. Detection was also **staged in isolation** — `DB_PATH` and `STATE_DIR` are overridable,
-so the outage the old note said needed the collector stopped took ten minutes and found BUG-029.
+**The watchdog's alarm path is proven — a real outage already did it** (19 August, 12:30 ET;
+alert 8 minutes later, then recovery). Staging one in isolation also found BUG-029.
 
 ## What to do next
 
