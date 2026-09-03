@@ -227,8 +227,50 @@ registers a scheduled task that does not exist and is not used, so the repo docu
 machine does not run — which is what made the wrong conclusion so easy to reach. Startup works today
 and nothing needs doing urgently.
 
-**876 → 925 checks pass.** Sessions 13-14 work is committed; the 3.7/BUG-029/BUG-030 half is not
-yet pushed.
+**12. M3.6 finished — a discarded row is now told apart from a harmless one (ADR-050).** The
+generic rowcount warning had already shipped at M1.5; what remained was ADR-022 step 2, and the
+argument for it is eight weeks of evidence. That one warning fired **2,181 times** with an
+identical message and an identical count of 160, every one the third-Friday contract being dropped,
+and nobody investigated. Not a personal failing — **a warning that appears every cycle is
+background noise**, and the one that matters then arrives in a log the reader has been trained to
+skim. The two things share nothing: a duplicate contract is harmless, because the row kept holds
+the same prices as the row dropped; a CHECK violation is prices gone for good.
+
+**The classification is exact, not inferred.** After the statement, the unique key of every offered
+row is looked up in the table; a present key was stored, an absent key was thrown away. One absent
+row is then replayed as a plain INSERT inside a rolled-back SAVEPOINT, so the logged reason is
+**SQLite's own message rather than a guess** — a plausible invented reason would have reproduced
+the original failure in a more confident voice.
+
+**It deliberately still does not raise**, which is only half of what ADR-022 asked for. Raising
+aborts the batch and discards the several thousand good rows beside the bad one — a larger and
+equally permanent loss than the one being reported.
+
+**Two things went wrong while building it, and both are instructive.** The existing pinned test
+caught a real bug of mine: `sqlite3.Row` never compares equal to a tuple, so the key set matched
+nothing and **every benign duplicate would have been reported as catastrophic loss** — precisely
+the crying-wolf failure the task exists to remove. And the fourth sabotage **passed**: deleting the
+savepoint's rollback changed nothing, because the test drove it through `insert_option_rows`, where
+a replayed row raises and leaves nothing behind either way. The test proved nothing it claimed. It
+now calls the diagnosis directly with a *valid* row, the only case where the replay succeeds and
+the rollback is load-bearing. **The test was wrong, not the claim** — and a sabotage that passes is
+the only way to find that out.
+
+**13. M3.9 done — `OPERATIONS.md`, `TROUBLESHOOTING.md`, `DATABASE.md`.** Written last on purpose,
+so they describe what M3 built rather than what it planned. `TROUBLESHOOTING.md` is organised by
+**symptom**, not by cause, because at the moment something is wrong the cause is exactly the
+unknown; nine entries, each saying what it means, what it does *not* mean, and what to do.
+`OPERATIONS.md` opens by saying that almost all of operating this is doing nothing — one recurring
+chore, the 7-day re-auth — because a runbook that implies constant vigilance gets abandoned.
+`DATABASE.md` is the physical record and its traps, complementing `DOCUMENTATION.md` §7 rather than
+repeating it. **Every command and flag in all three was checked against the scripts rather than
+recalled**, which is the same discipline that the BUG-031 mistake earlier today came from skipping.
+
+**Stage 3 now has one piece left: 3.3, the migration framework.** 3.5 is Chandan's call — he
+considers the alerting need met by the 3.4 watchdog, which is fair; what 3.5 would add on top is
+the gap *history* on screen.
+
+**876 → 928 checks pass.**
 
 ----
 

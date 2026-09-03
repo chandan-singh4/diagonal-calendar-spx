@@ -240,6 +240,10 @@ against the source.
 | File | Contents |
 |---|---|
 | [`STATUS.md`](STATUS.md) | **Start here.** Plain-language project status — background, what's done, what's open. No technical background assumed. Regenerated each session by `/wrap`. |
+| [`OPERATIONS.md`](docs/OPERATIONS.md) | **Running it** — the weekly chore, what runs by itself, the collection day, housekeeping |
+| [`TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) | **When something is wrong** — symptom first, nine of them |
+| [`DATABASE.md`](docs/DATABASE.md) | **The record** — the six tables, retention, and the traps in the columns |
+| [`RUNBOOK_REAUTH.md`](docs/RUNBOOK_REAUTH.md) | The weekly Schwab re-authorisation, step by step |
 | [`DOCUMENTATION.md`](docs/DOCUMENTATION.md) | Strategy, metric definitions, dashboard reference, data architecture |
 | [`AUDIT_2026-07-25.md`](docs/AUDIT_2026-07-25.md) | Engineering audit + roadmap |
 | [`plan.md`](docs/plan.md) | Current implementation plan |
