@@ -61,8 +61,8 @@ so the outage the old note said needed the collector stopped took ten minutes an
 
 1. **Save this session's work to GitHub** (needs Chandan's word) — eight files touched, nothing
    pushed since 19 August.
-2. **Then stage 3.5** (show the collection gaps the dashboard has never displayed) **or 3.3**
-   (a proper way to change the database's shape). 3.7 and 3.9 also remain; 3.9 stays last.
+2. **Then stage 3.5** (show the collection gaps never displayed) **or 3.3** (a proper way to
+   change the database's shape). 3.7 and 3.9 remain too; 3.9 stays last.
 3. **BUG-029, found today** — the watchdog kills itself on its own output if that output goes to
    a file or a pipe, and it dies *before* alerting. **The live alarm is unaffected** — the
    scheduled task redirects nothing — but any future log capture would silence it.
@@ -87,7 +87,7 @@ so the outage the old note said needed the collector stopped took ten minutes an
 - **Collection runs 09:30–16:02** (ADR-049) so the settled close is captured; a trading day is
   392 collectable minutes, not 390. **Old prices cleared 90 days past expiry, summaries kept
   forever, traded expiries never cleared, never on a timer** (ADR-044). **The watchdog watches,
-  never acts** (ADR-045). **The screen stays as it is until stage 5.**
+  never acts** (ADR-045). **Screen unchanged until stage 5.**
 - **Closing a problem means deleting its row.** **Never re-record a failing check to make it pass.**
 
 ## How to work here
