@@ -1,8 +1,8 @@
 # PROJECT STATUS
 
 **Updated:** 2026-09-03 · **Branch:** `m3-data-hardening` — **stage 3, 5 of 9 parts done.**
-**State:** 889 checks pass, everything **saved to GitHub**. The collector was restarted 12:12 ET
-onto the new 16:02 window and is collecting normally. **Today's close is the first ever recorded.**
+**State:** 912 checks pass, everything **saved to GitHub**. The collector was restarted 12:12 ET
+onto the new 16:02 window. **Today's close should be the first ever recorded — verify it.**
 > Self-contained: read this file alone to start a session. Replaced entirely by `/wrap`.
 
 ## What this project is
@@ -45,6 +45,18 @@ frozen by then and the IVs would be computed against a stale underlying. Costs ~
 **Second time in three sessions that data was never captured and nothing could tell** — the
 record looked complete both times.
 
+**Stage 3.7 is done, and it found a bug on its first run.** `scripts/audit.py` asks a question no
+test can: not "does the code work" but **"is the record actually complete?"** Every test passed
+throughout all three silent-data-loss bugs, because they checked what the code was believed to do.
+It reads the real record **read-only by construction** — SQLite refuses a write, and a test proves
+it. On its first run it found **BUG-030**: the broker's -9.99 "no value" marker stored as a real
+volatility, 5,127 rows, unknown until today. It also correctly filed the two known ten-week holes
+as *history* rather than faults, and treats a short day the collector already owned up to as a
+note rather than an alarm — an audit that cries wolf gets skimmed.
+
+**BUG-029 is fixed** — the watchdog can no longer be killed by its own output. Two defences: the
+encoding, and a guarantee that printing can never stop an alert going out.
+
 **Stage 3.8 is done — the weekly broker-permission runbook.** The *streamlining* half was built
 already (`scripts/reauth.py`, which **puts the old permission back if you abort**), but **nothing
 in `docs/` or `README.md` mentioned it existed** — precisely the failure 3.8 names.
@@ -60,16 +72,12 @@ so the outage the old note said needed the collector stopped took ten minutes an
 
 1. **Save this session's work to GitHub** (needs Chandan's word) — eight files touched, nothing
    pushed since 19 August.
-2. **Then stage 3.5** (show the collection gaps never displayed) **or 3.3** (a proper way to
-   change the database's shape). 3.7 and 3.9 remain too; 3.9 stays last.
-3. **BUG-029, found today** — the watchdog kills itself on its own output if that output goes to
-   a file or a pipe, and it dies *before* alerting. **The live alarm is unaffected** — the
-   scheduled task redirects nothing — but any future log capture would silence it.
+3. **Then stage 3.5** (show the collection gaps never displayed) **or 3.3** (a proper way to
+   change the database's shape). 3.9 stays last.
 
 ## Open problems
 
-- **BUG-029 (medium, new)** — the watchdog crashes on redirected output, before it alerts.
-  **ENH-011 (high)** — tab clicks are slow; cause **not established**, measure first.
+- **BUG-030 (high, new)** — the -9.99 sentinel stored as a volatility. **ENH-011 (high)** — tab clicks are slow; cause **not established**, measure first.
   **BUG-001 (high, blocked on Chandan)** — old unexplained report; needs a symptom and screenshot.
   **BUG-018 (medium)** — on expiry day one tile says "set strikes" when they already are.
   **DEBT-029** — two screen-library features are past their removal dates, used in ~36 places.
