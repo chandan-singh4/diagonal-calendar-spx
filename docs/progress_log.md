@@ -187,10 +187,36 @@ row, the next poll COMPLETE, and the audit that found the bug this morning now r
 0 needing attention** — the other three are the known ADR-046/049 history it correctly files as
 history.
 
-**One half of BUG-030 is still open and it is the operational half.** The collector process was
-started at 12:12, before the parser fix existed, so it is still running the old
-`chain_to_dataframe`. Until it is restarted the marker returns at 09:30 tomorrow — the repaired rows
-would simply be joined by new ones.
+**BUG-030 is closed.** The collector was restarted at **16:35 ET, after the close**, so it cost
+nothing at all — and there was no reason to do it earlier: every poisoned value in ten weeks arrived
+at the 09:30 poll, so the fix could not have mattered before tomorrow's open, while restarting
+during the session would have put today's first-ever closing price at risk for no gain. The new
+process (PID 26320, 16:35:56) started well after `schwab_client.py` was last written (14:16), which
+is what makes it the fixed parser. **The proof proper arrives at 09:30 tomorrow**, when the audit's
+IV check should stay silent on a live morning for the first time.
+
+**10. ADR-049 is proven in the wild — the close was captured.** Today's record ends
+**16:00:18 and 16:01:18 ET**, both COMPLETE, where the previous five sessions ended 15:59:12,
+15:59:14, 15:59:50, 15:59:52 and 15:59:53. And the two minutes were not free: SPX read **7745.20**
+at the 15:59 poll and **7747.59** at 16:01. **The old "close" was wrong by 2.39 points**, every day,
+for 51 trading days — small, consistent, and exactly the kind of error that never announces itself.
+The 16:00 and 16:01 readings agree to a hundredth (7747.60, 7747.59), which is what a settled print
+looks like.
+
+Today recorded 127 snapshots rather than 128, and that is the 12:12 restart, not a fault: the
+cadence shifted from :x0:55 to :x2:17, losing one five-minute slot across the afternoon. No gap row,
+no incomplete snapshot, and 127/128 is nowhere near the audit's short-day threshold.
+
+**11. BUG-031, found by needing to restart the collector.** There was no obvious way to restart it,
+which turned out to be the finding: **`Get-ScheduledTask` lists `SPX Collector Watchdog` and no
+`SPX Diagonal Collector`.** The registration script exists and is correct; it has evidently never
+been run, or the task was removed. The process running today had a parent PID that no longer exists
+— started by hand from a shell long since closed. **So the collector does not come back after a
+reboot.** Not silent, since the watchdog is registered and its alarm path is proven, but recovery is
+manual. `STATUS.md` said "Starts with Windows". **That is the fourth time this session's family of
+findings has been the written record being wrong where the system was right**, and it is the reason
+the rule "when the two disagree, read the database" is in STATUS at all — it now needs extending
+past the database to the machine.
 
 **876 → 925 checks pass.** Sessions 13-14 work is committed; the 3.7/BUG-029/BUG-030 half is not
 yet pushed.
