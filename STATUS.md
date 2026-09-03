@@ -33,8 +33,7 @@ also need ~20 and ~100 real trades; there are 6 practice ones.
 
 **A short session, and three of its four items closed by checking rather than building.**
 
-**The restart this session opened with was not needed** — STATUS claimed pre-fix code; the
-database showed both morning and afternoon rows every day since 20 August.
+**The restart this session opened with was not needed** — the database showed both contracts' rows every day since 20 August.
 
 **The closing price was never being recorded — not once since 23 June.** Chandan spotted it.
 The window ran to 16:00 with the end excluded, so the last poll of every day landed at
