@@ -7,6 +7,60 @@ it was recorded here.
 
 ---
 
+## ADR-048 — The a.m. contract is over at the opening print, not the close
+**Date:** 2026-09-03 · **Status:** Accepted · **Closes:** BUG-027
+
+**Context:** `core/expiry.py` answers one question — is the position whose front leg expires
+on this date finished? — and it answered it identically for both third-Friday contracts:
+4:15 PM New York on the expiry date. That is right for the p.m. contract, which trades the
+whole day. It is wrong for the a.m. one, which stops trading the **evening before** and
+settles against the **opening print**. The a.m. contract was carried for roughly one extra
+session after its value had already been fixed.
+
+This was left deliberately open on 2026-08-19 rather than fixed alongside ADR-046, because
+**this rule is the only one in the program whose answer DELETES a record** (ADR-039), and
+every accurate alternative deletes *earlier* than the status quo. Correcting it in the wrong
+direction destroys the entry price a live position is measured against.
+
+**Decision (Chandan, 2026-09-03): the opening print — 9:30 AM New York on the expiry date.**
+The a.m. contract expires at `MARKET_OPEN`; the p.m. contract keeps `MARKET_CLOSE`.
+
+**Alternatives considered:**
+
+1. **The evening before (Thursday 4:15 PM)** — the contract's true last trade, and the most
+   literally accurate answer. Rejected as the most aggressive direction available: it deletes
+   a marker a full session sooner than today, and the cost of being early is not symmetric
+   with the cost of being late.
+2. **Leave it at 4:15 PM** — a real option, not a cop-out; it was already deliberate and
+   pinned by a test. Rejected because the inaccuracy is now understood and cheap to remove,
+   and the opening print gives most of the accuracy at none of the risk.
+
+**Why the open won.** It is the moment the contract's value is actually decided, *and* it is
+the later of the two accurate answers. **Later is the safe direction here**: an hour held too
+long costs a stale row in a popover, an hour cut too early destroys a live position's entry
+price. The choice is the conservative one among the correct ones, rather than the correct one
+among the conservative ones.
+
+**Consequences.** `MARKET_OPEN = time(9, 30)` joins `MARKET_CLOSE` in `core/expiry.py`, and
+`is_expired` picks between them with `contract.is_am`. **The pinning test was replaced, not
+deleted** — `test_a_labelled_key_expires_at_the_same_moment_as_a_bare_one` recorded BUG-027 as
+a deliberate inaccuracy awaiting this decision, so rule and pin changed together. It was not a
+failing check made to pass; it described behaviour that is no longer wanted, which is the only
+circumstance in which a pin may be rewritten.
+
+**Proved by breaking it, twice.** Reverting to a single 4:15 cutoff fails 2 tests. Applying the
+9:30 cutoff to *every* contract fails 6 — the case that matters most, since the p.m. contract
+is ~94% of all expiries and that mistake would delete nearly every marker at half past nine in
+the morning. Four tests now cover it: the two contracts diverging mid-morning, both sides of
+the 9:30 minute, the evening before still holding, and the p.m. contract untouched.
+
+**Verified on the live system, not just in tests.** `entry_locks.json` holds one lock, on the
+bare (p.m.) key `2026-08-21`, already expired under both the old rule and the new one. **No
+`(AM)`-labelled lock exists, so this change deletes nothing today** — it changes what happens
+on the next monthly expiry, 2026-09-18.
+
+---
+
 ## ADR-047 — The daily at-the-money summary names its contract too
 **Date:** 2026-08-19 · **Status:** Accepted
 

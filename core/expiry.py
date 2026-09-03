@@ -17,6 +17,12 @@ from core import contract
 # SPX options settle at the close, but the trader's interest in the position
 # ends at 4:15 PM Eastern — the cash-index close, not the 4:00 PM equity bell.
 MARKET_CLOSE = time(16, 15)
+
+# The a.m. third-Friday contract is the exception: it settles against the
+# OPENING print, so its value is decided at 9:30 AM Eastern on the expiry date
+# and nothing that happens afterwards can change it (BUG-027, ADR-048).
+MARKET_OPEN = time(9, 30)
+
 MARKET_TIMEZONE = "America/New_York"
 
 
@@ -31,12 +37,18 @@ def is_expired(front_expiry: str, now: datetime) -> bool:
     lock, so a labelled position would simply never expire and the locks file
     would grow forever, which is the thing ADR-039 exists to prevent.
 
-    Both contracts are treated as finishing at the same moment here. The a.m.
-    contract in fact stops trading the evening before and settles at the OPEN,
-    so it is really over some hours earlier — deliberately not modelled yet,
-    because the only consequence of the conservative answer is holding a dead
-    marker a few hours longer, whereas the aggressive one deletes a marker for a
-    position while its owner may still be looking at it. Logged as BUG-027.
+    The two contracts finish at DIFFERENT moments (BUG-027, closed by ADR-048).
+    The p.m. contract trades all day and is over at 4:15 PM on the expiry date.
+    The a.m. contract settles against the OPENING print, so it is over at 9:30
+    AM that same morning — its value is fixed by then and no later trading can
+    change it.
+
+    Chandan chose the opening print over the contract's true last trade, which
+    is the evening BEFORE. Both are defensible; the open is the later of the
+    two, and later is the safe direction here. This rule is the only one in the
+    program whose answer DELETES a record (ADR-039), so an hour held too long
+    costs a stale row in a popover, while an hour cut too early destroys the
+    entry price a live position is measured against.
 
     `now` must be timezone-aware. It is converted to New York before comparing,
     so a machine set to any other timezone gets the same answer; a naive
@@ -53,4 +65,6 @@ def is_expired(front_expiry: str, now: datetime) -> bool:
         return True
     if market_now.date() < expiry_date:
         return False
-    return market_now.time() >= MARKET_CLOSE
+
+    cutoff = MARKET_OPEN if contract.is_am(front_expiry) else MARKET_CLOSE
+    return market_now.time() >= cutoff
