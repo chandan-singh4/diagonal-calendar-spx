@@ -288,7 +288,7 @@ def render(ctx: ViewContext) -> None:
         _draw_caption(totals, expiry, per_strike, view)
 
         st.divider()
-        _draw_time_panels(ctx, shown)
+        _draw_time_panels(ctx, shown, expiry)
 
         st.divider()
         _draw_dealer_structure(ctx, per_strike, choice, expiry, dte_by_expiry)
@@ -522,7 +522,8 @@ def _add_bar(fig, x, y, colour, row, hover, secondary: bool = False,
 # The time panels — the half a vendor's screen cannot show
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _draw_time_panels(ctx: ViewContext, shown: pd.DataFrame) -> None:
+def _draw_time_panels(ctx: ViewContext, shown: pd.DataFrame,
+                      expiry: str | None) -> None:
     st.markdown(
         '<div class="sh"><span class="sh-ico">⏱️</span>'
         '<span class="sh-ttl">Through the session</span>'
@@ -543,11 +544,11 @@ def _draw_time_panels(ctx: ViewContext, shown: pd.DataFrame) -> None:
     intraday = to_display_time(intraday, config.DISPLAY_TIMEZONE)
 
     span = _session_x_range(ctx.session_date)
-    _draw_cumulative_volume(intraday, shown, span, ctx.snapshot_id)
+    _draw_cumulative_volume(intraday, shown, span, ctx.snapshot_id, expiry)
     _gap()
     _draw_zero_dte_flow(ctx, span)
     _gap()
-    _draw_oi_change(ctx, shown)
+    _draw_oi_change(ctx, shown, expiry)
 
 
 def _session_x_range(session_date: str) -> list:
@@ -584,8 +585,9 @@ def _time_axis(span: list) -> dict:
 
 
 def _draw_cumulative_volume(intraday: pd.DataFrame, shown: pd.DataFrame,
-                            span: list, snapshot_id: int) -> None:
-    fig = _volume_figure(intraday, shown, span, snapshot_id)
+                            span: list, snapshot_id: int,
+                            expiry: str | None) -> None:
+    fig = _volume_figure(intraday, shown, span, snapshot_id, expiry)
     if fig is None:
         return
     st.plotly_chart(fig, use_container_width=True)
@@ -601,7 +603,7 @@ def _draw_cumulative_volume(intraday: pd.DataFrame, shown: pd.DataFrame,
 
 @st.cache_data(show_spinner=False, max_entries=4)
 def _volume_figure(_intraday: pd.DataFrame, _shown: pd.DataFrame,
-                   span: list, snapshot_id: int):
+                   span: list, snapshot_id: int, expiry: str | None):
     """Net volume building up through the day, per strike.
 
     The broker's `volume` field is already a running total for the session, so
@@ -717,9 +719,15 @@ def _flow_figure(_zero: pd.DataFrame, span: list, snapshot_id: int):
     return fig, total_now, total_open, levels
 
 
-def _draw_oi_change(ctx: ViewContext, shown: pd.DataFrame) -> None:
-    """Today's open interest against the previous session's."""
-    prior = ctx.load_prior_session_oi(ctx.session_date)
+def _draw_oi_change(ctx: ViewContext, shown: pd.DataFrame,
+                    expiry: str | None) -> None:
+    """Today's open interest against the previous session's.
+
+    Scoped to the SAME expiry as `shown`. Yesterday summed across every expiry
+    minus one expiry's today is the rest of the board reported as an overnight
+    liquidation — six-figure negative bars at strikes that barely traded.
+    """
+    prior = ctx.load_prior_session_oi(ctx.session_date, expiry)
     if prior is None or prior.empty:
         st.info(
             "No previous session to compare open interest against — this is "
@@ -727,7 +735,8 @@ def _draw_oi_change(ctx: ViewContext, shown: pd.DataFrame) -> None:
         )
         return
 
-    fig = _oi_change_figure(shown, prior, ctx.spx_price, ctx.snapshot_id)
+    fig = _oi_change_figure(shown, prior, ctx.spx_price, ctx.snapshot_id,
+                            expiry)
     if fig is None:
         st.info("Open interest is unchanged from the previous session.")
         return
@@ -746,7 +755,7 @@ def _draw_oi_change(ctx: ViewContext, shown: pd.DataFrame) -> None:
 
 @st.cache_data(show_spinner=False, max_entries=4)
 def _oi_change_figure(_shown: pd.DataFrame, _prior: pd.DataFrame, spot: float,
-                      snapshot_id: int):
+                      snapshot_id: int, expiry: str | None):
     change = gex.oi_change(_shown, _prior)
     change = change[(change["call_oi_change"] != 0) | (change["put_oi_change"] != 0)]
     if change.empty:
@@ -871,7 +880,7 @@ def _draw_dealer_structure(ctx: ViewContext, per_strike: pd.DataFrame,
     _draw_term_bubbles(ctx)
     _gap()
     _draw_scope_pill(per_strike, choice, expiry, dte_by_expiry)
-    _draw_volume_vs_oi(ctx, per_strike)
+    _draw_volume_vs_oi(ctx, per_strike, expiry)
 
 
 _FLOW_SCOPES = {"0DTE": 0, "All expiries": None}
@@ -1117,10 +1126,15 @@ def _bubble_figure(_points: pd.DataFrame, spot: float, scale: str,
     _dark(fig, 620, legend=True)
     return fig
 
-def _draw_volume_vs_oi(ctx: ViewContext, per_strike: pd.DataFrame) -> None:
+def _draw_volume_vs_oi(ctx: ViewContext, per_strike: pd.DataFrame,
+                       expiry: str | None) -> None:
     """Today's volume beside the overnight change in open interest."""
-    prior = ctx.load_prior_session_oi(ctx.session_date)
-    rows = _positioning(per_strike, prior, ctx.spx_price, ctx.snapshot_id)
+    # Scoped to the SAME expiry as the volume beside it. All-expiry open
+    # interest minus one expiry's is the rest of the board reported as an
+    # overnight liquidation.
+    prior = ctx.load_prior_session_oi(ctx.session_date, expiry)
+    rows = _positioning(per_strike, prior, ctx.spx_price, ctx.snapshot_id,
+                        expiry)
     if rows.empty:
         st.info("No strike within 2.5% of spot has traded yet today.")
         return
@@ -1150,7 +1164,13 @@ def _draw_volume_vs_oi(ctx: ViewContext, per_strike: pd.DataFrame) -> None:
 
 @st.cache_data(show_spinner=False, max_entries=8)
 def _positioning(_today: pd.DataFrame, _prior: pd.DataFrame, spot: float,
-                 snapshot_id: int) -> pd.DataFrame:
+                 snapshot_id: int, expiry: str | None) -> pd.DataFrame:
+    """`expiry` is in the signature to be in the CACHE KEY, not to be used.
+
+    Both frames are underscore-prefixed so Streamlit skips hashing them —
+    which left the key as (spot, snapshot_id), so every expiry returned the
+    first table computed and the panel never changed when the control did.
+    """
     return dealer.positioning(_today, _prior, spot)
 
 

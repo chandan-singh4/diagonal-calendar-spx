@@ -138,5 +138,6 @@ def _load_intraday_strike_metrics(session_date: str, snapshot_id: int,
 
 
 @st.cache_data(ttl=300, show_spinner=False, max_entries=3)
-def _load_prior_session_oi(session_date: str) -> pd.DataFrame:
-    return queries.load_prior_session_oi(config.DB_PATH, session_date)
+def _load_prior_session_oi(session_date: str,
+                           expiry: str | None = None) -> pd.DataFrame:
+    return queries.load_prior_session_oi(config.DB_PATH, session_date, expiry)

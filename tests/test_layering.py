@@ -689,3 +689,52 @@ def test_the_gamma_exposure_controls_never_ask_for_a_second_script_run():
         f"click that triggers it. Read the widget before drawing what it "
         f"controls instead."
     )
+
+
+def test_every_memoised_gex_figure_takes_the_expiry_in_its_cache_key():
+    """The bug this pins was invisible: the panel simply did not change.
+
+    views/gex.py passes its DataFrames to @st.cache_data with a leading
+    underscore so Streamlit skips hashing them — hashing a 3,000-row chain
+    costs more than the redraw it saves. The cost is that the frame is then
+    NOT part of the cache key, so a helper that took only (spot, snapshot_id)
+    returned the first table it ever computed no matter which expiry was
+    selected. The positioning panel showed one expiry's numbers under every
+    other expiry's label for as long as the snapshot lasted.
+
+    So: any cached helper here that receives an underscored frame must also
+    take an `expiry` argument, because expiry is what filtered that frame.
+    The exemptions are named individually below, each with the reason its
+    frame does not depend on the Expiry control — an exemption list is
+    checkable, "it looked fine" is not.
+    """
+    # Read straight from the database at a fixed scope, never from the
+    # expiry-filtered frame:
+    #   _flow_figure   — 0DTE only, by definition (dte_max=0)
+    #   _bubble_points — the whole chain, deliberately: the panel exists to
+    #   _bubble_figure   COMPARE expiries, and its caption says the control
+    #                    does not apply to it
+    EXEMPT = {"_flow_figure", "_bubble_points", "_bubble_figure"}
+    import ast
+    import inspect
+
+    from views import gex as view_gex
+
+    tree = ast.parse(inspect.getsource(view_gex))
+    offenders = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        cached = any("cache_data" in ast.dump(d) for d in node.decorator_list)
+        if not cached:
+            continue
+        args = [a.arg for a in node.args.args]
+        takes_frame = any(a.startswith("_") for a in args)
+        if node.name in EXEMPT:
+            continue
+        if takes_frame and "expiry" not in args and "scope" not in args:
+            offenders.append(f"{node.name}({', '.join(args)})")
+
+    assert not offenders, (
+        "cached on an unhashed frame without the filter that produced it: "
+        + "; ".join(offenders))

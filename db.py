@@ -1991,7 +1991,8 @@ def get_intraday_strike_metrics(db_path: str, session_date: str,
         ).fetchall()
 
 
-def get_prior_session_oi(db_path: str, session_date: str) -> list:
+def get_prior_session_oi(db_path: str, session_date: str,
+                         expiry: str | None = None) -> list:
     """Open interest per strike at the close of the session BEFORE session_date.
 
     Open interest is republished once a day, overnight, so today's figure minus
@@ -2004,6 +2005,13 @@ def get_prior_session_oi(db_path: str, session_date: str) -> list:
     of today, deliberately: today's first snapshot already carries today's
     republished figure, so differencing against it would compare a number with
     itself.
+
+    `expiry` MUST match whatever the caller is differencing against. Summing
+    every expiry at a strike and subtracting that from one expiry's open
+    interest returns the rest of the board as if it had been liquidated
+    overnight — a caller comparing a single expiry saw six-figure negative
+    deltas at strikes that had barely traded. The filter belongs here, in the
+    same query as the sum, and not in the caller.
 
     Returns [] when there is no prior session — the first collection day, and a
     long weekend for a caller that assumed yesterday existed.
@@ -2031,8 +2039,9 @@ def get_prior_session_oi(db_path: str, session_date: str) -> list:
                             THEN COALESCE(open_interest, 0) ELSE 0 END) AS put_oi
             FROM option_rows
             WHERE snapshot_id = ?
+              AND (? IS NULL OR expiry_date = ?)
             GROUP BY strike
             ORDER BY strike
             """,
-            (prior["snapshot_id"],)
+            (prior["snapshot_id"], expiry, expiry)
         ).fetchall()

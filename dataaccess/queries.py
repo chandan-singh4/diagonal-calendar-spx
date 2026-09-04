@@ -186,12 +186,16 @@ def load_intraday_strike_metrics(db_path, session_date: str,
     return df
 
 
-def load_prior_session_oi(db_path, session_date: str) -> pd.DataFrame:
+def load_prior_session_oi(db_path, session_date: str,
+                          expiry: str | None = None) -> pd.DataFrame:
     """Open interest per strike at the close of the previous session.
+
+    `expiry` scopes it to one contract date, and must match the scope of
+    whatever it is being subtracted from — see get_prior_session_oi.
 
     Empty when there is no prior session; the caller decides what to say about
     that, because "the first day of collection" and "a strike that is new
     today" are different stories.
     """
-    rows = db.get_prior_session_oi(db_path, session_date)
+    rows = db.get_prior_session_oi(db_path, session_date, expiry)
     return pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()

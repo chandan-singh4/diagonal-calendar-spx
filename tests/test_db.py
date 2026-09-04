@@ -37,7 +37,7 @@ from __future__ import annotations
 import logging
 import json
 import sqlite3
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -1913,6 +1913,46 @@ def test_prior_session_oi_reads_yesterdays_last_snapshot_not_todays_first(temp_d
     # today's snapshot by mistake would give 2000 here.
     assert call["call_oi"] == 1000
     assert call["put_oi"] == 0
+
+
+def test_prior_session_oi_can_be_scoped_to_one_expiry(temp_db):
+    """It has to be, and this is the bug that proved it.
+
+    The caller differences ONE expiry's open interest against this. Summed
+    across every expiry at a strike, the subtraction reports the rest of the
+    board as having been liquidated overnight — on the live 2026-09-04 chain
+    the 8 Sep expiry read -1,850,786 contracts when the true figure was
+    +17,870, and every verdict on the panel flipped with it."""
+    day = (datetime.now(UTC) - timedelta(days=1)).date()
+    prior = add_snapshot(temp_db, f"{day - timedelta(days=1)} 20:00:00")
+    db.insert_option_rows(temp_db, [
+        opt(prior, FRONT, CALL_STRIKE, "C", dte=8),
+        opt(prior, BACK, CALL_STRIKE, "C", dte=29),
+    ])
+    session = f"{day} 14:00:00"
+    today = add_snapshot(temp_db, session)
+    db.insert_option_rows(temp_db, [opt(today, FRONT, CALL_STRIKE, "C", dte=0)])
+
+    everything = db.get_prior_session_oi(temp_db, session[:10])
+    front_only = db.get_prior_session_oi(temp_db, session[:10], FRONT)
+
+    assert everything[0]["call_oi"] == 2000      # both expiries summed
+    assert front_only[0]["call_oi"] == 1000      # the FRONT leg alone
+
+
+def test_prior_session_oi_without_an_expiry_still_sums_the_whole_board(temp_db):
+    """The All-expiries selection depends on it: the filter is opt-in, and a
+    None must not quietly narrow the read."""
+    session = _gex_seed(temp_db)
+    rows = db.get_prior_session_oi(temp_db, session, None)
+    assert [r["strike"] for r in rows] == [PUT_STRIKE, CALL_STRIKE]
+
+
+def test_prior_session_oi_for_an_expiry_that_did_not_exist_yesterday(temp_db):
+    """Not an error — a contract listed today has no yesterday, and the caller
+    reads that as open interest built from zero."""
+    session = _gex_seed(temp_db)
+    assert db.get_prior_session_oi(temp_db, session, "2099-01-15") == []
 
 
 def test_prior_session_oi_is_empty_on_the_first_day_of_collection(temp_db):
