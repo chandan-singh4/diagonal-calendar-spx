@@ -908,21 +908,23 @@ def _draw_dealer_structure(ctx: ViewContext, per_strike: pd.DataFrame,
         '</div>',
         unsafe_allow_html=True,
     )
-    _draw_scope_pill(per_strike, choice, expiry, dte_by_expiry)
     _draw_term_bubbles(ctx)
     _gap()
+    # The pill sits with the TABLE, not at the head of the section. It names
+    # the Expiry selection, and only the table honours that selection — over
+    # the bubble chart it read as a caption on a panel it did not describe.
+    _draw_scope_pill(per_strike, choice, expiry, dte_by_expiry)
     _draw_volume_vs_oi(ctx, per_strike)
 
 
 def _draw_scope_pill(per_strike: pd.DataFrame, choice: str,
                      expiry: str | None, dte_by_expiry: dict) -> None:
-    """What this section is actually showing, in one line.
+    """What the table below is showing, in one line.
 
-    Necessary because the two panels below do not share a scope: the table
-    follows the Expiry control, the bubble chart deliberately does not. Naming
-    the selection here is the only thing that keeps a reader from carrying the
-    table's expiry over onto the chart beside it -- the chart's own caption
-    says so too, but this is where the eye lands first.
+    Necessary because the two panels of this section do not share a scope:
+    the table follows the Expiry control, the bubble chart above deliberately
+    shows every expiry. Sitting directly on the table, the pill answers "which
+    expiry am I reading?" for the one panel where that question has an answer.
 
     Volume is the two sides added across every strike in scope, which is the
     same figure the table's bars are drawn from.
