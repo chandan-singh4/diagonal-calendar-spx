@@ -318,3 +318,57 @@ def test_both_contracts_of_one_date_pin_that_date_once():
         "b": {"front_expiry": "2026-08-21",      "back_expiry": "2026-09-16"},
     }
     assert core_pins.from_locks(locks).expiry_dates == {"2026-08-21", "2026-09-16"}
+
+
+# ---------------------------------------------------------------------------
+# The warning has to stay rare to stay readable. An expiry the broker withheld
+# because it is OVER is not news; a live one going missing is the whole point.
+# ---------------------------------------------------------------------------
+
+def test_an_expired_pinned_expiry_is_not_warned_about(
+        fake_client, temp_db, patch_schwab, state_dir, caplog):
+    """The line Chandan saw every minute. Nothing clears a finished lock except
+    `purge_expired`, whose only caller is the DASHBOARD — so a collector
+    running for a fortnight with nobody opening the app warned thousands of
+    times about a position that ended in August. That is exactly how BUG-030
+    hid for eight weeks behind 2,181 identical warnings."""
+    _write_locks(state_dir, {"k": _lock(front="2020-01-17", back="2020-02-21",
+                                        put=NEAR_STRIKE, call=NEAR_STRIKE)})
+    patch_schwab(raw_chain=make_raw_chain(strikes=[NEAR_STRIKE]))
+
+    with caplog.at_level("WARNING"):
+        collector._run_cycle(fake_client, temp_db, "MIDDAY", 300)
+
+    assert "did not return" not in caplog.text
+
+
+def test_a_live_expiry_the_broker_withheld_is_still_warned_about(
+        fake_client, temp_db, patch_schwab, state_dir, caplog):
+    """The half that must not be lost. This is the alarm that says a position
+    being HELD has stopped being recorded, and silencing it was never the aim
+    — only the expired case is filtered."""
+    _write_locks(state_dir, {"k": _lock(front=FAR_EXPIRY, back=FAR_EXPIRY,
+                                        put=NEAR_STRIKE, call=NEAR_STRIKE)})
+    patch_schwab(raw_chain=make_raw_chain(strikes=[NEAR_STRIKE]))
+
+    with caplog.at_level("WARNING"):
+        collector._run_cycle(fake_client, temp_db, "MIDDAY", 300)
+
+    assert "did not return" in caplog.text
+    assert FAR_EXPIRY in caplog.text
+
+
+def test_a_lock_with_one_expired_and_one_live_leg_warns_only_about_the_live_one(
+        fake_client, temp_db, patch_schwab, state_dir, caplog):
+    """A diagonal whose front leg is done but whose back leg is still open. The
+    message must name the leg that is actually missing and not the one that
+    merely ended, or it sends the reader looking in the wrong place."""
+    _write_locks(state_dir, {"k": _lock(front="2020-01-17", back=FAR_EXPIRY,
+                                        put=NEAR_STRIKE, call=NEAR_STRIKE)})
+    patch_schwab(raw_chain=make_raw_chain(strikes=[NEAR_STRIKE]))
+
+    with caplog.at_level("WARNING"):
+        collector._run_cycle(fake_client, temp_db, "MIDDAY", 300)
+
+    assert FAR_EXPIRY in caplog.text
+    assert "2020-01-17" not in caplog.text

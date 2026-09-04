@@ -51,6 +51,7 @@ import config
 import db
 import schwab_client
 from core import contract
+from core import expiry as core_expiry
 from core import pins as core_pins
 from core import session as core_session
 from state import entry_locks
@@ -701,12 +702,39 @@ def _run_cycle(client, db_path: str, session: str, poll_interval: int) -> int:
             )
             keep_expiries |= pinned_expiries
 
+        # An expiry the broker did not return because it ALREADY EXPIRED is not
+        # news: no broker lists a contract that is over, and the lock holding it
+        # is finished. Warning about it anyway printed this line every minute of
+        # every session for as long as the stale lock sat in the file -- and the
+        # only thing that clears such a lock is `entry_locks.purge_expired`,
+        # whose sole caller is the DASHBOARD. A collector running for a fortnight
+        # with nobody opening the app therefore warned ~5,500 times about a
+        # position that finished in August.
+        #
+        # That is precisely how BUG-030 hid for eight weeks behind 2,181
+        # identical warnings. This line has to stay rare to stay readable: it is
+        # the one that says a LIVE position has stopped being recorded.
+        #
+        # Only the message is filtered, never the pin. core/pins.py deliberately
+        # does not judge expiry, and a stale lock pinning a few extra strikes
+        # costs a handful of rows -- the safe direction, unchanged here.
         missing = pinned.expiry_dates - set(all_expiries)
-        if missing:
+        unexpected = {
+            e for e in missing
+            if not core_expiry.is_expired(e, datetime.now(UTC))
+        }
+        if unexpected:
             logger.warning(
                 "a lock depends on expiry(ies) the broker did not return: %s — "
                 "the dashboard will show defaults for that lock (BUG-022)",
-                ", ".join(sorted(missing)),
+                ", ".join(sorted(unexpected)),
+            )
+        if missing - unexpected:
+            # Said once, at DEBUG, so the record still explains the silence.
+            logger.debug(
+                "ignoring %d expired pinned expiry(ies) the broker did not "
+                "return: %s — the lock is over and awaits purge_expired",
+                len(missing - unexpected), ", ".join(sorted(missing - unexpected)),
             )
 
         chain_df = chain_df[chain_df["expiry"].isin(keep_expiries)]
