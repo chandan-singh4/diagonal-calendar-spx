@@ -312,6 +312,77 @@ def classify(volume: float, delta_oi: float, *, high_volume: bool,
     return "—", "quiet"
 
 
+def high_volume_cut(total_volume: pd.Series,
+                    percentile: float = HIGH_VOLUME_PERCENTILE) -> float:
+    """The volume a strike must reach before it is given a verdict.
+
+    A percentile of the strikes that ACTUALLY TRADED, not of every strike on
+    screen: half the rows in a 2.5% band are usually zero, and a percentile
+    over those sits at or near zero and marks the whole board as busy.
+
+    One definition, called by `positioning` and by `worked_example`, because
+    a panel that explains itself with a different threshold from the one it
+    applied is worse than a panel that does not explain itself at all.
+    """
+    traded = total_volume[total_volume > 0]
+    return float(traded.quantile(percentile / 100.0)) if len(traded) else 0.0
+
+
+def worked_example(rows: pd.DataFrame, today: pd.DataFrame,
+                   prior: pd.DataFrame, *,
+                   percentile: float = HIGH_VOLUME_PERCENTILE) -> dict | None:
+    """The arithmetic behind ONE row, so the panel can show its working.
+
+    Picks the strike with the largest absolute change in open interest — the
+    row a reader's eye goes to anyway, and the one where "where did that
+    number come from" is hardest to guess.
+
+    Returns the actual inputs, not a rounded retelling: yesterday's calls and
+    puts, today's, the subtraction, the volume it is measured against, the
+    ratio, and the threshold that decided whether a verdict was offered at
+    all. Every one of those is read from the same frames the table was drawn
+    from, so the explanation cannot drift from the picture.
+
+    None when there is nothing to explain — no rows, or no previous session
+    to subtract.
+    """
+    if rows is None or rows.empty or "delta_oi" not in rows.columns:
+        return None
+    live = rows[rows["delta_oi"].notna()]
+    if live.empty:
+        return None
+
+    pick = live.loc[live["delta_oi"].abs().idxmax()]
+    strike = float(pick["strike"])
+
+    def _at(frame, column):
+        if frame is None or frame.empty or column not in frame.columns:
+            return 0.0
+        hit = frame.loc[frame["strike"] == strike, column]
+        return float(hit.iloc[0]) if len(hit) else 0.0
+
+    now_call, now_put = _at(today, "call_oi"), _at(today, "put_oi")
+    was_call, was_put = _at(prior, "call_oi"), _at(prior, "put_oi")
+    volume = float(pick["total_volume"])
+    cut = high_volume_cut(rows["total_volume"], percentile)
+
+    return {
+        "strike": strike,
+        "was_call": was_call, "was_put": was_put, "was_total": was_call + was_put,
+        "now_call": now_call, "now_put": now_put, "now_total": now_call + now_put,
+        "delta_oi": float(pick["delta_oi"]),
+        "call_volume": float(pick["call_volume"]),
+        "put_volume": float(pick["put_volume"]),
+        "total_volume": volume,
+        "ratio": (float(pick["delta_oi"]) / volume) if volume else float("nan"),
+        "cut": cut,
+        "high_volume": volume >= cut and volume > 0,
+        "verdict": str(pick["verdict"]),
+        "tone": str(pick["tone"]),
+        "percentile": percentile,
+    }
+
+
 def positioning(today: pd.DataFrame, prior: pd.DataFrame, spot: float, *,
                 strike_range_percent: float = 2.5,
                 churn_ratio: float = CHURN_RATIO,
@@ -358,8 +429,7 @@ def positioning(today: pd.DataFrame, prior: pd.DataFrame, spot: float, *,
     merged["prior_oi"] = merged["prior_oi"].fillna(0.0)
     merged["delta_oi"] = merged["call_oi"] + merged["put_oi"] - merged["prior_oi"]
 
-    traded = merged.loc[merged["total_volume"] > 0, "total_volume"]
-    cut = float(traded.quantile(high_volume_percentile / 100.0)) if len(traded) else 0.0
+    cut = high_volume_cut(merged["total_volume"], high_volume_percentile)
 
     verdicts = [
         classify(v, d, high_volume=(v >= cut and v > 0),

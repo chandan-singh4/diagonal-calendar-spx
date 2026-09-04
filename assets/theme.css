@@ -826,6 +826,32 @@ div[class*="st-key-chartcard_"]:hover {
 .scope-pill .v { color: var(--text); font-weight: 600; }
 .scope-pill .sep { color: var(--border); }
 
+/* ── Worked example ───────────────────────────────────────────────────────
+   The arithmetic behind one row of the positioning table, shown in the
+   panel's own live numbers. Styled as prose with one small table rather than
+   as a chart: it is being read once, to learn how the column works.       */
+.worked p { font-size: .82rem; line-height: 1.6; margin: 0 0 .7rem; }
+.worked p.note {
+  font-size: .76rem; color: var(--text-2);
+  border-left: 2px solid var(--border); padding-left: .7rem; margin-top: .9rem;
+}
+.worked table {
+  border-collapse: collapse; margin: 0 0 .9rem; font-family: var(--mono);
+  font-size: .78rem;
+}
+.worked th, .worked td {
+  padding: .32rem .85rem .32rem 0; text-align: right;
+  border-bottom: 1px solid var(--border); white-space: nowrap;
+}
+.worked th { color: var(--text-2); font-weight: 600; font-size: .7rem;
+             text-transform: uppercase; letter-spacing: .05em; }
+.worked td:first-child, .worked th:first-child {
+  text-align: left; font-family: var(--sans); color: var(--text-2);
+  padding-right: 1.6rem;
+}
+.worked tr.sum td { color: var(--text); font-weight: 600;
+                    border-bottom: none; border-top: 1px solid var(--border-hi); }
+
 /* ── Dealer positioning table ─────────────────────────────────────────────
    Volume against the overnight change in open interest, one row per strike.
    Built as a plain CSS grid rather than st.columns: forty strikes would be

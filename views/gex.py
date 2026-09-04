@@ -1140,6 +1140,7 @@ def _draw_volume_vs_oi(ctx: ViewContext, per_strike: pd.DataFrame,
         return
 
     st.markdown(_positioning_table(rows, ctx.spx_price), unsafe_allow_html=True)
+    _draw_worked_example(rows, per_strike, prior, ctx.session_date)
 
     if rows["delta_oi"].isna().all():
         st.caption(
@@ -1160,6 +1161,73 @@ def _draw_volume_vs_oi(ctx: ViewContext, per_strike: pd.DataFrame,
         "than labelled. **Open interest is published once, overnight**, so "
         "these deltas do not move during the session."
     )
+
+
+def _draw_worked_example(rows: pd.DataFrame, today: pd.DataFrame,
+                        prior: pd.DataFrame, session_date: str) -> None:
+    """The arithmetic behind the biggest row, in the numbers on screen.
+
+    Regenerated on every render from the same frames the table was drawn
+    from, so it follows the expiry, the session and the data. A worked
+    example written once into a caption would be a claim about one afternoon
+    that quietly goes stale; this one cannot disagree with the picture above
+    it, because it is read from the same place.
+    """
+    ex = dealer.worked_example(rows, today, prior)
+    if ex is None:
+        return
+
+    verdict = (f"it is labelled <b>{ex['verdict']}</b>"
+               if ex["verdict"] != "—"
+               else "no verdict is offered")
+    reason = (
+        f"{_compact(ex['total_volume'])} traded is above the "
+        f"{_compact(ex['cut'])} mark — the busiest quarter of the strikes "
+        f"shown — so this strike is loud enough to read"
+        if ex["high_volume"] else
+        f"{_compact(ex['total_volume'])} traded is below the "
+        f"{_compact(ex['cut'])} mark — the busiest quarter of the strikes "
+        f"shown — so this strike is too quiet to call either way"
+    )
+    direction = ("<b>more</b> contracts exist than yesterday, so positions "
+                 "were opened" if ex["delta_oi"] >= 0 else
+                 "<b>fewer</b> contracts exist than yesterday, so positions "
+                 "were closed")
+
+    with st.expander(f"Show me how the {ex['strike']:,.0f} row was calculated"):
+        st.markdown(
+            f'''<div class="worked">
+<p>Take the <b>{ex["strike"]:,.0f}</b> row — the biggest change on this
+screen. Two numbers go into it, and one of them is from yesterday.</p>
+<table>
+  <tr><th></th><th>Calls</th><th>Puts</th><th>Total</th></tr>
+  <tr><td>Contracts open at yesterday&rsquo;s close</td>
+      <td>{ex["was_call"]:,.0f}</td><td>{ex["was_put"]:,.0f}</td>
+      <td>{ex["was_total"]:,.0f}</td></tr>
+  <tr><td>Contracts open now</td>
+      <td>{ex["now_call"]:,.0f}</td><td>{ex["now_put"]:,.0f}</td>
+      <td>{ex["now_total"]:,.0f}</td></tr>
+  <tr class="sum"><td>Change &mdash; today minus yesterday</td>
+      <td>{ex["now_call"] - ex["was_call"]:+,.0f}</td>
+      <td>{ex["now_put"] - ex["was_put"]:+,.0f}</td>
+      <td>{ex["delta_oi"]:+,.0f}</td></tr>
+</table>
+<p>That <b>{ex["delta_oi"]:+,.0f}</b> is the number in the &Delta;OI column.
+{direction[0].upper() + direction[1:]}.</p>
+<p><b>Now the volume.</b> {_compact(ex["total_volume"])} contracts changed
+hands here today ({ex["call_volume"]:,.0f} calls, {ex["put_volume"]:,.0f}
+puts). But only {abs(ex["delta_oi"]):,.0f} of those left a lasting position
+behind &mdash; the rest was the same contracts being traded back and forth
+between people closing out the same day.</p>
+<p><b>{abs(ex["delta_oi"]):,.0f} &divide; {ex["total_volume"]:,.0f} =
+{abs(ex["ratio"]):.0%}</b> of the day&rsquo;s trading stuck. And {reason}, so
+{verdict}.</p>
+<p class="note">Both counts are end-of-day figures. The exchange publishes
+how many contracts exist only once, overnight, so this &Delta;OI column is
+fixed for the whole of {session_date} &mdash; only the volume half moves
+during the day. It is not a stale reading.</p>
+</div>''',
+            unsafe_allow_html=True)
 
 
 @st.cache_data(show_spinner=False, max_entries=8)

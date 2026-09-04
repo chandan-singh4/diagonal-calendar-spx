@@ -385,3 +385,82 @@ def test_radii_are_not_rescaled_to_the_survivors():
 def test_an_empty_board_filters_to_an_empty_board():
     blank = dealer._blank(dealer.BUBBLE_COLUMNS)
     assert dealer.most_traded(blank).empty
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# high_volume_cut / worked_example — the panel showing its working
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_the_cut_ignores_strikes_that_did_not_trade():
+    """Half the rows in a 2.5% band are usually zero. A percentile taken over
+    those sits at or near zero and marks the entire screen as busy."""
+    volumes = pd.Series([0.0, 0.0, 0.0, 0.0, 100.0, 200.0, 300.0, 400.0])
+    assert dealer.high_volume_cut(volumes, 75.0) == pytest.approx(325.0)
+
+
+def test_the_cut_is_zero_when_nothing_has_traded():
+    assert dealer.high_volume_cut(pd.Series([0.0, 0.0])) == 0.0
+
+
+def _explainable():
+    """Today's frame, yesterday's, and the verdict rows they produce."""
+    today = pd.DataFrame({
+        "strike": [7700.0, 7750.0, 7800.0],
+        "call_oi": [1000.0, 2653.0, 500.0],
+        "put_oi": [900.0, 2146.0, 400.0],
+        "call_volume": [100.0, 8271.0, 50.0],
+        "put_volume": [100.0, 1384.0, 50.0],
+    })
+    prior = pd.DataFrame({
+        "strike": [7700.0, 7750.0, 7800.0],
+        "call_oi": [990.0, 663.0, 495.0],
+        "put_oi": [890.0, 482.0, 395.0],
+    })
+    rows = dealer.positioning(today, prior, 7750.0, strike_range_percent=2.5)
+    return rows, today, prior
+
+
+def test_the_example_explains_the_row_with_the_biggest_change():
+    """The row the eye goes to, and the one where "where did that number come
+    from" is hardest to guess."""
+    rows, today, prior = _explainable()
+    ex = dealer.worked_example(rows, today, prior)
+    assert ex["strike"] == 7750.0
+
+
+def test_the_example_reports_the_real_inputs_not_a_retelling():
+    """Every figure here is read from the frames the table was drawn from, so
+    the explanation cannot drift from the picture above it. These are the live
+    2026-09-04 numbers for the 8 Sep expiry at 7,750."""
+    rows, today, prior = _explainable()
+    ex = dealer.worked_example(rows, today, prior)
+
+    assert (ex["was_call"], ex["was_put"], ex["was_total"]) == (663.0, 482.0, 1145.0)
+    assert (ex["now_call"], ex["now_put"], ex["now_total"]) == (2653.0, 2146.0, 4799.0)
+    assert ex["delta_oi"] == pytest.approx(4799.0 - 1145.0)     # +3,654
+    assert ex["total_volume"] == pytest.approx(9655.0)
+    assert ex["ratio"] == pytest.approx(3654.0 / 9655.0)
+    assert ex["verdict"] == "Heavy Accumulation"
+
+
+def test_the_example_quotes_the_same_threshold_the_table_applied():
+    """A panel that explains itself with a different threshold from the one it
+    used is worse than a panel that does not explain itself. Both call
+    high_volume_cut; this pins that they agree."""
+    rows, today, prior = _explainable()
+    ex = dealer.worked_example(rows, today, prior)
+    assert ex["cut"] == pytest.approx(
+        dealer.high_volume_cut(rows["total_volume"]))
+    assert ex["high_volume"] is True
+    assert (ex["verdict"] != "—") is ex["high_volume"]
+
+
+def test_there_is_nothing_to_explain_without_a_previous_session():
+    rows, today, _ = _explainable()
+    blank = dealer.positioning(today, pd.DataFrame(), 7750.0)
+    assert dealer.worked_example(blank, today, pd.DataFrame()) is None
+
+
+def test_there_is_nothing_to_explain_from_an_empty_board():
+    assert dealer.worked_example(dealer._blank(dealer.VERDICT_COLUMNS),
+                                 pd.DataFrame(), pd.DataFrame()) is None
