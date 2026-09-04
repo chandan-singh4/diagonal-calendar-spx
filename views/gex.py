@@ -857,9 +857,6 @@ _FLOW_NAME = {"call": "Call-dominated", "put": "Put-dominated",
               "balanced": "Balanced / straddle"}
 _SPOT_ACCENT = "#38bdf8"
 _VOL_BAR = "#8b5cf6"
-# Today's volume is context, not evidence: it is drawn, but muted, because
-# nothing on this panel is computed from it.
-_TODAY_BAR = "rgba(139,92,246,0.32)"
 
 _TONE_BADGE = {
     "accumulation": ("rgba(16,185,129,.15)", "#34d399", "rgba(16,185,129,.3)"),
@@ -1283,8 +1280,11 @@ def _positioning_table(rows: pd.DataFrame, spot: float) -> str:
     forty layout containers rebuilt on every rerun, and this is a table, not
     forty widgets.
     """
+    # One volume column, and it is the one the verdict is computed from.
+    # Today's was drawn beside it for a while and was too much to read; it
+    # lives in the worked example now, where it can be explained rather than
+    # sat next to a number it must not be compared with.
     widest_vol = float(rows["settled_volume"].max()) or 1.0
-    widest_today = float(rows["total_volume"].max()) or 1.0
     deltas = rows["delta_oi"].abs()
     widest_delta = (float(deltas.max()) if deltas.notna().any() else 1.0) or 1.0
     nearest = (rows["strike"] - spot).abs().idxmin()
@@ -1293,7 +1293,6 @@ def _positioning_table(rows: pd.DataFrame, spot: float) -> str:
            '<div class="dealer-row dealer-head">'
            '<div>Strike</div><div>Traded yesterday</div>'
            '<div>Net &Delta;OI (yesterday)</div>'
-           '<div>Traded today</div>'
            '<div class="c">Position verdict</div></div>']
 
     for i, r in rows.iterrows():
@@ -1301,7 +1300,6 @@ def _positioning_table(rows: pd.DataFrame, spot: float) -> str:
         strike = f"{r['strike']:,.0f}" + (" ATM" if atm else "")
         settled = float(r["settled_volume"])
         vol_pct = 100.0 * settled / widest_vol
-        today_pct = 100.0 * float(r["total_volume"]) / widest_today
 
         delta = r["delta_oi"]
         if pd.isna(delta):
@@ -1329,11 +1327,6 @@ def _positioning_table(rows: pd.DataFrame, spot: float) -> str:
             f'background:{delta_colour};"></div></div>'
             f'<div class="dealer-val" style="color:{delta_colour};">'
             f'{delta_text}</div></div>'
-            f'<div class="dealer-bar today"><div class="dealer-track">'
-            f'<div class="dealer-fill" style="width:{today_pct:.1f}%;'
-            f'background:{_TODAY_BAR};"></div></div>'
-            f'<div class="dealer-val">{_fmt_money(r["total_volume"])}</div>'
-            f'</div>'
             f'<div class="c">{badge}</div></div>'
         )
     out.append("</div>")
