@@ -193,7 +193,7 @@ def flip_strike(gex_df: pd.DataFrame) -> float | None:
     if gex_df.empty or "net_gex" not in gex_df.columns:
         return None
 
-    cum = gex_df["net_gex"].cumsum().to_numpy()
+    cum = cumulative_net(gex_df).to_numpy()
     strikes = gex_df["strike"].to_numpy()
 
     crossing = None
@@ -304,9 +304,14 @@ def summary(gex_df: pd.DataFrame) -> dict:
 def cumulative_net(gex_df: pd.DataFrame) -> pd.Series:
     """Running total of net exposure from the lowest strike upward.
 
-    The curve whose zero crossing IS `flip_strike`. Returned as a Series
-    aligned to the frame so a caller can plot it against `strike` without
-    another groupby.
+    The curve whose zero crossing IS `flip_strike` — literally: that function
+    calls this one, so there is a single definition of the running total
+    rather than a cumsum here and an identical cumsum there that could drift.
+    The chart that drew this curve was removed; the definition stays because
+    the flip is computed from it.
+
+    Returned as a Series aligned to the frame so a caller can plot it against
+    `strike` without another groupby.
     """
     if gex_df.empty:
         return pd.Series(dtype="float64")

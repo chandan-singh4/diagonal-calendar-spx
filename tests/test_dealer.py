@@ -1,17 +1,22 @@
-"""core/dealer.py — the churn-versus-commitment verdicts.
+"""core/dealer.py — the term-structure bubbles and the churn verdicts.
 
 WHAT THESE CAN AND CANNOT PROVE. The verdicts are heuristics: no data
 anywhere says whether "Heavy Accumulation" was the right word for a strike.
-So these tests do not try to show the labels are true. They pin what CAN be
-wrong without anyone noticing — the arithmetic and the boundaries: a
-threshold flipped from >= to >, a ratio taken against the wrong denominator,
-a percentile computed over the whole chain instead of the strikes on screen.
+So these tests do not try to show the labels are true. They pin the two
+things that CAN be wrong without anyone noticing:
 
-They also pin that no ratio can satisfy two verdicts at once, which is what
-makes a verdict unambiguous rather than an artefact of branch order. An
-earlier version of this file claimed the order itself was load-bearing; a
-mutation test that swapped the branches left every test passing, which
-disproved it.
+  * the arithmetic and the boundaries — a threshold flipped from >= to >, a
+    ratio taken against the wrong denominator, a percentile over the whole
+    chain instead of the strikes on screen;
+  * the order the rules are applied in, which is load-bearing. Churn's test
+    ("small net change") is satisfied by definition when the other two fail,
+    so checking it first silently relabels every genuine build as scalping.
+
+The bubble tests carry one measured number. On the live 2026-09-04 snapshot
+the busiest 0DTE strike traded 151,263 contracts; a monthly strike at the
+same price traded a small fraction of that. Linear radius is what would put
+the second below a pixel, and `test_the_smallest_bubble_survives_the_largest`
+pins that it does not.
 """
 from __future__ import annotations
 
@@ -58,9 +63,126 @@ def _prior(rows: list[dict]) -> pd.DataFrame:
 # Expiry naming — the x axis
 # ─────────────────────────────────────────────────────────────────────────────
 
+def test_the_columns_are_named_the_way_a_trader_names_them():
+    assert dealer.expiry_label("2026-09-04", 0) == "0DTE (Today)"
+    assert dealer.expiry_label("2026-09-05", 1) == "1DTE"
+    assert dealer.expiry_label("2026-09-11", 7) == "W-OPEX (Fri)"
+    assert dealer.expiry_label("2026-10-09", 14) == "Next Fri"
+    # Past a fortnight the count stops being how anyone refers to it.
+    assert dealer.expiry_label("2026-10-02", 28) == "Fri 2 Oct"
+
+
+def test_the_monthly_and_the_quarterly_are_told_apart():
+    """Both are third Fridays; only the quarterly ends a cycle. A chart that
+    called them the same thing would hide the one distinction the column
+    exists to make."""
+    assert dealer.expiry_label("2026-09-18", 14) == "Quarterly"   # September
+    assert dealer.expiry_label("2026-10-16", 42) == "Monthly OPEX"
+
+
+def test_the_third_fridays_am_contract_is_named_like_its_own_date():
+    """SPX lists two contracts for the third Friday and the morning one
+    arrives as "2026-09-18 (AM)". Parsed as a bare date it would raise."""
+    assert dealer.expiry_label("2026-09-18 (AM)", 14) == "Quarterly"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Bubble sizing and colour
 # ─────────────────────────────────────────────────────────────────────────────
+
+def test_the_smallest_bubble_survives_the_largest():
+    """The reason the scale is non-linear at all. On the live snapshot the
+    busiest 0DTE strike traded 151,263 contracts; a monthly strike trading a
+    hundred would get a radius of 0.02px under a linear scale — invisible.
+    Both ends must land inside the stated pixel range."""
+    small = dealer.radius(100, 151_263)
+    large = dealer.radius(151_263, 151_263)
+    assert dealer.MIN_RADIUS <= small <= dealer.MAX_RADIUS
+    assert large == pytest.approx(dealer.MAX_RADIUS)
+    assert small > dealer.MIN_RADIUS          # not flattened onto the floor
+    assert small < large
+
+
+def test_square_root_sizes_by_area_not_by_radius():
+    """Four times the volume must give four times the AREA, which is what an
+    eye compares. Area goes as r^2, so the radius doubles."""
+    quarter = dealer.radius(25, 100, min_radius=0.0, max_radius=100.0)
+    full = dealer.radius(100, 100, min_radius=0.0, max_radius=100.0)
+    assert full / quarter == pytest.approx(2.0)
+
+
+def test_log_compresses_harder_than_square_root():
+    """The reason the toggle exists: on a session where one strike has run
+    away, log lifts everything else back into view."""
+    sqrt_r = dealer.radius(100, 1_000_000, scale="sqrt")
+    log_r = dealer.radius(100, 1_000_000, scale="log")
+    assert log_r > sqrt_r
+
+
+def test_a_strike_that_traded_nothing_takes_the_floor_rather_than_vanishing():
+    assert dealer.radius(0, 1000) == dealer.MIN_RADIUS
+    assert dealer.radius(50, 0) == dealer.MIN_RADIUS
+
+
+def test_the_flow_bands_are_the_published_ones():
+    assert dealer.flow_bucket(0.69) == "call"
+    assert dealer.flow_bucket(0.70) == "balanced"       # boundary is inclusive
+    assert dealer.flow_bucket(1.30) == "balanced"
+    assert dealer.flow_bucket(1.31) == "put"
+
+
+def test_a_strike_with_no_call_volume_is_put_dominated_not_balanced():
+    """Divide by zero and the ratio is undefined; left as NaN it buckets as
+    "balanced", which is wrong in the one direction that matters — a strike
+    where only puts traded is the strongest put signal on the board."""
+    points = dealer.bubble_points(_chain([
+        {"strike": 7700, "right": "P", "volume": 5000},
+    ]), SPOT)
+    assert points["flow"].iloc[0] == "put"
+
+
+def test_bubbles_drop_strikes_outside_the_band_rather_than_clamping_them():
+    """Height on this chart IS a price. A clamped point would sit at a price
+    nothing traded at, which is worse than not drawing it."""
+    points = dealer.bubble_points(_chain([
+        {"strike": 7700, "right": "C"},
+        {"strike": 5000, "right": "C"},     # far below any 4% band
+    ]), SPOT)
+    assert points["strike"].tolist() == [7700.0]
+
+
+def test_both_sides_of_one_strike_become_one_bubble():
+    points = dealer.bubble_points(_chain([
+        {"strike": 7700, "right": "C", "volume": 300, "mark": 2.0},
+        {"strike": 7700, "right": "P", "volume": 100, "mark": 1.0},
+    ]), SPOT)
+    assert len(points) == 1
+    row = points.iloc[0]
+    assert row["total_volume"] == 400
+    assert row["pcr"] == pytest.approx(1 / 3)
+    assert row["flow"] == "call"
+    # Premium, not contracts: 300 x $2 x 100 + 100 x $1 x 100.
+    assert row["notional"] == pytest.approx(70_000.0)
+
+
+def test_one_expiry_does_not_absorb_another_at_the_same_strike():
+    """The whole point of the chart. Grouped by strike alone, 0DTE and the
+    monthly would merge and the term structure would disappear."""
+    points = dealer.bubble_points(_chain([
+        {"strike": 7700, "right": "C", "expiry": "2026-09-04", "dte": 0},
+        {"strike": 7700, "right": "C", "expiry": "2026-09-18", "dte": 14},
+    ]), SPOT)
+    assert len(points) == 2
+    assert points["expiry_order"].tolist() == [0, 14]     # ordered by dte
+
+
+def test_an_empty_or_shapeless_chain_returns_the_shaped_blank():
+    shapeless = pd.DataFrame({"strike": [7700.0], "right": ["C"]})
+    for frame in (pd.DataFrame(), shapeless):
+        out = dealer.bubble_points(frame, SPOT)
+        assert out.empty
+        assert list(out.columns) == list(dealer.BUBBLE_COLUMNS)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # The classification engine
@@ -207,3 +329,59 @@ def test_a_wall_label_never_overwrites_a_louder_verdict():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# most_traded — what fits on the chart
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _points(expiries=3, strikes=20):
+    """A board with a known busiest strike per expiry."""
+    rows = []
+    for e in range(expiries):
+        for k in range(strikes):
+            rows.append({"expiry": f"2026-09-{e + 1:02d}",
+                         "expiry_label": f"E{e}", "expiry_order": e,
+                         "strike": 7700.0 + k * 5, "call_volume": 1.0,
+                         "put_volume": 1.0, "total_volume": float(k + 1),
+                         "pcr": 1.0, "notional": 1.0, "flow": "balanced",
+                         "radius": 4.0})
+    return pd.DataFrame(rows)
+
+
+def test_only_the_busiest_strikes_of_each_expiry_survive():
+    kept = dealer.most_traded(_points(), per_expiry=3, max_expiries=9)
+    assert len(kept) == 9
+    for label, group in kept.groupby("expiry_label"):
+        # total_volume was k + 1 over twenty strikes: 20, 19, 18 are the top.
+        assert sorted(group["total_volume"]) == [18.0, 19.0, 20.0], label
+
+
+def test_expiries_are_kept_by_nearness_not_by_volume():
+    """The subject is the term structure. Keeping the loudest expiries would
+    leave a hole where a quiet middle one was, and a hole on a date axis reads
+    as a session with no trade rather than as a column that was not drawn."""
+    board = _points(expiries=4)
+    board.loc[board["expiry_label"] == "E0", "total_volume"] = 0.5   # quietest
+    kept = dealer.most_traded(board, per_expiry=2, max_expiries=2)
+    assert sorted(kept["expiry_label"].unique()) == ["E0", "E1"]
+
+
+def test_the_column_label_survives_the_filter():
+    """Pinned because it did not. groupby.apply consumed expiry_label as the
+    grouping key and returned a frame without it, and the panel cannot draw
+    its columns from a frame that has lost the column name."""
+    kept = dealer.most_traded(_points(), per_expiry=2, max_expiries=2)
+    assert "expiry_label" in kept.columns
+    assert "expiry_order" in kept.columns
+
+
+def test_radii_are_not_rescaled_to_the_survivors():
+    """A radius is relative to the busiest point on the WHOLE board. Recomputing
+    it after the filter would make a thin expiry look busy purely because its
+    neighbours were dropped."""
+    board = _points()
+    kept = dealer.most_traded(board, per_expiry=2, max_expiries=2)
+    assert set(kept["radius"]) == {4.0}
+
+
+def test_an_empty_board_filters_to_an_empty_board():
+    blank = dealer._blank(dealer.BUBBLE_COLUMNS)
+    assert dealer.most_traded(blank).empty

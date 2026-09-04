@@ -1,14 +1,16 @@
 """core/dealer.py — what a session's flow says about dealer inventory.
 
-ONE QUESTION. `positioning` asks what core/gex.py cannot: gamma exposure
-describes what is LISTED, this describes whether what TRADED today stayed on
-the books. Volume alone cannot tell a position being opened from one contract
-changing hands forty times; open interest settles it, because it counts what
-still existed at the close.
+TWO QUESTIONS, ONE MODULE. Both charts in the Dealer Positioning section ask
+something core/gex.py cannot: gamma exposure describes what is LISTED, and
+these describe what was TRADED today and whether it stayed on the books.
 
-A `bubble_points` lived here too, spreading volume across expiry and strike.
-It was removed with the chart it fed, on the evidence of use: nothing was
-read off that panel which this one does not say plainly.
+  * `bubble_points` spreads today's volume across expiry AND strike at once,
+    so 0DTE gamma chasing separates visibly from monthly OPEX hedging instead
+    of both landing in one per-strike total.
+  * `positioning` reads volume against the overnight change in open interest.
+    Volume alone cannot tell a position being opened from one contract
+    changing hands forty times; open interest settles it, because it counts
+    what still existed at the close.
 
 WHAT IS ASSUMED, PLAINLY. The verdicts are heuristics with thresholds chosen
 by convention, not measurement — "high volume" is the 75th percentile of the
@@ -28,7 +30,51 @@ the measure behaving correctly, not a stale read.
 """
 from __future__ import annotations
 
+import math
+from datetime import date
+
 import pandas as pd
+
+from core import contract
+
+# The strike band drawn around spot. The specification asks for 3% to 5%; 4%
+# is the middle of it and about 310 points at SPX 7,700 — comfortably wider
+# than the 300 the collector stores, so the band is never the thing hiding a
+# strike that was collected.
+BAND_PERCENT = 4.0
+
+# Bubble radii in pixels, and the scale between them. Linear radius would
+# make a monthly expiry invisible next to 0DTE: on a live session the busiest
+# 0DTE strike carries many times the volume of the busiest monthly one, so
+# the small end rounds to nothing. Square root maps volume to AREA, which is
+# the comparison an eye makes anyway; log compresses harder still, for a
+# session where one strike has run away from the rest.
+MIN_RADIUS = 4.0
+MAX_RADIUS = 22.0
+
+# How much of the board the bubble chart may draw at once. These are not
+# cosmetic. The 4% band around SPX 7,700 holds roughly 120 five-point strikes,
+# and a panel is some hundreds of pixels tall: every strike drawn at once puts
+# three or four pixels between neighbours whose bubbles are twenty across, so
+# the columns fuse into solid bars and nothing can be read off them. Keeping
+# the busiest strikes per expiry, and the nearest expiries, is what makes the
+# chart a chart. What is dropped is always stated in the caption -- silent
+# truncation would read as "this is the whole board" when it is not.
+TOP_STRIKES_PER_EXPIRY = 8
+
+# Expiries, on the other hand, are cheap. The crowding this filter exists to
+# fix was VERTICAL -- a hundred-odd strikes stacked into one column -- and
+# capping the columns as well merely cut the term structure short, which is
+# the axis the chart is named after. The cap left here is a guard against a
+# pathological chain, not a design choice: at 24 columns each still gets
+# ~55px, wider than the largest bubble drawn.
+MAX_EXPIRIES = 24
+
+# Put/call volume ratio bands. Below 0.7 the flow is call-dominated, above
+# 1.3 put-dominated, and between them balanced — which on this chart usually
+# means straddles and strangles rather than a genuine standoff.
+PCR_CALL_MAX = 0.7
+PCR_PUT_MIN = 1.3
 
 # Verdict thresholds, as ratios of the strike's own volume.
 CHURN_RATIO = 0.15
@@ -43,6 +89,10 @@ WALL_MONEYNESS = 0.01
 
 CONTRACT_MULTIPLIER = 100
 
+BUBBLE_COLUMNS = ("expiry", "expiry_label", "expiry_order", "strike",
+                  "call_volume", "put_volume", "total_volume", "pcr",
+                  "notional", "flow", "radius")
+
 VERDICT_COLUMNS = ("strike", "call_volume", "put_volume", "total_volume",
                    "delta_oi", "verdict", "tone")
 
@@ -54,6 +104,168 @@ def _blank(columns) -> pd.DataFrame:
 # ─────────────────────────────────────────────────────────────────────────────
 # Expiry naming — the x axis of the bubble chart
 # ─────────────────────────────────────────────────────────────────────────────
+
+def expiry_label(expiry: str, dte: int) -> str:
+    """The column heading a trader would use, not an ISO date.
+
+    "0DTE (Today)" and "Monthly OPEX" say what the column IS; "2026-09-18"
+    makes the reader work out that it is the third Friday. The distinctions
+    worth drawing are the ones that BEHAVE differently: same-day gamma, the
+    weekly, and the monthly and quarterly cycles carrying structural hedges.
+
+    Ordinary weeklies keep their date rather than being numbered "2DTE",
+    "3DTE" and so on — past tomorrow, the count stops being how anyone refers
+    to them.
+    """
+    day = date.fromisoformat(contract.date_of(expiry))
+    monthly = contract.is_third_friday(contract.date_of(expiry))
+
+    if dte == 0:
+        return "0DTE (Today)"
+    if dte == 1:
+        return "1DTE"
+    if monthly:
+        return "Quarterly" if day.month in (3, 6, 9, 12) else "Monthly OPEX"
+    if day.weekday() == 4 and dte <= 7:
+        return "W-OPEX (Fri)"
+    if day.weekday() == 4 and dte <= 14:
+        return "Next Fri"
+    return f"{day:%a} {day.day} {day:%b}"
+
+
+def flow_bucket(pcr) -> str:
+    """Which side the volume at this point leaned, by put/call ratio."""
+    if pcr is None or pd.isna(pcr):
+        return "balanced"
+    if pcr < PCR_CALL_MAX:
+        return "call"
+    if pcr > PCR_PUT_MIN:
+        return "put"
+    return "balanced"
+
+
+def radius(volume: float, largest: float, *, scale: str = "sqrt",
+           min_radius: float = MIN_RADIUS,
+           max_radius: float = MAX_RADIUS) -> float:
+    """Bubble radius in pixels for one strike's volume.
+
+    NON-LINEAR ON PURPOSE, for a measurable reason rather than an aesthetic
+    one: 0DTE routinely trades an order of magnitude more than the monthly at
+    the same strike, so a linear radius puts the monthly under a pixel and
+    the chart becomes a single column of dots.
+
+    Everything lands between min_radius and max_radius, so a point is never
+    invisible and never swallows its neighbours. Zero volume takes the
+    minimum rather than vanishing: a listed strike that traded nothing is a
+    fact worth seeing.
+    """
+    if largest <= 0 or volume <= 0:
+        return min_radius
+    if scale == "log":
+        # log1p keeps log(0) out of it and anchors the smallest bubble at zero.
+        share = math.log1p(volume) / math.log1p(largest)
+    else:
+        share = math.sqrt(min(1.0, volume / largest))
+    return min_radius + min(1.0, share) * (max_radius - min_radius)
+
+
+def most_traded(points: pd.DataFrame, *,
+                per_expiry: int = TOP_STRIKES_PER_EXPIRY,
+                max_expiries: int = MAX_EXPIRIES) -> pd.DataFrame:
+    """The busiest `per_expiry` strikes of the nearest `max_expiries`.
+
+    Expiries are kept by PROXIMITY (expiry_order, which is days to expiry),
+    not by volume: the chart's subject is the term structure, and dropping a
+    quiet middle expiry would leave a gap that reads as a date with no trade
+    rather than as a column that was never drawn. Strikes within an expiry are
+    kept by volume, because there the question is where the trade went.
+
+    Radii are NOT recomputed. They are relative to the busiest point on the
+    board, and rescaling to the survivors would make an expiry look busier
+    simply because its neighbours were dropped.
+    """
+    if points is None or points.empty:
+        return points
+    keep = (points[["expiry_label", "expiry_order"]].drop_duplicates()
+            .nsmallest(max_expiries, "expiry_order")["expiry_label"])
+    trimmed = (points[points["expiry_label"].isin(set(keep))]
+               .sort_values("total_volume", ascending=False))
+    # rank-then-filter, NOT groupby.apply: apply consumes expiry_label as the
+    # grouping key and hands back a frame without it, which the caller needs
+    # to draw the columns.
+    rank = trimmed.groupby("expiry_label").cumcount()
+    return trimmed[rank < per_expiry].reset_index(drop=True)
+
+
+def bubble_points(chain_df: pd.DataFrame, spot: float, *,
+                  band_percent: float = BAND_PERCENT,
+                  scale: str = "sqrt",
+                  min_radius: float = MIN_RADIUS,
+                  max_radius: float = MAX_RADIUS) -> pd.DataFrame:
+    """One row per (expiry, strike) inside the band around spot.
+
+    Strikes outside the band are DROPPED, not clamped to the edge: the whole
+    claim of this chart is that height is a price, and a clamped point would
+    sit at a price nothing traded at.
+
+    `notional` is mark x volume x 100 — the premium that actually changed
+    hands, which is what separates a thousand contracts of a five-cent
+    lottery ticket from a thousand contracts of a forty-dollar hedge. It
+    comes back NaN where the chain carries no mark, so the tooltip can show a
+    dash instead of inventing a zero.
+    """
+    needed = {"expiry", "strike", "right", "volume"}
+    if chain_df is None or chain_df.empty or not needed.issubset(chain_df.columns):
+        return _blank(BUBBLE_COLUMNS)
+
+    band = spot * band_percent / 100.0
+    work = chain_df[(chain_df["strike"] >= spot - band)
+                    & (chain_df["strike"] <= spot + band)].copy()
+    if work.empty:
+        return _blank(BUBBLE_COLUMNS)
+
+    work["volume"] = pd.to_numeric(work["volume"], errors="coerce").fillna(0.0)
+    mark = (pd.to_numeric(work["mark"], errors="coerce") if "mark" in work.columns
+            else pd.Series(float("nan"), index=work.index))
+    is_call = work["right"] == "C"
+
+    grouped = pd.DataFrame({
+        "expiry": work["expiry"],
+        "strike": work["strike"],
+        "call_volume": work["volume"].where(is_call, 0.0),
+        "put_volume": work["volume"].where(work["right"] == "P", 0.0),
+        "total_volume": work["volume"],
+        "notional": mark * work["volume"] * CONTRACT_MULTIPLIER,
+    }).groupby(["expiry", "strike"], as_index=False).sum(min_count=1)
+
+    grouped = grouped[grouped["total_volume"] > 0].reset_index(drop=True)
+    if grouped.empty:
+        return _blank(BUBBLE_COLUMNS)
+
+    # A strike with no call volume has an UNDEFINED ratio, not an infinite
+    # one — but left as NaN it buckets as "balanced", which is wrong in the
+    # one direction that matters. Put-dominated is stated explicitly.
+    calls = grouped["call_volume"].where(grouped["call_volume"] > 0)
+    grouped["pcr"] = grouped["put_volume"] / calls
+    grouped.loc[(grouped["call_volume"] == 0) & (grouped["put_volume"] > 0),
+                "pcr"] = float("inf")
+    grouped["flow"] = grouped["pcr"].map(flow_bucket)
+
+    largest = float(grouped["total_volume"].max())
+    grouped["radius"] = grouped["total_volume"].map(
+        lambda v: radius(v, largest, scale=scale,
+                         min_radius=min_radius, max_radius=max_radius))
+
+    dte_by_expiry = (chain_df.groupby("expiry")["dte"].first()
+                     if "dte" in chain_df.columns else pd.Series(dtype="int64"))
+    dte = grouped["expiry"].map(dte_by_expiry).fillna(0).astype(int)
+    grouped["expiry_order"] = dte
+    grouped["expiry_label"] = [expiry_label(e, d)
+                               for e, d in zip(grouped["expiry"], dte)]
+
+    return grouped.sort_values(["expiry_order", "strike"], ignore_index=True)[
+        list(BUBBLE_COLUMNS)]
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Volume against the overnight change in open interest
