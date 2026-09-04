@@ -1136,8 +1136,14 @@ def _draw_volume_vs_oi(ctx: ViewContext, per_strike: pd.DataFrame,
     # interest minus one expiry's is the rest of the board reported as an
     # overnight liquidation.
     prior = ctx.load_prior_session_oi(ctx.session_date, expiry)
+    # dealer.VERDICT_COLUMNS is in the cache key so that CHANGING the shape of
+    # that frame invalidates the cache. Streamlit hashes the body of the
+    # decorated function, not the module it calls, so a running server that
+    # was started before core/dealer.py changed keeps serving the old columns
+    # to the new renderer — which is a KeyError on the first redraw, in the
+    # user's face, from code that is correct on disk.
     rows = _positioning(per_strike, prior, ctx.spx_price, ctx.snapshot_id,
-                        expiry)
+                        expiry, dealer.VERDICT_COLUMNS)
     if rows.empty:
         st.info("No strike within 2.5% of spot has traded yet today.")
         return
@@ -1256,12 +1262,16 @@ arrives tonight.</p>
 
 @st.cache_data(show_spinner=False, max_entries=8)
 def _positioning(_today: pd.DataFrame, _prior: pd.DataFrame, spot: float,
-                 snapshot_id: int, expiry: str | None) -> pd.DataFrame:
+                 snapshot_id: int, expiry: str | None,
+                 columns: tuple) -> pd.DataFrame:
     """`expiry` is in the signature to be in the CACHE KEY, not to be used.
 
     Both frames are underscore-prefixed so Streamlit skips hashing them —
     which left the key as (spot, snapshot_id), so every expiry returned the
     first table computed and the panel never changed when the control did.
+
+    `columns` is in the signature for the same reason — to be in the key, so
+    a change to the frame's shape retires the entries built before it.
     """
     return dealer.positioning(_today, _prior, spot)
 

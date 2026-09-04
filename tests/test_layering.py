@@ -738,3 +738,29 @@ def test_every_memoised_gex_figure_takes_the_expiry_in_its_cache_key():
     assert not offenders, (
         "cached on an unhashed frame without the filter that produced it: "
         + "; ".join(offenders))
+
+
+def test_the_positioning_cache_retires_when_the_frame_changes_shape():
+    """A stale cache served the user a KeyError from correct code.
+
+    st.cache_data hashes the body of the function it decorates — not the
+    modules that function calls. core/dealer.py gained columns; views/gex.py's
+    cached wrapper did not change; a server already running kept handing the
+    old frame to the new renderer, which asked for a column that had not
+    existed when the entry was built.
+
+    Passing the column tuple makes the shape part of the key, so entries built
+    before a change cannot be served after it.
+    """
+    import inspect
+
+    from core import dealer
+    from views import gex as view_gex
+
+    assert "columns" in inspect.signature(view_gex._positioning).parameters
+
+    source = inspect.getsource(view_gex)
+    assert "dealer.VERDICT_COLUMNS)" in source, (
+        "the columns argument must be the real column tuple — a literal "
+        "copied here would stop tracking the frame it is supposed to describe")
+    assert isinstance(dealer.VERDICT_COLUMNS, tuple), "must be hashable"
