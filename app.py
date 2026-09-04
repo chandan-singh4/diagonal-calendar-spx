@@ -93,6 +93,7 @@ from ui import controls, header, locks, refresh, sidebar, theme
 # for nothing else; the @st.cache_data wrappers stay here and travel on it.
 from views import edge as view_edge
 from views import entry as view_entry
+from views import gex as view_gex
 from views import historical as view_historical
 from views import research as view_research
 from views import scanner as view_scanner
@@ -387,6 +388,7 @@ _TABS = [
     ("edge",     "📈  Calendar Edge",    view_edge.render),
     ("strike",   "🎯  Strike Detail",    view_strike.render),
     ("hist",     "📉  Historical Stats", view_historical.render),
+    ("gex",      "🧲  Gamma Exposure",   view_gex.render),
     ("research", "🔬  Research",         view_research.render),
 ]
 
