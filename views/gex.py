@@ -869,24 +869,20 @@ def _draw_caption(totals: dict, expiry: str | None,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Dealer structure — where the flow went, and whether it stayed
+# Dealer flow & positioning — what TODAY did, and whether it stayed
 #
-# These two panels answer what the per-strike ones cannot. Gamma exposure
-# describes what is LISTED; these describe what was TRADED today. The bubble
-# chart spreads that volume across expiry AND strike, so 0DTE gamma chasing
-# separates from monthly OPEX hedging instead of both collapsing into one
-# per-strike total; the positioning table reads the same volume against the
+# This panel answers what the per-strike ones cannot. Gamma exposure describes
+# what is LISTED; this describes what was TRADED today, read against the
 # overnight change in open interest — the only thing in this data that can
 # tell a position opened from one contract changing hands forty times.
+#
+# A term-structure bubble chart lived here too, volume spread across expiry
+# and strike. It was removed on the evidence of use: nothing was read off it
+# that the table does not say plainly, and it cost most of a screen.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # The reference design's palette, kept exactly. Flow colour is a reading, and
 # a green here has to mean what green means on every other panel.
-_FLOW_FILL = {"call": "#10b981", "put": "#ef4444", "balanced": "#f59e0b"}
-_FLOW_EDGE = {"call": "#059669", "put": "#dc2626", "balanced": "#d97706"}
-_FLOW_NAME = {"call": "Call-dominated", "put": "Put-dominated",
-              "balanced": "Balanced / straddle"}
-_SPOT_ACCENT = "#38bdf8"
 _VOL_BAR = "#8b5cf6"
 
 _TONE_BADGE = {
@@ -903,30 +899,123 @@ def _draw_dealer_structure(ctx: ViewContext, per_strike: pd.DataFrame,
                            dte_by_expiry: dict) -> None:
     st.markdown(
         '<div class="sh"><span class="sh-ico">🏛️</span>'
-        '<span class="sh-ttl">Dealer structure &amp; positioning</span>'
-        '<span class="sh-bdg">term structure · churn vs commitment</span>'
+        '<span class="sh-ttl">Dealer flow &amp; positioning</span>'
+        '<span class="sh-bdg">net flow · churn vs commitment</span>'
         '</div>',
         unsafe_allow_html=True,
     )
-    _draw_term_bubbles(ctx)
+    _draw_net_flow(ctx)
     _gap()
-    # The pill sits with the TABLE, not at the head of the section. It names
-    # the Expiry selection, and only the table honours that selection — over
-    # the bubble chart it read as a caption on a panel it did not describe.
     _draw_scope_pill(per_strike, choice, expiry, dte_by_expiry)
     _draw_volume_vs_oi(ctx, per_strike)
+
+
+_FLOW_SCOPES = {"0DTE": 0, "All expiries": None}
+
+
+def _draw_net_flow(ctx: ViewContext) -> None:
+    """Net gamma exposure gained or lost at each strike since the open.
+
+    A price ladder, not a time series: strike up the side, the change along
+    the bottom, zero down the middle. Green to the right is exposure ADDED
+    today, red to the left exposure taken off — and the length is the size of
+    the day's change at that strike, which the level charts above cannot show
+    because they are dominated by positions that were already there.
+    """
+    scope = st.segmented_control(
+        "Scope", list(_FLOW_SCOPES), default="0DTE", key="gex_flow_scope",
+        selection_mode="single", label_visibility="collapsed",
+        help="0DTE is where the day's flow actually moves the market — those "
+             "positions settle in hours. All expiries is the whole board.",
+    ) or "0DTE"
+
+    intraday = ctx.load_intraday_strike_metrics(
+        ctx.session_date, ctx.snapshot_id, _FLOW_SCOPES[scope])
+    if intraday is None or intraday.empty:
+        st.info("No snapshots for this scope yet today.")
+        return
+
+    rows = _net_flow(intraday, ctx.snapshot_id, scope)
+    if rows.empty:
+        st.info(
+            "Only one snapshot so far this session, so there is no change to "
+            "measure yet. This fills in from the second collection."
+        )
+        return
+
+    added = float(rows.loc[rows["flow"] > 0, "flow"].sum())
+    removed = float(rows.loc[rows["flow"] < 0, "flow"].sum())
+    _strip([
+        _metric("Net flow today", _fmt_money(added + removed),
+                _CALL if added + removed >= 0 else _PUT),
+        _metric("Gamma added", _fmt_money(added), _CALL),
+        _metric("Gamma removed", _fmt_money(removed), _PUT),
+    ])
+    st.plotly_chart(_net_flow_figure(rows, ctx.spx_price, ctx.snapshot_id, scope),
+                    use_container_width=True)
+    st.caption(
+        "· **Cumulative net flow** — net GEX at each strike now, MINUS the "
+        "same figure at the first snapshot of the session. The charts above "
+        "show the board, which is mostly yesterday's positions; this shows "
+        "what today changed. A strike can carry huge exposure and have seen "
+        "no trade at all. Each snapshot is scaled by its own spot price, so "
+        "the index's move is not folded into the figure."
+    )
+
+
+@st.cache_data(show_spinner=False, max_entries=4)
+def _net_flow(_intraday: pd.DataFrame, snapshot_id: int, scope: str):
+    return gex.net_flow_by_strike(_intraday, top=_NET_FLOW_STRIKES)
+
+
+# Enough rungs to see the shape of the ladder, few enough that each bar keeps
+# a readable height. The rest of the board moved by too little to draw.
+_NET_FLOW_STRIKES = 28
+
+
+@st.cache_data(show_spinner=False, max_entries=4)
+def _net_flow_figure(_rows: pd.DataFrame, spot: float, snapshot_id: int,
+                     scope: str):
+    rows = _rows
+    colours = [_CALL if v >= 0 else _PUT for v in rows["flow"]]
+    fig = go.Figure(go.Bar(
+        x=rows["flow"], y=rows["strike"], orientation="h",
+        marker=dict(color=colours), width=3.2,
+        customdata=rows[["open_gex", "now_gex"]].to_numpy(),
+        hovertemplate="Strike %{y:,.0f}<br>Flow today %{x:,.0f}"
+                      "<br>At open %{customdata[0]:,.0f}"
+                      "<br>Now %{customdata[1]:,.0f}<extra></extra>",
+    ))
+    fig.add_vline(x=0, line=dict(color="#2a3f56", width=1))
+    # Spot as a dotted rung across the ladder, so "above" and "below" the
+    # money are read off the chart rather than remembered.
+    fig.add_hline(y=spot, line=dict(color="#9575cd", width=1.4, dash="dot"))
+    fig.add_annotation(
+        x=1, xref="paper", y=spot, xanchor="right", yanchor="bottom",
+        text=f"SPOT {spot:,.2f}", showarrow=False,
+        font=dict(color="#9575cd", size=9))
+    fig.update_layout(
+        xaxis=dict(gridcolor=_GRID, zeroline=False,
+                   **_money_ticks(rows["flow"])),
+        yaxis=dict(gridcolor=_GRID, tickformat="d", dtick=_ladder_step(rows)),
+        bargap=0.35,
+    )
+    _dark(fig, 520)
+    return fig
+
+
+def _ladder_step(rows: pd.DataFrame) -> float:
+    """Strike labels every step, in multiples of five."""
+    span = float(rows["strike"].max() - rows["strike"].min())
+    return max(5.0, round(span / 14.0 / 5.0) * 5.0)
 
 
 def _draw_scope_pill(per_strike: pd.DataFrame, choice: str,
                      expiry: str | None, dte_by_expiry: dict) -> None:
     """What the table below is showing, in one line.
 
-    Necessary because the two panels of this section do not share a scope:
-    the table follows the Expiry control, the bubble chart above deliberately
-    shows every expiry. Sitting directly on the table, the pill answers "which
-    expiry am I reading?" for the one panel where that question has an answer.
-
-    Volume is the two sides added across every strike in scope, which is the
+    The table follows the Expiry control, and a reader who has scrolled this
+    far has left that control off the top of the screen. Volume is the two sides added across every strike in scope, which is the
     same figure the table's bars are drawn from.
     """
     scope = (choice if expiry is None
@@ -949,112 +1038,6 @@ def _compact(value: float) -> str:
         if abs(value) >= cut:
             return f"{value / cut:,.1f}{suffix}"
     return f"{value:,.0f}"
-
-
-def _draw_term_bubbles(ctx: ViewContext) -> None:
-    """Volume across expiry and strike at once.
-
-    Deliberately ignores the Expiry control above. This panel exists to
-    COMPARE expiries; filtering it to one would leave a single column.
-    """
-    # Square root always. The log toggle that used to sit here compressed the
-    # range so hard that almost every bubble came out near the maximum, which
-    # on a board this dense fused the columns into solid bars — it made the
-    # one problem this panel has worse, so it is gone rather than defaulted off.
-    scale = "sqrt"
-
-    points = _bubble_points(ctx.chain_df, ctx.spx_price, scale, ctx.snapshot_id)
-    if points.empty:
-        st.info(
-            "No volume within 4% of spot in this snapshot yet. This panel "
-            "fills in as the session trades."
-        )
-        return
-
-    drawn = dealer.most_traded(points)
-    st.plotly_chart(
-        _bubble_figure(drawn, ctx.spx_price, scale, ctx.snapshot_id),
-        use_container_width=True)
-
-    expiries_all = points["expiry_label"].nunique()
-    expiries_drawn = drawn["expiry_label"].nunique()
-    # Never claim "every expiry" when the guard has trimmed some off the end.
-    columns = (f"Every collected expiry ({expiries_drawn})"
-               if expiries_drawn == expiries_all
-               else f"The {expiries_drawn} nearest expiries "
-                    f"of {expiries_all} collected")
-    st.caption(
-        f"· **Expiration vs strike.** {columns}, and within each the "
-        f"**{dealer.TOP_STRIKES_PER_EXPIRY} busiest strikes** — the 4% band "
-        "holds about 120 strikes and drawing them all fuses each column into "
-        "a solid bar. Bubble AREA is contracts traded, square root rather than "
-        "linear because 0DTE trades many times what the monthly does at the "
-        "same strike. Colour is the put/call volume ratio: green under 0.7, "
-        "red over 1.3, amber between, which usually means straddles rather "
-        "than a standoff. The Expiry control above does not filter this "
-        "panel — the comparison BETWEEN expiries is the point."
-    )
-
-
-@st.cache_data(show_spinner=False, max_entries=8)
-def _bubble_points(_chain: pd.DataFrame, spot: float, scale: str,
-                   snapshot_id: int) -> pd.DataFrame:
-    return dealer.bubble_points(_chain, spot, scale=scale)
-
-
-@st.cache_data(show_spinner=False, max_entries=8)
-def _bubble_figure(_points: pd.DataFrame, spot: float, scale: str,
-                   snapshot_id: int):
-    points = _points
-    # Discrete columns ordered by days to expiry, plotted against the LABEL
-    # rather than the date: the gap between tomorrow and the monthly is then
-    # one column, not five weeks of empty axis.
-    order = (points[["expiry_label", "expiry_order"]]
-             .drop_duplicates().sort_values("expiry_order")["expiry_label"]
-             .tolist())
-
-    fig = go.Figure()
-    for flow in ("call", "put", "balanced"):
-        side = points[points["flow"] == flow]
-        if side.empty:
-            continue
-        fig.add_trace(go.Scatter(
-            x=side["expiry_label"], y=side["strike"], mode="markers",
-            name=_FLOW_NAME[flow],
-            marker=dict(
-                size=side["radius"] * 2.0,        # Plotly sizes by DIAMETER
-                sizemode="diameter",
-                color=_FLOW_FILL[flow], opacity=0.62,
-                line=dict(color=_FLOW_EDGE[flow], width=1.2),
-            ),
-            customdata=side[["call_volume", "put_volume", "total_volume",
-                             "pcr", "notional"]].to_numpy(),
-            hovertemplate=(
-                "%{x} · %{y:,.0f}<br>"
-                "Total volume %{customdata[2]:,.0f}<br>"
-                "Calls %{customdata[0]:,.0f} · Puts %{customdata[1]:,.0f}<br>"
-                "PCR %{customdata[3]:.2f}<br>"
-                "Premium %{customdata[4]:$,.0f}<extra></extra>"),
-        ))
-
-    fig.add_hline(y=spot, line=dict(color=_SPOT_ACCENT, width=1.5, dash="dash"))
-    fig.add_annotation(
-        x=0, xref="paper", y=spot, xanchor="left", yanchor="middle",
-        text=f"SPX SPOT {spot:,.2f}", showarrow=False,
-        font=dict(color="#ffffff", size=9), bgcolor="#0369a1", borderpad=3)
-
-    fig.update_layout(
-        xaxis=dict(type="category", categoryorder="array", categoryarray=order,
-                   gridcolor=_GRID, showgrid=True, tickangle=-45,
-                   automargin=True),
-        yaxis=dict(gridcolor=_GRID, tickformat="d"),
-        hovermode="closest",
-    )
-    # Taller than the panels above it. Height here is not decoration: it is
-    # how many points of strike fit between two bubbles, and at 460px the
-    # neighbours touched.
-    _dark(fig, 620, legend=True)
-    return fig
 
 
 def _draw_volume_vs_oi(ctx: ViewContext, per_strike: pd.DataFrame) -> None:

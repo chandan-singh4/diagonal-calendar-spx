@@ -423,3 +423,57 @@ def key_strikes(gex_df: pd.DataFrame, count: int = 6) -> list[float]:
         return []
     top = gex_df.nlargest(min(count, len(gex_df)), "abs_gex")
     return [float(s) for s in top["strike"]]
+
+
+def net_flow_by_strike(intraday: pd.DataFrame,
+                       *, top: int | None = None) -> pd.DataFrame:
+    """How much net gamma exposure each strike GAINED since the open.
+
+    Per-strike net GEX now, minus the same figure at the session's first
+    snapshot. Positive means dealers are longer gamma at that strike than they
+    were at the open — supply that damps movement through it; negative means
+    the opposite, and a strike that has flipped negative during the day is one
+    the market can now accelerate through.
+
+    THE SUBTRACTION IS THE POINT. Net GEX alone says what the board looks
+    like, and the board is mostly yesterday's positions; the DIFFERENCE is
+    what today did. A strike can carry enormous exposure and have seen no
+    trade at all, and only this column tells the two apart.
+
+    Each snapshot is scaled by ITS OWN spot price, not the latest, because
+    dollar_scale is quadratic in spot: scaling the open by the current price
+    would fold the index's move into a figure that is supposed to isolate flow.
+
+    `top` keeps only the largest absolute movers. Returned sorted by strike so
+    a horizontal bar chart reads as a price ladder.
+    """
+    needed = {"strike", "timestamp", "call_gamma_oi", "put_gamma_oi",
+              "underlying_price"}
+    if intraday is None or intraday.empty or not needed.issubset(intraday.columns):
+        return pd.DataFrame(columns=["strike", "open_gex", "now_gex", "flow"])
+
+    work = intraday.copy()
+    scale = work["underlying_price"].map(dollar_scale)
+    work["net_gex"] = (work["call_gamma_oi"] - work["put_gamma_oi"]) * scale
+
+    first, last = work["timestamp"].min(), work["timestamp"].max()
+    if first == last:
+        # One snapshot is not a change. Reporting the level as the flow would
+        # claim the whole board traded in the first five minutes.
+        return pd.DataFrame(columns=["strike", "open_gex", "now_gex", "flow"])
+
+    at_open = work[work["timestamp"] == first].groupby("strike")["net_gex"].sum()
+    at_now = work[work["timestamp"] == last].groupby("strike")["net_gex"].sum()
+
+    # Outer, then fill: a strike listed only now was zero at the open, and one
+    # that has since gone unquoted has not therefore returned to zero.
+    frame = pd.DataFrame({"open_gex": at_open, "now_gex": at_now})
+    frame["open_gex"] = frame["open_gex"].fillna(0.0)
+    frame["now_gex"] = frame["now_gex"].fillna(0.0)
+    frame["flow"] = frame["now_gex"] - frame["open_gex"]
+    frame = frame.reset_index()
+
+    if top is not None:
+        frame = frame.assign(mag=frame["flow"].abs()).nlargest(top, "mag")
+        frame = frame.drop(columns=["mag"])
+    return frame.sort_values("strike").reset_index(drop=True)

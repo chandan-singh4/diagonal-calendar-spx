@@ -447,3 +447,85 @@ def test_a_crossing_well_inside_the_range_is_still_reported():
     flip = gex.flip_strike(inside)
     assert flip is not None
     assert 7500 < flip < 7900
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# net_flow_by_strike — what TODAY changed
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _intraday(rows):
+    """(timestamp, strike, call_gamma_oi, put_gamma_oi, spot) tuples."""
+    return pd.DataFrame(
+        [{"timestamp": pd.Timestamp(t, tz="UTC"), "strike": float(k),
+          "call_gamma_oi": c, "put_gamma_oi": p, "underlying_price": s}
+         for t, k, c, p, s in rows])
+
+
+def test_flow_is_the_change_since_the_open_not_the_level():
+    """The whole reason this panel exists. The board is mostly yesterday's
+    positions; only the subtraction says what today did."""
+    frame = gex.net_flow_by_strike(_intraday([
+        ("2026-09-04 13:30", 7700, 1000.0, 0.0, 7700.0),
+        ("2026-09-04 19:30", 7700, 1400.0, 0.0, 7700.0),
+    ]))
+    row = frame.iloc[0]
+    scale = gex.dollar_scale(7700.0)
+    assert row["open_gex"] == pytest.approx(1000.0 * scale)
+    assert row["now_gex"] == pytest.approx(1400.0 * scale)
+    assert row["flow"] == pytest.approx(400.0 * scale)
+
+
+def test_each_snapshot_is_scaled_by_its_own_spot():
+    """dollar_scale is quadratic in spot. Scaling the open at the CURRENT
+    price would fold the index's move into a figure meant to isolate flow —
+    here the raw gamma is unchanged, so the flow must be exactly zero."""
+    frame = gex.net_flow_by_strike(_intraday([
+        ("2026-09-04 13:30", 7700, 1000.0, 0.0, 7600.0),
+        ("2026-09-04 19:30", 7700, 1000.0, 0.0, 7800.0),
+    ]))
+    open_gex = 1000.0 * gex.dollar_scale(7600.0)
+    now_gex = 1000.0 * gex.dollar_scale(7800.0)
+    assert frame.iloc[0]["flow"] == pytest.approx(now_gex - open_gex)
+    assert now_gex > open_gex        # and the two scales really do differ
+
+
+def test_a_single_snapshot_reports_no_flow_at_all():
+    """One snapshot is not a change. Returning the level as the flow would
+    claim the entire board traded in the first five minutes of the session."""
+    assert gex.net_flow_by_strike(_intraday([
+        ("2026-09-04 13:30", 7700, 1000.0, 0.0, 7700.0)])).empty
+
+
+def test_a_strike_that_appears_during_the_day_starts_from_zero():
+    frame = gex.net_flow_by_strike(_intraday([
+        ("2026-09-04 13:30", 7700, 1000.0, 0.0, 7700.0),
+        ("2026-09-04 19:30", 7700, 1000.0, 0.0, 7700.0),
+        ("2026-09-04 19:30", 7900, 500.0, 0.0, 7700.0),
+    ]))
+    new = frame[frame["strike"] == 7900].iloc[0]
+    assert new["open_gex"] == 0.0
+    assert new["flow"] == pytest.approx(500.0 * gex.dollar_scale(7700.0))
+
+
+def test_puts_subtract_from_the_flow():
+    frame = gex.net_flow_by_strike(_intraday([
+        ("2026-09-04 13:30", 7700, 0.0, 0.0, 7700.0),
+        ("2026-09-04 19:30", 7700, 100.0, 400.0, 7700.0),
+    ]))
+    assert frame.iloc[0]["flow"] < 0
+
+
+def test_top_keeps_the_largest_movers_and_still_reads_as_a_ladder():
+    rows = []
+    for i, k in enumerate([7600, 7700, 7800, 7900]):
+        rows.append(("2026-09-04 13:30", k, 0.0, 0.0, 7700.0))
+        rows.append(("2026-09-04 19:30", k, float(i + 1) * 100, 0.0, 7700.0))
+    frame = gex.net_flow_by_strike(_intraday(rows), top=2)
+    assert list(frame["strike"]) == [7800.0, 7900.0]      # sorted by STRIKE
+
+
+def test_an_empty_or_wrong_shaped_frame_returns_the_empty_columns():
+    for frame in (pd.DataFrame(), pd.DataFrame({"strike": [7700.0]})):
+        out = gex.net_flow_by_strike(frame)
+        assert out.empty
+        assert list(out.columns) == ["strike", "open_gex", "now_gex", "flow"]
