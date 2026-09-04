@@ -976,12 +976,16 @@ def _draw_term_bubbles(ctx: ViewContext) -> None:
 
     expiries_all = points["expiry_label"].nunique()
     expiries_drawn = drawn["expiry_label"].nunique()
+    # Never claim "every expiry" when the guard has trimmed some off the end.
+    columns = (f"Every collected expiry ({expiries_drawn})"
+               if expiries_drawn == expiries_all
+               else f"The {expiries_drawn} nearest expiries "
+                    f"of {expiries_all} collected")
     st.caption(
-        f"· **Expiration vs strike.** The **{dealer.TOP_STRIKES_PER_EXPIRY} "
-        f"busiest strikes** of the **{expiries_drawn} nearest expiries** "
-        f"(of {expiries_all} collected), which is what fits legibly — the "
-        "whole 4% band is about 120 strikes, and drawn at once the columns "
-        "fuse. Bubble AREA is contracts traded, square root rather than "
+        f"· **Expiration vs strike.** {columns}, and within each the "
+        f"**{dealer.TOP_STRIKES_PER_EXPIRY} busiest strikes** — the 4% band "
+        "holds about 120 strikes and drawing them all fuses each column into "
+        "a solid bar. Bubble AREA is contracts traded, square root rather than "
         "linear because 0DTE trades many times what the monthly does at the "
         "same strike. Colour is the put/call volume ratio: green under 0.7, "
         "red over 1.3, amber between, which usually means straddles rather "
@@ -1039,7 +1043,8 @@ def _bubble_figure(_points: pd.DataFrame, spot: float, scale: str,
 
     fig.update_layout(
         xaxis=dict(type="category", categoryorder="array", categoryarray=order,
-                   gridcolor=_GRID, showgrid=True, tickangle=0),
+                   gridcolor=_GRID, showgrid=True, tickangle=-45,
+                   automargin=True),
         yaxis=dict(gridcolor=_GRID, tickformat="d"),
         hovermode="closest",
     )

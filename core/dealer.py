@@ -61,7 +61,14 @@ MAX_RADIUS = 22.0
 # chart a chart. What is dropped is always stated in the caption -- silent
 # truncation would read as "this is the whole board" when it is not.
 TOP_STRIKES_PER_EXPIRY = 8
-MAX_EXPIRIES = 8
+
+# Expiries, on the other hand, are cheap. The crowding this filter exists to
+# fix was VERTICAL -- a hundred-odd strikes stacked into one column -- and
+# capping the columns as well merely cut the term structure short, which is
+# the axis the chart is named after. The cap left here is a guard against a
+# pathological chain, not a design choice: at 24 columns each still gets
+# ~55px, wider than the largest bubble drawn.
+MAX_EXPIRIES = 24
 
 # Put/call volume ratio bands. Below 0.7 the flow is call-dominated, above
 # 1.3 put-dominated, and between them balanced — which on this chart usually
