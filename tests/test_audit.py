@@ -123,9 +123,17 @@ def test_a_day_that_reaches_the_bell_is_not_reported(temp_db):
     assert _findings(audit.check_closing_price, temp_db) == []
 
 
-def test_missing_closes_before_the_fix_are_history_and_after_it_are_faults(temp_db):
+def test_missing_closes_before_the_fix_are_history_and_after_it_are_faults(
+        temp_db, monkeypatch):
     """Severity carries the judgement so Chandan does not have to remember the
-    date. Everything before 2026-09-03 is the known ten-week hole."""
+    date. Everything before 2026-09-03 is the known ten-week hole.
+
+    The clock is frozen well past both dates because this test is about
+    SEVERITY, not about the day in progress. Unfrozen it passed on every date
+    except 2026-09-04, when its own fixture date was today and the new
+    in-progress exclusion correctly withheld it -- a test that fails on one
+    calendar day a year is a trap for whoever is on shift that day."""
+    _freeze(monkeypatch, "2026-09-10", "12:00")
     _snap(temp_db, "2026-08-10", "15:59:00")
     assert _findings(audit.check_closing_price, temp_db)[0].severity == "note"
 
@@ -133,6 +141,58 @@ def test_missing_closes_before_the_fix_are_history_and_after_it_are_faults(temp_
     found = _findings(audit.check_closing_price, temp_db)[0]
     assert found.severity == "alarm"
     assert "new faults" in found.detail
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+def _freeze(monkeypatch, et_date: str, et_time: str) -> None:
+    """Pin `datetime.now(ET)` inside audit.py to a wall-clock Eastern moment.
+
+    The close check has to know whether today's bell has rung yet, so the
+    tests below are about the clock and nothing else. Patching the module's
+    `datetime` name is the smallest seam that does it without the audit
+    growing a parameter only tests would ever pass.
+    """
+    hh, mm = (int(p) for p in et_time.split(":"))
+    y, mo, d = (int(p) for p in et_date.split("-"))
+    frozen = datetime(y, mo, d, hh, mm, tzinfo=audit.ET)
+
+    class _Frozen(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return frozen
+
+    monkeypatch.setattr(audit, "datetime", _Frozen)
+
+
+def test_the_day_still_in_progress_is_not_yet_a_missing_close(temp_db, monkeypatch):
+    """The false alarm this fixes. At 09:33 today has no 16:00 price because
+    16:00 has not happened -- that is the day running, not the day failing.
+    Reported every morning, it teaches its reader to skim the audit."""
+    _snap(temp_db, WED, "09:33:00")
+    _freeze(monkeypatch, WED, "09:33")
+    assert _findings(audit.check_closing_price, temp_db) == []
+
+
+def test_after_the_close_today_is_judged_like_any_other_day(temp_db, monkeypatch):
+    """The other half, and why this is not simply "skip today". Once 16:02 has
+    passed the question is answerable, so a today that genuinely missed its
+    close is reported the same evening rather than a day late."""
+    _snap(temp_db, WED, "15:59:53")
+    _freeze(monkeypatch, WED, "16:30")
+    found = _findings(audit.check_closing_price, temp_db)
+    assert len(found) == 1
+    assert "no price at or after 16:00" in found[0].summary
+
+
+def test_the_in_progress_day_leaves_the_denominator(temp_db, monkeypatch):
+    """Excluding today from the numerator but not the total would report
+    "1 of 2 trading days" on a record whose only judgable day is faulty."""
+    _snap(temp_db, "2026-07-14", "15:59:00")
+    _snap(temp_db, WED, "09:33:00")
+    _freeze(monkeypatch, WED, "09:33")
+    found = _findings(audit.check_closing_price, temp_db)
+    assert len(found) == 1
+    assert "1 of 1 trading days" in found[0].summary
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -264,6 +324,7 @@ def test_a_clean_record_exits_zero(temp_db, monkeypatch, capsys):
 def test_findings_exit_one_and_are_printed(temp_db, monkeypatch, capsys):
     monkeypatch.setattr(config, "DB_PATH", temp_db)
     monkeypatch.setattr(audit.config, "DB_PATH", temp_db)
+    _freeze(monkeypatch, "2026-09-10", "12:00")
     _snap(temp_db, "2026-09-04", "15:59:00")
     assert audit.main([]) == 1
     assert "no price at or after 16:00" in capsys.readouterr().out

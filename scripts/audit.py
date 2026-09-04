@@ -144,7 +144,19 @@ def check_closing_price(conn: sqlite3.Connection, since: str | None) -> list[Fin
         group by d order by d
         """, {"since": since}).fetchall()
 
-    missing = [r for r in rows if r["last_et"] < "16:00:00"]
+    # The day in progress has not reached its close yet, so it cannot be judged
+    # on whether it captured one. Excluded ONLY while the bell is genuinely
+    # still ahead: at 16:02 today becomes answerable like any other day, and a
+    # today that really did miss its close is reported the same evening rather
+    # than tomorrow. The short-day check above excludes today for the same
+    # reason; without this the audit reported a fresh "new fault" every single
+    # morning, and an audit that cries wolf daily is one nobody reads on the
+    # morning it is right (ADR-045).
+    now_et = datetime.now(ET)
+    pending = (now_et.date().isoformat()
+               if now_et.time() < core_session.CLOSE_END else None)
+
+    missing = [r for r in rows if r["last_et"] < "16:00:00" and r["d"] != pending]
     if not missing:
         return []
 
@@ -157,7 +169,8 @@ def check_closing_price(conn: sqlite3.Connection, since: str | None) -> list[Fin
             f"so this is known history, not a live fault.")
     return [Finding(
         "closing-price", severity,
-        f"{len(missing)} of {len(rows)} trading days have no price at or after 16:00 ET",
+        f"{len(missing)} of {len([r for r in rows if r['d'] != pending])} trading "
+        f"days have no price at or after 16:00 ET",
         f"{missing[0]['d']} to {missing[-1]['d']}. The closing value is absent on "
         f"those days and cannot be recovered.\n   e.g. {sample}{tail}")]
 
