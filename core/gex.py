@@ -192,29 +192,41 @@ def flip_strike(gex_df: pd.DataFrame) -> float | None:
 def summary(gex_df: pd.DataFrame) -> dict:
     """The headline figures above the chart.
 
-    Every value is None when it cannot be computed, never 0 — a chain with no
-    gamma and a chain that is perfectly balanced are different states, and a
-    zero shown for both is the "missing price -> blank, not 0" rule broken.
+    **PASS THE DISPLAYED WINDOW, NOT THE WHOLE CHAIN.** Option Alpha computes
+    the ratio and the sentiment over the bars actually on screen, so both move
+    when the strike window is narrowed -- "it only includes displayed bars so
+    it can be adjusted for only closest to the current price". That is the
+    point of them: a ratio over the whole chain is dominated by far strikes
+    nobody is hedging. An earlier version of this function deliberately used
+    the full selection so the number would not shift under the reader; that
+    was the wrong call, and it made our figures disagree with the vendor's for
+    a reason no caption could explain away.
 
-    THE DEFINITIONS ARE OURS AND ARE WRITTEN DOWN HERE. Vendors publish
-    figures called "GEX Ratio" and "GEX Sentiment" without publishing the
-    arithmetic behind them, so ours will not match theirs and pretending
-    otherwise would be the more dishonest choice:
+    THE DEFINITIONS ARE OPTION ALPHA'S, taken from their published
+    documentation rather than reverse-engineered, so ours should agree with
+    their screen given the same chain:
 
-      net_gex      Sum of signed exposure. Positive = call-side dominant
-                   under the dealer assumption.
-      call_gex     Total call-side exposure (always >= 0).
-      put_gex      Total put-side exposure (always >= 0).
-      ratio        call_gex / put_gex. None when there is no put gamma at
-                   all, because an infinite ratio is not a number to show.
-      sentiment    Call share of total exposure, 0-100. 50 is balanced.
-      peak_strike  Where absolute exposure is greatest — the strike most
-                   likely to act as a magnet or a wall.
+      net_gex      Sum of signed exposure -- positive call gex plus negative
+                   put gex. 9.6b call and -1b put nets to 8.6b.
+      abs_gex      The same two summed as magnitudes: 10.6b. "Total gamma at
+                   this strike", regardless of direction.
+      ratio        Larger side divided by smaller, SIGNED by which side wins:
+                   3b positive against 2b negative is +1.5x (green); 3b
+                   negative against 2b positive is -1.5x (red). Not call/put.
+      sentiment    The PERCENTAGE OF DISPLAYED STRIKES whose net exposure is
+                   positive. A count of bars, not a share of dollars -- "55%
+                   of 40 bars nearest the money are positive".
+      peak_strike  Where absolute exposure is greatest.
       flip_strike  See flip_strike().
+
+    Every value is None when it cannot be computed, never 0 -- a chain with no
+    gamma and a perfectly balanced one are different states, and a zero shown
+    for both breaks the blank-not-zero rule the project runs on.
     """
     empty = dict(net_gex=None, call_gex=None, put_gex=None, abs_gex=None,
                  ratio=None, sentiment=None, peak_strike=None,
-                 peak_side=None, flip_strike=None)
+                 peak_side=None, flip_strike=None, positive_bars=None,
+                 total_bars=None)
     if gex_df.empty:
         return empty
 
@@ -224,18 +236,158 @@ def summary(gex_df: pd.DataFrame) -> dict:
     if total <= 0:
         return empty
 
+    net = gex_df["net_gex"]
+    positive = float(net[net > 0].sum())
+    negative = float(-net[net < 0].sum())      # as a positive magnitude
+
+    if positive > 0 and negative > 0:
+        ratio = (positive / negative) if positive >= negative else -(negative / positive)
+    else:
+        # One side is entirely absent. An infinite ratio is not a number to
+        # put on screen, so the honest answer is that there isn't one.
+        ratio = None
+
+    total_bars = int(len(gex_df))
+    positive_bars = int((net > 0).sum())
+
     peak_idx = gex_df["abs_gex"].idxmax()
     peak_strike = float(gex_df.loc[peak_idx, "strike"])
     peak_net = float(gex_df.loc[peak_idx, "net_gex"])
 
     return dict(
-        net_gex=float(gex_df["net_gex"].sum()),
+        net_gex=float(net.sum()),
         call_gex=call_gex,
         put_gex=put_gex,
         abs_gex=total,
-        ratio=(call_gex / put_gex) if put_gex > 0 else None,
-        sentiment=100.0 * call_gex / total,
+        ratio=ratio,
+        sentiment=100.0 * positive_bars / total_bars,
+        positive_bars=positive_bars,
+        total_bars=total_bars,
         peak_strike=peak_strike,
         peak_side="Call" if peak_net > 0 else "Put",
         flip_strike=flip_strike(gex_df),
     )
+
+
+def cumulative_net(gex_df: pd.DataFrame) -> pd.Series:
+    """Running total of net exposure from the lowest strike upward.
+
+    The curve whose zero crossing IS `flip_strike`. Returned as a Series
+    aligned to the frame so a caller can plot it against `strike` without
+    another groupby.
+    """
+    if gex_df.empty:
+        return pd.Series(dtype="float64")
+    return gex_df["net_gex"].cumsum()
+
+
+def dollar_scale(spot: float) -> float:
+    """The multiplier turning a summed `gamma x open_interest` into dollars.
+
+    Split out because the intraday reads aggregate `gamma x open_interest` in
+    SQL — where each snapshot's spot price is a column, not a constant — and
+    the scaling must still be the ONE definition in this module rather than a
+    second copy embedded in a query.
+    """
+    return SHARES_PER_CONTRACT * (spot ** 2) * ONE_PERCENT
+
+
+def dex_by_strike(chain_df: pd.DataFrame, spot: float,
+                  *, expiry: str | None = None) -> pd.DataFrame:
+    """Delta exposure per strike — dollars of stock behind the open interest.
+
+    Where gamma exposure says how much dealers will be FORCED to trade as SPX
+    moves, delta exposure says how much they must hold RIGHT NOW. The two
+    disagree usefully: a strike can carry enormous gamma and almost no delta
+    (at the money, near expiry) or the reverse (deep in the money).
+
+    **THE DEALER SIGN IS DELIBERATELY NOT APPLIED HERE, unlike GEX.** A put's
+    delta is already negative — that is what delta means — so multiplying by
+    another -1 would double-count the direction and turn every put into a
+    positive contribution. Gamma is positive for both calls and puts, which is
+    why it needs the convention imposed and delta does not. Getting this wrong
+    is silent: the numbers stay plausible and the sign of the answer inverts.
+
+    So `net_dex` here is the CHAIN's net delta, not an inferred dealer
+    inventory. It is a description of what is listed, which is the more honest
+    thing to draw and the one that needs no assumption to be true.
+
+    Unit: delta x open_interest x 100 x spot, i.e. dollars of underlying.
+    """
+    blank = pd.DataFrame({c: pd.Series(dtype="float64") for c in
+                          ("strike", "call_dex", "put_dex", "net_dex", "abs_dex")})
+    if chain_df is None or chain_df.empty:
+        return blank
+    if not {"strike", "right", "delta"}.issubset(chain_df.columns):
+        return blank
+
+    work = chain_df
+    if expiry is not None:
+        if "expiry" not in work.columns:
+            return blank
+        work = work[work["expiry"] == expiry]
+
+    work = work[work["delta"].notna()].copy()
+    if work.empty:
+        return blank
+
+    oi = (pd.to_numeric(work.get("open_interest"), errors="coerce").fillna(0.0)
+          if "open_interest" in work.columns else 0.0)
+    work["dex"] = work["delta"] * oi * SHARES_PER_CONTRACT * spot
+
+    is_call = work["right"] == "C"
+    out = pd.DataFrame({
+        "call_dex": work["dex"].where(is_call, 0.0),
+        "put_dex": work["dex"].where(work["right"] == "P", 0.0),
+        "net_dex": work["dex"],
+        "strike": work["strike"],
+    }).groupby("strike", as_index=False).sum()
+    out["abs_dex"] = out["call_dex"].abs() + out["put_dex"].abs()
+    return out.sort_values("strike", ignore_index=True)
+
+
+def oi_change(today: pd.DataFrame, prior: pd.DataFrame) -> pd.DataFrame:
+    """Today's open interest per strike minus the previous session's.
+
+    Open interest is republished once a day, overnight, so this difference is
+    the number of contracts actually OPENED (positive) or CLOSED (negative) —
+    about as close to a direct reading of new positioning as this data gets.
+    Within a session it does not move, which is why both frames must come from
+    DIFFERENT sessions for the answer to mean anything.
+
+    A strike present today and absent yesterday is genuinely new and its whole
+    open interest is the change; a strike that has gone is dropped rather than
+    reported as a collapse to zero, because "not listed" and "listed at zero"
+    are different and only one of them is a closing.
+    """
+    cols = ("strike", "call_oi_change", "put_oi_change", "net_oi_change")
+    if today is None or today.empty:
+        return pd.DataFrame({c: pd.Series(dtype="float64") for c in cols})
+
+    left = today[["strike", "call_oi", "put_oi"]].copy()
+    if prior is None or prior.empty:
+        merged = left.assign(call_oi_prior=0.0, put_oi_prior=0.0)
+    else:
+        merged = left.merge(
+            prior[["strike", "call_oi", "put_oi"]].rename(
+                columns={"call_oi": "call_oi_prior", "put_oi": "put_oi_prior"}),
+            on="strike", how="left",
+        ).fillna({"call_oi_prior": 0.0, "put_oi_prior": 0.0})
+
+    merged["call_oi_change"] = merged["call_oi"] - merged["call_oi_prior"]
+    merged["put_oi_change"] = merged["put_oi"] - merged["put_oi_prior"]
+    merged["net_oi_change"] = merged["call_oi_change"] - merged["put_oi_change"]
+    return merged.sort_values("strike", ignore_index=True)[list(cols)]
+
+
+def key_strikes(gex_df: pd.DataFrame, count: int = 6) -> list[float]:
+    """The strikes carrying the most absolute exposure, largest first.
+
+    What the 0DTE flow chart draws a line for. Chosen by absolute rather than
+    net exposure on purpose: a strike where calls and puts nearly cancel has a
+    net near zero and is often exactly the level being fought over.
+    """
+    if gex_df.empty or count <= 0:
+        return []
+    top = gex_df.nlargest(min(count, len(gex_df)), "abs_gex")
+    return [float(s) for s in top["strike"]]

@@ -112,6 +112,13 @@ class ViewContext:
     render_all_locks_popover: Callable[..., None]
     backfill_eligible_history: Callable[..., None]
 
+    # ── The Gamma Exposure tab's time-aware panels ────────────────────────
+    # Both are memoised loaders like the rest, injected for the same reason
+    # (ADR-032). They are the only reads on the tab: the per-strike snapshot
+    # panels come from chain_df, which app.py has already loaded.
+    load_intraday_strike_metrics: Callable[..., pd.DataFrame]
+    load_prior_session_oi: Callable[..., pd.DataFrame]
+
     # ── User settings that live in a JSON sidecar ─────────────────────────
     # Passed as a plain dict for the same reason as the loaders: the file is
     # read and written by app.py through state/, and a view that reached for

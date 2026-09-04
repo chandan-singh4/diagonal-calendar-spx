@@ -200,13 +200,51 @@ def test_an_empty_frame_has_no_flip():
 # The headline figures
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_sentiment_is_the_call_share_of_total_exposure():
+def test_sentiment_counts_positive_strikes_rather_than_weighing_dollars():
+    """Option Alpha's published definition: "the % of bars nearest to the
+    current price that are positive". A COUNT of strikes, not a share of
+    exposure. An earlier version here weighed dollars, which gives a very
+    different answer on a chain where one huge strike outweighs ten small
+    ones — exactly the case the figure exists to describe."""
     df = gex.by_strike(_chain([
-        {"strike": 7700, "right": "C", "gamma": 0.003, "oi": 100},
-        {"strike": 7700, "right": "P", "gamma": 0.001, "oi": 100},
+        {"strike": 7600, "right": "C", "gamma": 0.0001, "oi": 1},    # +, tiny
+        {"strike": 7700, "right": "C", "gamma": 0.0001, "oi": 1},    # +, tiny
+        {"strike": 7800, "right": "P", "gamma": 0.9000, "oi": 9999},  # -, huge
     ]), SPOT)
-    assert gex.summary(df)["sentiment"] == pytest.approx(75.0)
-    assert gex.summary(df)["ratio"] == pytest.approx(3.0)
+    s = gex.summary(df)
+    assert s["sentiment"] == pytest.approx(200.0 / 3.0)   # 2 of 3 bars positive
+    assert s["positive_bars"] == 2
+    assert s["total_bars"] == 3
+
+
+def test_the_ratio_is_larger_over_smaller_signed_by_the_winning_side():
+    """Their two worked examples, verbatim: "2b neg and 3b pos = 3b / 2b =
+    1.5x (green)" and "3b neg and 2b pos = -3b / 2b = -1.5x (red)". Note it is
+    NOT call divided by put — an earlier version here computed that, which
+    agrees only by coincidence and never reports a negative."""
+    positive_wins = pd.DataFrame({"strike": [1.0, 2.0], "net_gex": [3.0, -2.0],
+                                  "call_gex": [3.0, 0.0], "put_gex": [0.0, 2.0],
+                                  "abs_gex": [3.0, 2.0]})
+    assert gex.summary(positive_wins)["ratio"] == pytest.approx(1.5)
+
+    negative_wins = pd.DataFrame({"strike": [1.0, 2.0], "net_gex": [2.0, -3.0],
+                                  "call_gex": [2.0, 0.0], "put_gex": [0.0, 3.0],
+                                  "abs_gex": [2.0, 3.0]})
+    assert gex.summary(negative_wins)["ratio"] == pytest.approx(-1.5)
+
+
+def test_the_figures_follow_the_window_they_are_given():
+    """The whole reason summary() takes the DISPLAYED frame. Their docs:
+    "It only includes displayed bars so it can be adjusted for only closest to
+    the current price." A figure computed over the full chain would not move
+    when the reader narrows the window, and would disagree with the vendor."""
+    full = gex.by_strike(_chain([
+        {"strike": 7300, "right": "P", "gamma": 0.9, "oi": 9999},   # far, huge
+        {"strike": 7700, "right": "C", "gamma": 0.001, "oi": 100},
+    ]), SPOT)
+    assert gex.summary(full)["sentiment"] == pytest.approx(50.0)
+    narrowed = gex.window(full, SPOT, 1)
+    assert gex.summary(narrowed)["sentiment"] == pytest.approx(100.0)
 
 
 def test_a_chain_with_no_put_gamma_reports_no_ratio_rather_than_infinity():
@@ -233,7 +271,8 @@ def test_every_summary_figure_is_none_when_there_is_nothing_to_measure():
     the whole project runs on."""
     s = gex.summary(gex.by_strike(pd.DataFrame(), SPOT))
     assert set(s) == {"net_gex", "call_gex", "put_gex", "abs_gex", "ratio",
-                      "sentiment", "peak_strike", "peak_side", "flip_strike"}
+                      "sentiment", "peak_strike", "peak_side", "flip_strike",
+                      "positive_bars", "total_bars"}
     assert all(v is None for v in s.values())
 
 
@@ -268,3 +307,115 @@ def test_the_header_still_says_na_when_the_chain_carries_no_gamma():
     chain = _chain([{"strike": 7700, "right": "C", "gamma": None}])
     assert market.max_gex_label(chain, SPOT) == "N/A"
     assert market.max_gex_label(pd.DataFrame(), SPOT) == "N/A"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The panels added for the intraday and positioning charts.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_the_cumulative_curve_crosses_zero_exactly_where_the_flip_is():
+    """These two are one claim stated twice — the curve is drawn, the flip is
+    labelled, and a reader takes the label to be where the line crosses. If
+    they ever disagree the chart lies without erroring, so pin them together
+    rather than separately."""
+    df = gex.by_strike(_chain([
+        {"strike": 7600, "right": "P", "gamma": 0.002},
+        {"strike": 7700, "right": "C", "gamma": 0.001},
+        {"strike": 7800, "right": "C", "gamma": 0.003},
+    ]), SPOT)
+    curve = gex.cumulative_net(df)
+    flip = gex.flip_strike(df)
+    below = df.loc[curve.lt(0.0), "strike"].max()
+    above = df.loc[curve.gt(0.0), "strike"].min()
+    assert below < flip < above
+
+
+def test_the_cumulative_curve_is_empty_rather_than_absent_for_an_empty_chain():
+    assert gex.cumulative_net(gex.by_strike(_chain([]), SPOT)).empty
+
+
+def test_the_dollar_scale_is_the_same_constant_by_strike_already_applies():
+    """dollar_scale exists so the SQL aggregation can be scaled outside this
+    module. The moment it drifts from what by_strike does, the intraday panels
+    and the per-strike panels quote different dollars for the same market."""
+    df = gex.by_strike(_chain([
+        {"strike": 7700, "right": "C", "gamma": 0.001, "oi": 1000},
+    ]), SPOT)
+    assert df["call_gex"].iloc[0] == pytest.approx(0.001 * 1000 * gex.dollar_scale(SPOT))
+
+
+def _delta_chain(rows: list[dict]) -> pd.DataFrame:
+    return pd.DataFrame([
+        {"expiry": r.get("expiry", "2026-09-18"), "strike": r["strike"],
+         "right": r["right"], "delta": r["delta"],
+         "open_interest": r.get("oi", 1000)}
+        for r in rows
+    ])
+
+
+def test_delta_exposure_leaves_a_puts_negative_delta_negative():
+    """The one mistake in this module that stays plausible while being
+    backwards: applying GEX's dealer sign to delta as well. A put's delta is
+    already negative, so a second -1 flips every put to a positive
+    contribution and the net comes out with the wrong sign."""
+    df = gex.dex_by_strike(_delta_chain([
+        {"strike": 7700, "right": "P", "delta": -0.4, "oi": 100},
+    ]), SPOT)
+    assert df["put_dex"].iloc[0] == pytest.approx(-0.4 * 100 * 100 * SPOT)
+    assert df["net_dex"].iloc[0] < 0
+
+
+def test_delta_exposure_sums_both_sides_at_one_strike_and_keeps_abs_positive():
+    df = gex.dex_by_strike(_delta_chain([
+        {"strike": 7700, "right": "C", "delta": 0.6, "oi": 100},
+        {"strike": 7700, "right": "P", "delta": -0.4, "oi": 100},
+    ]), SPOT)
+    assert len(df) == 1
+    unit = 100 * 100 * SPOT
+    assert df["net_dex"].iloc[0] == pytest.approx(0.2 * unit)
+    assert df["abs_dex"].iloc[0] == pytest.approx(1.0 * unit)
+
+
+def test_delta_exposure_returns_the_shaped_blank_when_delta_was_never_stored():
+    df = gex.dex_by_strike(_chain([{"strike": 7700, "right": "C"}]), SPOT)
+    assert df.empty
+    assert list(df.columns) == ["strike", "call_dex", "put_dex", "net_dex", "abs_dex"]
+
+
+def test_open_interest_change_treats_a_strike_absent_yesterday_as_all_new():
+    today = pd.DataFrame({"strike": [7700.0, 7800.0],
+                          "call_oi": [500.0, 200.0], "put_oi": [100.0, 0.0]})
+    prior = pd.DataFrame({"strike": [7700.0],
+                          "call_oi": [300.0], "put_oi": [150.0]})
+    out = gex.oi_change(today, prior).set_index("strike")
+    assert out.loc[7700.0, "call_oi_change"] == 200.0
+    assert out.loc[7700.0, "put_oi_change"] == -50.0
+    assert out.loc[7800.0, "call_oi_change"] == 200.0   # not listed yesterday
+
+
+def test_a_strike_that_has_gone_is_dropped_rather_than_reported_as_a_closing():
+    """"Not listed" and "listed at zero" are different facts. Reporting the
+    first as a collapse to zero would invent the largest closing on the chart
+    out of an expiry rolling off."""
+    today = pd.DataFrame({"strike": [7700.0], "call_oi": [500.0], "put_oi": [0.0]})
+    prior = pd.DataFrame({"strike": [7700.0, 6000.0],
+                          "call_oi": [500.0, 9999.0], "put_oi": [0.0, 0.0]})
+    assert gex.oi_change(today, prior)["strike"].tolist() == [7700.0]
+
+
+def test_key_strikes_rank_by_absolute_exposure_not_by_net():
+    """A strike where calls and puts nearly cancel has a net near zero and is
+    often the level being fought over — ranking by net would hide it."""
+    df = gex.by_strike(_chain([
+        {"strike": 7700, "right": "C", "gamma": 0.010},
+        {"strike": 7700, "right": "P", "gamma": 0.009},   # nets to nearly nil
+        {"strike": 7800, "right": "C", "gamma": 0.002},
+    ]), SPOT)
+    assert gex.key_strikes(df, 1) == [7700.0]
+
+
+def test_key_strikes_asks_for_more_than_exist_and_gets_what_there_is():
+    df = gex.by_strike(_chain([{"strike": 7700, "right": "C"}]), SPOT)
+    assert gex.key_strikes(df, 6) == [7700.0]
+    assert gex.key_strikes(df, 0) == []
+    assert gex.key_strikes(gex.by_strike(_chain([]), SPOT)) == []

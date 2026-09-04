@@ -66,7 +66,9 @@ from services.loaders import (
     _load_contract_hist,
     _load_diagonal_hist,
     _load_latest_atm_iv,
+    _load_intraday_strike_metrics,
     _load_prior_close,
+    _load_prior_session_oi,
     _load_spx_intraday,
     _load_transform_marks,
     compute_transform_scanner,
@@ -367,6 +369,8 @@ VIEW_CTX = ViewContext(
     get_entry_lock=_get_entry_lock,
     render_all_locks_popover=locks._render_all_locks_popover,
     backfill_eligible_history=_backfill_eligible_history,
+    load_intraday_strike_metrics=_load_intraday_strike_metrics,
+    load_prior_session_oi=_load_prior_session_oi,
     chart_colors=CHART_COLORS,
 )
 

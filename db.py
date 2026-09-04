@@ -1927,3 +1927,112 @@ def seed_t001(db_path: str) -> None:
             )
         """, (initial, transform, notes, now, now))
         logger.info("T-001 seeded into trades table.")
+
+
+def get_intraday_strike_metrics(db_path: str, session_date: str,
+                                dte_max: int | None = None) -> list:
+    """Gamma, open interest and volume per STRIKE per SNAPSHOT for one session.
+
+    The read behind every time-aware panel on the Gamma Exposure tab: net GEX
+    through the day, the 0DTE flow lines, and the cumulative net-volume
+    build-up. All three ask the same question — how did this strike change as
+    the session ran — and one read answers it for all of them.
+
+    **AGGREGATED IN SQL, NOT IN PANDAS.** A session holds ~126 snapshots of
+    ~3,200 option rows, so the raw join is ~400,000 rows; grouped here it is
+    ~13,000. Pulling the raw rows across the boundary and grouping them in the
+    view would move a third of a million rows through a memo on every rerun to
+    display a few hundred points.
+
+    `dte_max` bounds days-to-expiry — 0 for the 0DTE flow chart, None for
+    everything. The filter has to happen BEFORE the grouping or strikes from
+    different expiries merge and the "0DTE" line silently includes contracts
+    that are not 0DTE.
+
+    Gamma x open interest is summed here and left UNSCALED. The dollar scaling
+    needs each snapshot's own spot price (core/gex.py), which is returned
+    alongside, and doing that multiplication in SQL would bake one leg of the
+    formula into the database while the other lives in core/ — exactly the
+    two-copies-of-a-formula split that core/gex.py was extracted to end.
+
+    Ordered by time then strike so a caller can pivot without re-sorting.
+    """
+    with get_conn(db_path) as conn:
+        return conn.execute(
+            """
+            SELECT s.snapshot_id,
+                   s.snapshot_timestamp,
+                   s.underlying_price,
+                   o.strike,
+                   SUM(CASE WHEN o.right = 'C'
+                            THEN o.gamma * COALESCE(o.open_interest, 0)
+                            ELSE 0 END)                      AS call_gamma_oi,
+                   SUM(CASE WHEN o.right = 'P'
+                            THEN o.gamma * COALESCE(o.open_interest, 0)
+                            ELSE 0 END)                      AS put_gamma_oi,
+                   SUM(CASE WHEN o.right = 'C'
+                            THEN COALESCE(o.volume, 0) ELSE 0 END) AS call_volume,
+                   SUM(CASE WHEN o.right = 'P'
+                            THEN COALESCE(o.volume, 0) ELSE 0 END) AS put_volume,
+                   SUM(CASE WHEN o.right = 'C'
+                            THEN COALESCE(o.open_interest, 0) ELSE 0 END) AS call_oi,
+                   SUM(CASE WHEN o.right = 'P'
+                            THEN COALESCE(o.open_interest, 0) ELSE 0 END) AS put_oi
+            FROM option_rows o
+            JOIN snapshots  s USING (snapshot_id)
+            WHERE s.status = 'COMPLETE'
+              AND DATE(s.snapshot_timestamp) = ?
+              AND o.gamma IS NOT NULL
+              AND (? IS NULL OR o.dte <= ?)
+            GROUP BY s.snapshot_id, o.strike
+            ORDER BY s.snapshot_timestamp, o.strike
+            """,
+            (session_date, dte_max, dte_max)
+        ).fetchall()
+
+
+def get_prior_session_oi(db_path: str, session_date: str) -> list:
+    """Open interest per strike at the close of the session BEFORE session_date.
+
+    Open interest is republished once a day, overnight, so today's figure minus
+    yesterday's is the number of positions actually OPENED or CLOSED — as close
+    to a direct reading of new positioning as this data gets. Within a session
+    it does not move at all, which is why comparing two snapshots from the same
+    day would always return zero and mean nothing.
+
+    Takes the LAST COMPLETE snapshot of the prior session rather than the first
+    of today, deliberately: today's first snapshot already carries today's
+    republished figure, so differencing against it would compare a number with
+    itself.
+
+    Returns [] when there is no prior session — the first collection day, and a
+    long weekend for a caller that assumed yesterday existed.
+    """
+    with get_conn(db_path) as conn:
+        prior = conn.execute(
+            """
+            SELECT snapshot_id FROM snapshots
+            WHERE status = 'COMPLETE'
+              AND DATE(snapshot_timestamp) < ?
+            ORDER BY snapshot_timestamp DESC
+            LIMIT 1
+            """,
+            (session_date,)
+        ).fetchone()
+        if prior is None:
+            return []
+
+        return conn.execute(
+            """
+            SELECT strike,
+                   SUM(CASE WHEN right = 'C'
+                            THEN COALESCE(open_interest, 0) ELSE 0 END) AS call_oi,
+                   SUM(CASE WHEN right = 'P'
+                            THEN COALESCE(open_interest, 0) ELSE 0 END) AS put_oi
+            FROM option_rows
+            WHERE snapshot_id = ?
+            GROUP BY strike
+            ORDER BY strike
+            """,
+            (prior["snapshot_id"],)
+        ).fetchall()

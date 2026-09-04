@@ -167,3 +167,31 @@ def load_diagonal_hist(db_path, front: str, back: str, call_s: float,
     rows = db.get_diagonal_history(db_path, front, back,
                                     call_s, put_s, days=days)
     return pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
+
+
+def load_intraday_strike_metrics(db_path, session_date: str,
+                                 dte_max: int | None = None) -> pd.DataFrame:
+    """Per-strike, per-snapshot gamma/OI/volume for one session.
+
+    Timestamps come back as ZONED UTC, not stripped. Turning them into local
+    wall-clock is a DISPLAY decision and belongs in core.charts.to_display_time
+    at the last moment before drawing — the read layer handing out a bare
+    "14:30" with nothing saying where is precisely DEBT-030.
+    """
+    rows = db.get_intraday_strike_metrics(db_path, session_date, dte_max)
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame([dict(r) for r in rows])
+    df["timestamp"] = pd.to_datetime(df["snapshot_timestamp"], utc=True)
+    return df
+
+
+def load_prior_session_oi(db_path, session_date: str) -> pd.DataFrame:
+    """Open interest per strike at the close of the previous session.
+
+    Empty when there is no prior session; the caller decides what to say about
+    that, because "the first day of collection" and "a strike that is new
+    today" are different stories.
+    """
+    rows = db.get_prior_session_oi(db_path, session_date)
+    return pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()

@@ -1817,3 +1817,107 @@ def test_editing_an_unrelated_column_leaves_the_context_alone(trades_db):
     db.update_trade(trades_db, "T-100", notes="changed my mind", status="Closed")
 
     assert db.get_trade(trades_db, "T-100")["entry_front_iv"] == pytest.approx(0.21)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The Gamma Exposure tab's two reads
+#
+# Both aggregate in SQL, which is the whole point of them — the raw join is
+# ~400,000 rows a session — and an aggregation is exactly where a wrong answer
+# arrives silently. A dte filter applied after the GROUP BY, a status filter
+# dropped, a prior session picked from the wrong end: none of those raise, they
+# just draw a chart that is confidently wrong.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _gex_seed(temp_db) -> str:
+    """Two snapshots on one session, plus a prior session to difference with."""
+    # Fixed at midday rather than ts_ago(minutes=...): two timestamps a few
+    # minutes apart straddle midnight UTC once a day, which would split this
+    # "session" across two dates and fail on a schedule nobody would connect
+    # back to here.
+    day = (datetime.now(UTC) - timedelta(days=1)).date()
+    yesterday = f"{day - timedelta(days=1)} 20:00:00"
+    y = add_snapshot(temp_db, yesterday, spx=5990.0)
+    db.insert_option_rows(temp_db, [
+        opt(y, FRONT, CALL_STRIKE, "C", dte=8),
+        opt(y, FRONT, PUT_STRIKE, "P", dte=8),
+    ])
+
+    early, late = f"{day} 14:00:00", f"{day} 14:30:00"
+    a = add_snapshot(temp_db, early, spx=6000.0)
+    b = add_snapshot(temp_db, late, spx=6010.0)
+    for sid in (a, b):
+        db.insert_option_rows(temp_db, [
+            opt(sid, FRONT, CALL_STRIKE, "C", dte=0),
+            opt(sid, FRONT, PUT_STRIKE, "P", dte=0),
+            opt(sid, BACK, CALL_STRIKE, "C", dte=21),
+        ])
+    return early[:10]
+
+
+def test_intraday_metrics_return_one_row_per_snapshot_and_strike(temp_db):
+    session = _gex_seed(temp_db)
+    rows = db.get_intraday_strike_metrics(temp_db, session)
+
+    assert len(rows) == 4                       # 2 snapshots x 2 strikes
+    assert [r["strike"] for r in rows] == [PUT_STRIKE, CALL_STRIKE] * 2
+    first = rows[1]                             # the call strike, early snapshot
+    assert first["underlying_price"] == pytest.approx(6000.0)
+    # Both the 0DTE call and the 21DTE call sit at this strike and are summed:
+    # gamma 0.01 x oi 1000, twice.
+    assert first["call_gamma_oi"] == pytest.approx(20.0)
+    assert first["put_gamma_oi"] == pytest.approx(0.0)
+    assert first["call_oi"] == 2000
+    assert first["call_volume"] == 200
+
+
+def test_the_dte_bound_is_applied_before_the_grouping(temp_db):
+    """The 0DTE flow chart's whole claim is that its lines are 0DTE. Filter
+    after the GROUP BY and the longer-dated call at the same strike is folded
+    in first — the number changes, the label does not, and nothing errors."""
+    session = _gex_seed(temp_db)
+    rows = db.get_intraday_strike_metrics(temp_db, session, dte_max=0)
+
+    assert len(rows) == 4
+    call = next(r for r in rows if r["strike"] == CALL_STRIKE)
+    assert call["call_gamma_oi"] == pytest.approx(10.0)   # not 20 — one leg only
+    assert call["call_oi"] == 1000
+
+
+def test_intraday_metrics_ignore_a_partial_snapshot(temp_db):
+    """A PARTIAL snapshot is a half-written chain. Counted here it would draw a
+    cliff in the middle of the day that no market ever made."""
+    session = _gex_seed(temp_db)
+    torn = add_snapshot(temp_db, f"{session} 14:15:00", status="PARTIAL")
+    db.insert_option_rows(temp_db, [opt(torn, FRONT, CALL_STRIKE, "C", dte=0)])
+
+    ids = {r["snapshot_id"] for r in db.get_intraday_strike_metrics(temp_db, session)}
+    assert torn not in ids
+
+
+def test_intraday_metrics_are_empty_for_a_session_with_no_snapshots(temp_db):
+    _gex_seed(temp_db)
+    assert db.get_intraday_strike_metrics(temp_db, "1999-01-01") == []
+
+
+def test_prior_session_oi_reads_yesterdays_last_snapshot_not_todays_first(temp_db):
+    """Open interest does not move within a session, so differencing today
+    against today's own first snapshot returns zeros forever — a dead chart
+    that looks like a quiet market."""
+    session = _gex_seed(temp_db)
+    rows = db.get_prior_session_oi(temp_db, session)
+
+    assert [r["strike"] for r in rows] == [PUT_STRIKE, CALL_STRIKE]
+    call = rows[1]
+    # Yesterday held ONE call leg at this strike; today holds two. Reading
+    # today's snapshot by mistake would give 2000 here.
+    assert call["call_oi"] == 1000
+    assert call["put_oi"] == 0
+
+
+def test_prior_session_oi_is_empty_on_the_first_day_of_collection(temp_db):
+    """The first collection day and the caller that assumed yesterday existed."""
+    today = datetime.now(UTC).date().isoformat()
+    sid = add_snapshot(temp_db, f"{today} 14:00:00")
+    db.insert_option_rows(temp_db, [opt(sid, FRONT, CALL_STRIKE, "C")])
+    assert db.get_prior_session_oi(temp_db, today) == []
