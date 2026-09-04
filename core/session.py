@@ -109,3 +109,42 @@ def expected_interval(session: str | None, event_secs: int, normal_secs: int) ->
     if session is None:
         return None
     return event_secs if session in EVENT_SESSIONS else normal_secs
+
+
+def seconds_until_open(now_et: datetime, holidays: set[str]) -> float | None:
+    """Seconds from `now_et` until today's 09:30 open, or None if not waiting.
+
+    None means "no open is pending today" — the market is already inside a
+    session, the session is over for the day, or today is not a trading day.
+    Callers treat None as "no better answer than the usual idle sleep".
+
+    WHY THIS EXISTS. The collector's closed-market branch slept a flat 60
+    seconds and re-checked, so the first poll of the morning landed wherever
+    that 60-second phase happened to fall. The record shows the cost: the
+    first snapshot of the day arrived between 09:30:11 and 09:30:55 ET,
+    drifting day to day with whenever the collector was last restarted. The
+    opening print was never recorded at a consistent moment, and on a bad day
+    was most of a minute stale.
+
+    Sleeping `min(idle, seconds_until_open)` instead puts the first cycle at
+    09:30:00-ish every day, for one extra loop iteration a morning.
+
+    **This is why the answer is not "start a minute early".** SPX is not
+    traded; it is computed from its component stocks, which have not opened at
+    09:29. A poll then records an overnight level and calls it the open. This
+    is the same reasoning as ADR-049 at the other end of the day, pointed the
+    other way: the earliest HONEST moment is just after the bell, not before
+    it, so the target is 09:30:00 and never earlier.
+    """
+    if not is_trading_day(now_et.date(), holidays):
+        return None
+
+    t = now_et.time()
+    if t >= OPEN_START:
+        return None      # already open, or done for the day
+
+    open_dt = now_et.replace(
+        hour=OPEN_START.hour, minute=OPEN_START.minute,
+        second=0, microsecond=0,
+    )
+    return (open_dt - now_et).total_seconds()

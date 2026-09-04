@@ -175,3 +175,49 @@ def test_the_collector_and_the_header_cannot_disagree():
         assert collector.get_session(now) == session.session_of(
             now, config.MARKET_HOLIDAYS
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# seconds_until_open — the day's first poll lands ON the open, not up to a
+# minute after it. Regression cover for the flat 60s idle sleep.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestSecondsUntilOpen:
+    HOLIDAYS = {"2026-12-25"}
+
+    def _et(self, y, m, d, hh, mm, ss=0):
+        return datetime(y, m, d, hh, mm, ss)
+
+    def test_just_before_open_returns_the_remaining_seconds(self):
+        # 09:29:17 on a Friday -> 43 seconds to the bell.
+        got = session.seconds_until_open(self._et(2026, 9, 4, 9, 29, 17), self.HOLIDAYS)
+        assert got == 43.0
+
+    def test_a_full_minute_before_open(self):
+        got = session.seconds_until_open(self._et(2026, 9, 4, 9, 29, 0), self.HOLIDAYS)
+        assert got == 60.0
+
+    def test_long_before_open_exceeds_the_idle_sleep(self):
+        # The caller takes min(idle, this), so a big number must come back big
+        # rather than being clamped here.
+        got = session.seconds_until_open(self._et(2026, 9, 4, 3, 0, 0), self.HOLIDAYS)
+        assert got == pytest.approx(6.5 * 3600)
+
+    def test_exactly_at_the_open_is_not_waiting(self):
+        assert session.seconds_until_open(self._et(2026, 9, 4, 9, 30, 0), self.HOLIDAYS) is None
+
+    def test_during_the_session_is_not_waiting(self):
+        assert session.seconds_until_open(self._et(2026, 9, 4, 12, 0, 0), self.HOLIDAYS) is None
+
+    def test_after_the_close_is_not_waiting_today(self):
+        # 18:00 is past 09:30, so there is no open pending TODAY. Tomorrow's
+        # open is deliberately not this function's business: the loop wakes
+        # every minute anyway and will ask again after midnight.
+        assert session.seconds_until_open(self._et(2026, 9, 4, 18, 0, 0), self.HOLIDAYS) is None
+
+    def test_weekend_morning_is_not_waiting(self):
+        # Saturday 09:29 — no bell is coming.
+        assert session.seconds_until_open(self._et(2026, 9, 5, 9, 29, 0), self.HOLIDAYS) is None
+
+    def test_holiday_morning_is_not_waiting(self):
+        assert session.seconds_until_open(self._et(2026, 12, 25, 9, 29, 0), self.HOLIDAYS) is None

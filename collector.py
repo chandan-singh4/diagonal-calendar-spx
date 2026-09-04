@@ -218,6 +218,11 @@ def market_minutes_between(start_utc: datetime, end_utc: datetime) -> float:
 _ROUTINE_GAP_TOLERANCE_MINUTES = 3.0
 
 
+# How long the loop idles when the market is shut. Named because it is now an
+# upper bound rather than the sleep itself: near the open the loop sleeps less.
+_CLOSED_IDLE_SECONDS = 60.0
+
+
 def _classify_gap(gap_start_utc: datetime, gap_end_utc: datetime) -> str:
     """
     Classify why a collection gap occurred, by measuring how much open market
@@ -1100,8 +1105,26 @@ def main() -> None:
             if args.once:
                 logger.info("Market is closed. --once mode: exiting.")
                 sys.exit(0)
-            logger.debug("Market closed (%s ET). Sleeping 60s.", now_et.strftime("%H:%M"))
-            time.sleep(60)
+            # Sleep the usual minute -- UNLESS the open is nearer than that,
+            # in which case sleep exactly up to it. Without this the 60s phase
+            # is arbitrary and the day's first poll landed anywhere in
+            # 09:30:00-09:30:59 (measured: 09:30:11 to 09:30:55). See
+            # core.session.seconds_until_open for why the answer is not to
+            # start before 09:30.
+            until_open = core_session.seconds_until_open(
+                now_et, config.MARKET_HOLIDAYS
+            )
+            idle = _CLOSED_IDLE_SECONDS
+            if until_open is not None and until_open < idle:
+                idle = max(until_open, 0.0)
+                logger.info(
+                    "Market opens in %.1fs. Sleeping exactly that so the first "
+                    "poll lands on the open.", idle
+                )
+            else:
+                logger.debug("Market closed (%s ET). Sleeping %.0fs.",
+                             now_et.strftime("%H:%M"), idle)
+            time.sleep(idle)
             continue
 
         poll_interval    = _poll_interval(session)
