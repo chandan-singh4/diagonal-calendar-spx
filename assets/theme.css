@@ -784,6 +784,38 @@ div[class*="st-key-chartcard_"]:hover {
   margin-right: auto;
 }
 
+/* ── The OI/Volume layout picker ──────────────────────────────────────────
+   Sits under the chart it lays out, pushed to the right edge so it reads as
+   a setting on the panels above rather than as a new section starting.     */
+[class*="st-key-gexsidemode"] {
+  display: flex !important;
+  justify-content: flex-end !important;
+  margin-bottom: -2.6rem;
+  padding-right: .9rem;
+  position: relative;
+  z-index: 2;
+}
+[class*="st-key-gexsidemode"] > div { width: auto !important; flex: 0 0 auto; }
+
+/* ── Dealer section scope pill ────────────────────────────────────────────
+   States which expiry the section is reading, because its two panels do not
+   agree: the table follows the Expiry control and the bubble chart shows the
+   whole term structure on purpose.                                         */
+.scope-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: .5rem;
+  margin: -.2rem 0 .85rem;
+  padding: .3rem .75rem;
+  font-size: .76rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-input);
+}
+.scope-pill .k { color: var(--text-2); text-transform: uppercase; letter-spacing: .04em; }
+.scope-pill .v { color: var(--text); font-weight: 600; }
+.scope-pill .sep { color: var(--border); }
+
 /* ── Dealer positioning table ─────────────────────────────────────────────
    Volume against the overnight change in open interest, one row per strike.
    Built as a plain CSS grid rather than st.columns: forty strikes would be

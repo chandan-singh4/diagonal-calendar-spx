@@ -50,7 +50,18 @@ BAND_PERCENT = 4.0
 # the comparison an eye makes anyway; log compresses harder still, for a
 # session where one strike has run away from the rest.
 MIN_RADIUS = 4.0
-MAX_RADIUS = 32.0
+MAX_RADIUS = 22.0
+
+# How much of the board the bubble chart may draw at once. These are not
+# cosmetic. The 4% band around SPX 7,700 holds roughly 120 five-point strikes,
+# and a panel is some hundreds of pixels tall: every strike drawn at once puts
+# three or four pixels between neighbours whose bubbles are twenty across, so
+# the columns fuse into solid bars and nothing can be read off them. Keeping
+# the busiest strikes per expiry, and the nearest expiries, is what makes the
+# chart a chart. What is dropped is always stated in the caption -- silent
+# truncation would read as "this is the whole board" when it is not.
+TOP_STRIKES_PER_EXPIRY = 8
+MAX_EXPIRIES = 8
 
 # Put/call volume ratio bands. Below 0.7 the flow is call-dominated, above
 # 1.3 put-dominated, and between them balanced — which on this chart usually
@@ -149,6 +160,34 @@ def radius(volume: float, largest: float, *, scale: str = "sqrt",
     else:
         share = math.sqrt(min(1.0, volume / largest))
     return min_radius + min(1.0, share) * (max_radius - min_radius)
+
+
+def most_traded(points: pd.DataFrame, *,
+                per_expiry: int = TOP_STRIKES_PER_EXPIRY,
+                max_expiries: int = MAX_EXPIRIES) -> pd.DataFrame:
+    """The busiest `per_expiry` strikes of the nearest `max_expiries`.
+
+    Expiries are kept by PROXIMITY (expiry_order, which is days to expiry),
+    not by volume: the chart's subject is the term structure, and dropping a
+    quiet middle expiry would leave a gap that reads as a date with no trade
+    rather than as a column that was never drawn. Strikes within an expiry are
+    kept by volume, because there the question is where the trade went.
+
+    Radii are NOT recomputed. They are relative to the busiest point on the
+    board, and rescaling to the survivors would make an expiry look busier
+    simply because its neighbours were dropped.
+    """
+    if points is None or points.empty:
+        return points
+    keep = (points[["expiry_label", "expiry_order"]].drop_duplicates()
+            .nsmallest(max_expiries, "expiry_order")["expiry_label"])
+    trimmed = (points[points["expiry_label"].isin(set(keep))]
+               .sort_values("total_volume", ascending=False))
+    # rank-then-filter, NOT groupby.apply: apply consumes expiry_label as the
+    # grouping key and hands back a frame without it, which the caller needs
+    # to draw the columns.
+    rank = trimmed.groupby("expiry_label").cumcount()
+    return trimmed[rank < per_expiry].reset_index(drop=True)
 
 
 def bubble_points(chain_df: pd.DataFrame, spot: float, *,

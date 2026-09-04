@@ -227,7 +227,7 @@ def render(ctx: ViewContext) -> None:
     # Capped to the same width as the charts below, so the control row
     # and the panels it drives share one left and right edge.
     with st.container(key="gexcontrols"):
-        c1, c3, c4 = st.columns([2, 1.4, 1], vertical_alignment="bottom")
+        c1, c3 = st.columns([2, 2], vertical_alignment="bottom")
         with c1:
             choice = st.selectbox(
                 "Expiry", ["All expiries", *expiries], key="gex_expiry",
@@ -246,13 +246,13 @@ def render(ctx: ViewContext) -> None:
             view = st.segmented_control(
                 "View", _VIEWS, default=_VIEWS[0], key="gex_view",
                 selection_mode="single") or _VIEWS[0]
-        with c4:
-            side_mode = st.segmented_control(
-                "OI / Volume", _SIDE_MODES, default=_SIDE_MODES[0],
-                key="gex_side_mode", selection_mode="single",
-                help="Mirrored draws puts below the axis, so the two sides "
-                     "compare at one strike. Stacked adds them, so totals "
-                     "compare BETWEEN strikes.") or _SIDE_MODES[0]
+
+    # The OI/Volume layout picker is NOT in that row. It changes nothing about
+    # the gamma panel it used to sit above, and reading its value here rather
+    # than where the widget is drawn lets it live beside the two panels it
+    # does change. Session state already holds the choice from the last run;
+    # on the first, no key exists yet and the default applies.
+    side_mode = st.session_state.get("gex_side_mode") or _SIDE_MODES[0]
 
     expiry = None if choice == "All expiries" else choice
     per_strike = gex.by_strike(chain, ctx.spx_price, expiry=expiry)
@@ -268,11 +268,15 @@ def render(ctx: ViewContext) -> None:
     shown = per_strike
     totals = gex.summary(shown)          # displayed bars, per the documentation
 
-    _draw_headline(totals)
     # Wrapped so the stylesheet can cap the width. Full-bleed on a wide
     # monitor stretches a ~450px panel across ~1700px: the bars turn into
     # ribbons and the shape of the curve — the thing being read — flattens.
+    # The headline strip is INSIDE it: outside, it ran the full width of the
+    # page while the chart under it stopped at the cap, and the mismatch read
+    # as the strip being broken rather than as two different widths.
     with st.container(key="gexbody"):
+        _draw_headline(totals)
+        _draw_side_mode_control()
         _draw_strike_panels(ctx, shown, view, expiry, side_mode == "Stacked")
         _gap()
         _draw_cumulative_curve(ctx, shown)
@@ -282,7 +286,22 @@ def render(ctx: ViewContext) -> None:
         _draw_time_panels(ctx, shown)
 
         st.divider()
-        _draw_dealer_structure(ctx, per_strike)
+        _draw_dealer_structure(ctx, per_strike, choice, expiry, dte_by_expiry)
+
+
+def _draw_side_mode_control() -> None:
+    """Drawn at the top right of the figure whose lower two panels it lays out.
+
+    render() has already read the value out of session state, so this is the
+    widget only. Streamlit is happy either way — the key holds the choice
+    between runs — and it puts the control where its effect is visible."""
+    with st.container(key="gexsidemode"):
+        st.segmented_control(
+            "OI / Volume", _SIDE_MODES, default=_SIDE_MODES[0],
+            key="gex_side_mode", selection_mode="single", label_visibility="collapsed",
+            help="Mirrored draws puts below the axis, so the two sides "
+                 "compare at one strike. Stacked adds them, so totals "
+                 "compare BETWEEN strikes.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -879,7 +898,9 @@ _TONE_BADGE = {
 }
 
 
-def _draw_dealer_structure(ctx: ViewContext, per_strike: pd.DataFrame) -> None:
+def _draw_dealer_structure(ctx: ViewContext, per_strike: pd.DataFrame,
+                           choice: str, expiry: str | None,
+                           dte_by_expiry: dict) -> None:
     st.markdown(
         '<div class="sh"><span class="sh-ico">🏛️</span>'
         '<span class="sh-ttl">Dealer structure &amp; positioning</span>'
@@ -887,9 +908,45 @@ def _draw_dealer_structure(ctx: ViewContext, per_strike: pd.DataFrame) -> None:
         '</div>',
         unsafe_allow_html=True,
     )
+    _draw_scope_pill(per_strike, choice, expiry, dte_by_expiry)
     _draw_term_bubbles(ctx)
     _gap()
     _draw_volume_vs_oi(ctx, per_strike)
+
+
+def _draw_scope_pill(per_strike: pd.DataFrame, choice: str,
+                     expiry: str | None, dte_by_expiry: dict) -> None:
+    """What this section is actually showing, in one line.
+
+    Necessary because the two panels below do not share a scope: the table
+    follows the Expiry control, the bubble chart deliberately does not. Naming
+    the selection here is the only thing that keeps a reader from carrying the
+    table's expiry over onto the chart beside it -- the chart's own caption
+    says so too, but this is where the eye lands first.
+
+    Volume is the two sides added across every strike in scope, which is the
+    same figure the table's bars are drawn from.
+    """
+    scope = (choice if expiry is None
+             else fmt.exp_label(expiry, dte_by_expiry))
+    volume = float(per_strike[["call_volume", "put_volume"]].sum().sum())
+    st.markdown(
+        '<div class="scope-pill">'
+        f'<span class="k">Viewing</span><span class="v">{scope}</span>'
+        '<span class="sep">|</span>'
+        f'<span class="k">Total volume</span>'
+        f'<span class="v">{_compact(volume)} contracts</span>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _compact(value: float) -> str:
+    """48,200 as "48.2K". The pill is a glance, not a figure to reconcile."""
+    for cut, suffix in ((1e9, "B"), (1e6, "M"), (1e3, "K")):
+        if abs(value) >= cut:
+            return f"{value / cut:,.1f}{suffix}"
+    return f"{value:,.0f}"
 
 
 def _draw_term_bubbles(ctx: ViewContext) -> None:
@@ -898,12 +955,11 @@ def _draw_term_bubbles(ctx: ViewContext) -> None:
     Deliberately ignores the Expiry control above. This panel exists to
     COMPARE expiries; filtering it to one would leave a single column.
     """
-    scale = "log" if st.toggle(
-        "Compress the largest bubbles (log scale)", key="gex_bubble_log",
-        help="Square root is the default and maps volume to bubble area. "
-             "Switch to log on a session where one strike has run so far "
-             "ahead that everything else has shrunk to a dot.",
-    ) else "sqrt"
+    # Square root always. The log toggle that used to sit here compressed the
+    # range so hard that almost every bubble came out near the maximum, which
+    # on a board this dense fused the columns into solid bars — it made the
+    # one problem this panel has worse, so it is gone rather than defaulted off.
+    scale = "sqrt"
 
     points = _bubble_points(ctx.chain_df, ctx.spx_price, scale, ctx.snapshot_id)
     if points.empty:
@@ -913,17 +969,24 @@ def _draw_term_bubbles(ctx: ViewContext) -> None:
         )
         return
 
+    drawn = dealer.most_traded(points)
     st.plotly_chart(
-        _bubble_figure(points, ctx.spx_price, scale, ctx.snapshot_id),
+        _bubble_figure(drawn, ctx.spx_price, scale, ctx.snapshot_id),
         use_container_width=True)
+
+    expiries_all = points["expiry_label"].nunique()
+    expiries_drawn = drawn["expiry_label"].nunique()
     st.caption(
-        "· **Expiration vs strike.** Bubble AREA is contracts traded — square "
-        "root, not linear, because 0DTE trades many times what the monthly "
-        "does at the same strike and a linear radius would shrink the monthly "
-        "below a pixel. Colour is the put/call volume ratio there: green under "
-        "0.7, red over 1.3, amber between, which usually means straddles "
-        "rather than a standoff. Every collected expiry is shown whatever the "
-        "Expiry control is set to — the comparison BETWEEN them is the point."
+        f"· **Expiration vs strike.** The **{dealer.TOP_STRIKES_PER_EXPIRY} "
+        f"busiest strikes** of the **{expiries_drawn} nearest expiries** "
+        f"(of {expiries_all} collected), which is what fits legibly — the "
+        "whole 4% band is about 120 strikes, and drawn at once the columns "
+        "fuse. Bubble AREA is contracts traded, square root rather than "
+        "linear because 0DTE trades many times what the monthly does at the "
+        "same strike. Colour is the put/call volume ratio: green under 0.7, "
+        "red over 1.3, amber between, which usually means straddles rather "
+        "than a standoff. The Expiry control above does not filter this "
+        "panel — the comparison BETWEEN expiries is the point."
     )
 
 
@@ -955,8 +1018,8 @@ def _bubble_figure(_points: pd.DataFrame, spot: float, scale: str,
             marker=dict(
                 size=side["radius"] * 2.0,        # Plotly sizes by DIAMETER
                 sizemode="diameter",
-                color=_FLOW_FILL[flow], opacity=0.7,
-                line=dict(color=_FLOW_EDGE[flow], width=1),
+                color=_FLOW_FILL[flow], opacity=0.62,
+                line=dict(color=_FLOW_EDGE[flow], width=1.2),
             ),
             customdata=side[["call_volume", "put_volume", "total_volume",
                              "pcr", "notional"]].to_numpy(),
@@ -976,11 +1039,14 @@ def _bubble_figure(_points: pd.DataFrame, spot: float, scale: str,
 
     fig.update_layout(
         xaxis=dict(type="category", categoryorder="array", categoryarray=order,
-                   gridcolor=_GRID, showgrid=True),
-        yaxis=dict(title="Strike", gridcolor=_GRID, tickformat="d"),
+                   gridcolor=_GRID, showgrid=True, tickangle=0),
+        yaxis=dict(gridcolor=_GRID, tickformat="d"),
         hovermode="closest",
     )
-    _dark(fig, 460, legend=True)
+    # Taller than the panels above it. Height here is not decoration: it is
+    # how many points of strike fit between two bubbles, and at 460px the
+    # neighbours touched.
+    _dark(fig, 620, legend=True)
     return fig
 
 

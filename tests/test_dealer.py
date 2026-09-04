@@ -326,3 +326,62 @@ def test_a_wall_label_never_overwrites_a_louder_verdict():
         _prior([{"strike": 7500, "poi": 0}]),
         SPOT, strike_range_percent=5.0)
     assert rows["verdict"].iloc[0] == "Heavy Accumulation"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# most_traded — what fits on the chart
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _points(expiries=3, strikes=20):
+    """A board with a known busiest strike per expiry."""
+    rows = []
+    for e in range(expiries):
+        for k in range(strikes):
+            rows.append({"expiry": f"2026-09-{e + 1:02d}",
+                         "expiry_label": f"E{e}", "expiry_order": e,
+                         "strike": 7700.0 + k * 5, "call_volume": 1.0,
+                         "put_volume": 1.0, "total_volume": float(k + 1),
+                         "pcr": 1.0, "notional": 1.0, "flow": "balanced",
+                         "radius": 4.0})
+    return pd.DataFrame(rows)
+
+
+def test_only_the_busiest_strikes_of_each_expiry_survive():
+    kept = dealer.most_traded(_points(), per_expiry=3, max_expiries=9)
+    assert len(kept) == 9
+    for label, group in kept.groupby("expiry_label"):
+        # total_volume was k + 1 over twenty strikes: 20, 19, 18 are the top.
+        assert sorted(group["total_volume"]) == [18.0, 19.0, 20.0], label
+
+
+def test_expiries_are_kept_by_nearness_not_by_volume():
+    """The subject is the term structure. Keeping the loudest expiries would
+    leave a hole where a quiet middle one was, and a hole on a date axis reads
+    as a session with no trade rather than as a column that was not drawn."""
+    board = _points(expiries=4)
+    board.loc[board["expiry_label"] == "E0", "total_volume"] = 0.5   # quietest
+    kept = dealer.most_traded(board, per_expiry=2, max_expiries=2)
+    assert sorted(kept["expiry_label"].unique()) == ["E0", "E1"]
+
+
+def test_the_column_label_survives_the_filter():
+    """Pinned because it did not. groupby.apply consumed expiry_label as the
+    grouping key and returned a frame without it, and the panel cannot draw
+    its columns from a frame that has lost the column name."""
+    kept = dealer.most_traded(_points(), per_expiry=2, max_expiries=2)
+    assert "expiry_label" in kept.columns
+    assert "expiry_order" in kept.columns
+
+
+def test_radii_are_not_rescaled_to_the_survivors():
+    """A radius is relative to the busiest point on the WHOLE board. Recomputing
+    it after the filter would make a thin expiry look busy purely because its
+    neighbours were dropped."""
+    board = _points()
+    kept = dealer.most_traded(board, per_expiry=2, max_expiries=2)
+    assert set(kept["radius"]) == {4.0}
+
+
+def test_an_empty_board_filters_to_an_empty_board():
+    blank = dealer._blank(dealer.BUBBLE_COLUMNS)
+    assert dealer.most_traded(blank).empty
