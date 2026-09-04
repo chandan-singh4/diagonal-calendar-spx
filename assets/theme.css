@@ -754,70 +754,23 @@ div[class*="st-key-chartcard_"]:hover {
 .note b, .note strong { color: var(--text); font-weight: 600; }
 
 
-/* ── Chevron stepper ──────────────────────────────────────────────────────
-   The ◀ label ▶ control on the Gamma Exposure tab. It replaces a dropdown
-   for short ordered sets — one click moves to the next view instead of
-   click, read a list, click again.
-
-   Everything here is about sitting on the SAME BASELINE as the selectbox
-   next to it: Streamlit's label is .875rem with a 4px gap, its input is
-   38px tall, so the label and the arrows here are given exactly those
-   numbers. Left to the defaults the arrows stretch and the row reads as
-   three unrelated widgets at three different heights.                      */
-.step-lbl {
-  font-size: .875rem;
-  line-height: 1.6;
-  color: var(--text-2, #8fa9c4);
-  margin-bottom: 4px;
+/* ── Segmented controls ──────────────────────────────────────────────────
+   The View and OI/Volume pickers on the Gamma Exposure tab. Streamlit lays
+   the widget out; all that is set here is the palette, so the row reads as
+   one control strip with the selectbox beside it rather than three widgets
+   from three different designs.                                            */
+[data-testid="stSegmentedControl"] button {
+  font-size: .78rem !important;
+  padding: .3rem .8rem !important;
+  color: var(--text-2) !important;
+  background: var(--bg-input) !important;
+  border-color: var(--border) !important;
 }
-.step-val {
-  text-align: center;
-  font-size: .95rem;
-  font-weight: 600;
-  color: var(--accent, #4d8eff);
-  height: 38px;
-  line-height: 38px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-/* The stepper is a compact unit, not three columns of whatever width the
-   row happens to give it. Capping the block and centring each cell is what
-   puts the arrows either side of the value instead of stranded against the
-   far edges of their columns.                                              */
-[class*="st-key-step_gex"] {
-  max-width: 210px;
-}
-[class*="st-key-step_gex"] [data-testid="stHorizontalBlock"] {
-  gap: .15rem;
-}
-[class*="st-key-step_gex"] [data-testid="stColumn"] {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-[class*="st-key-step_gex"] [data-testid="stColumn"] > div {
-  width: 100%;
-}
-/* Small and quiet: the arrows are a way to move, not a thing to look at.
-   The value between them is the content, so the chevrons lose their button
-   chrome entirely and only pick up colour under the cursor.                */
-[class*="st-key-step_gex"] button {
-  height: 38px;
-  min-height: 38px;
-  width: 22px;
-  min-width: 22px;
-  padding: 0;
-  line-height: 1;
-  font-size: .62rem;
-  background: transparent;
-  border: none;
-  box-shadow: none;
-  color: var(--text-3, #6d8fa8);
-}
-[class*="st-key-step_gex"] button:hover {
-  background: transparent;
-  color: var(--accent, #4d8eff);
+[data-testid="stSegmentedControl"] button[aria-checked="true"],
+[data-testid="stSegmentedControl"] button[kind="segmented_controlActive"] {
+  color: var(--blue) !important;
+  background: var(--bg-hover) !important;
+  font-weight: 600 !important;
 }
 
 /* ── Gamma Exposure body ──────────────────────────────────────────────────
@@ -829,4 +782,71 @@ div[class*="st-key-chartcard_"]:hover {
   max-width: 1320px;
   margin-left: auto;
   margin-right: auto;
+}
+
+/* ── Dealer positioning table ─────────────────────────────────────────────
+   Volume against the overnight change in open interest, one row per strike.
+   Built as a plain CSS grid rather than st.columns: forty strikes would be
+   forty Streamlit layout containers rebuilt on every rerun, and this is a
+   table, not forty widgets. Column widths follow the reference design.     */
+.dealer-table {
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  overflow: hidden;
+  background: #0b1120;
+}
+.dealer-row {
+  display: grid;
+  grid-template-columns: 92px 1fr 1fr 168px;
+  gap: 12px;
+  align-items: center;
+  padding: 7px 12px;
+  border-bottom: 1px solid #1e293b;
+  font-size: .8rem;
+}
+.dealer-row:last-child { border-bottom: none; }
+.dealer-row:hover { background: #172238; }
+.dealer-head {
+  background: #172033;
+  font-weight: 600;
+  color: var(--text-2);
+  text-transform: uppercase;
+  font-size: .68rem;
+  letter-spacing: .06em;
+}
+.dealer-head:hover { background: #172033; }
+/* The at-the-money row is tinted rather than boxed: it is a reference point
+   in a list, not a selection.                                              */
+.dealer-row.atm { background: rgba(56,189,248,.05); }
+.dealer-strike {
+  font-family: var(--mono);
+  font-weight: 700;
+  color: #cbd5e1;
+}
+.dealer-strike.atm { color: #38bdf8; }
+.dealer-bar { display: flex; align-items: center; gap: 8px; }
+.dealer-track {
+  flex: 1;
+  height: 15px;
+  background: #1e293b;
+  border-radius: 2px;
+  overflow: hidden;
+}
+.dealer-fill { height: 100%; border-radius: 2px; }
+.dealer-val {
+  width: 62px;
+  text-align: right;
+  font-family: var(--mono);
+  font-size: .72rem;
+  color: #cbd5e1;
+}
+.dealer-row .c { display: flex; justify-content: center; }
+.dealer-badge {
+  font-size: .66rem;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  white-space: nowrap;
 }

@@ -40,6 +40,7 @@ import config
 from core import contract
 from core import session as core_session
 from core import format as fmt
+from core import dealer
 from core import gex
 from core.charts import to_display_time
 from views.context import ViewContext
@@ -158,50 +159,6 @@ def _strip(items: list[str]) -> None:
     )
 
 
-def _stepper(label: str, options: list[str], key: str) -> str:
-    """A chevron pair around the current choice: ◀ Abs Gamma ▶.
-
-    A dropdown makes you click, read a list and click again to see the next
-    view. These options are a short ordered set a reader steps THROUGH — one
-    click per view, and the current one stays legible the whole time. The
-    index wraps, so neither arrow is ever a dead button.
-
-    State lives under `key` as an INDEX rather than a label: an option renamed
-    or reordered then moves the selection somewhere sensible instead of
-    raising on a value that is no longer in the list.
-
-    Wrapped in a keyed container so the stylesheet can size it. Left to
-    Streamlit's defaults the arrows stretch to fill their columns and the
-    control ends up twice the height of the selectbox beside it — the row has
-    to line up on one baseline or it reads as three unrelated widgets.
-    """
-    idx = int(st.session_state.get(key, 0)) % len(options)
-    with st.container(key=f"step_{key}"):
-        st.markdown(f'<div class="step-lbl">{label}</div>',
-                    unsafe_allow_html=True)
-        back, name, fwd = st.columns([1, 4, 1], gap="small",
-                                     vertical_alignment="center")
-        # The arrows are read BEFORE the value is drawn, so a click takes
-        # effect in the run it happened in. The obvious version — record the
-        # new index and call st.rerun() so the label refreshes — costs a
-        # SECOND full pass over app.py for every click, which on this page
-        # measured 3.8s of nothing happening. tests/test_layering.py pins
-        # that st.rerun() does not come back here.
-        with back:
-            stepped_back = st.button("◀", key=f"{key}_prev")
-        with fwd:
-            stepped_fwd = st.button("▶", key=f"{key}_next")
-        if stepped_back:
-            idx = (idx - 1) % len(options)
-        elif stepped_fwd:
-            idx = (idx + 1) % len(options)
-        st.session_state[key] = idx
-        with name:
-            st.markdown(f'<div class="step-val">{options[idx]}</div>',
-                        unsafe_allow_html=True)
-    return options[idx]
-
-
 def _gap(height: int = 40) -> None:
     """Breathing room between two stacked charts.
 
@@ -270,7 +227,7 @@ def render(ctx: ViewContext) -> None:
     # Capped to the same width as the charts below, so the control row
     # and the panels it drives share one left and right edge.
     with st.container(key="gexcontrols"):
-        c1, c3, c4 = st.columns([2, 1, 1], vertical_alignment="bottom")
+        c1, c3, c4 = st.columns([2, 1.4, 1], vertical_alignment="bottom")
         with c1:
             choice = st.selectbox(
                 "Expiry", ["All expiries", *expiries], key="gex_expiry",
@@ -280,10 +237,22 @@ def render(ctx: ViewContext) -> None:
                      "refers to. The third Friday appears twice because SPX lists "
                      "two contracts for it.",
             )
+        # ONE widget each, not a hand-built row of buttons. The chevron
+        # stepper these replace was three columns held together by CSS, and
+        # it drifted out of line with the selectbox beside it every time the
+        # column widths changed. A segmented control is laid out by Streamlit
+        # and reaches any option in a single click rather than stepping.
         with c3:
-            view = _stepper("View", _VIEWS, "gex_view_idx")
+            view = st.segmented_control(
+                "View", _VIEWS, default=_VIEWS[0], key="gex_view",
+                selection_mode="single") or _VIEWS[0]
         with c4:
-            side_mode = _stepper("OI / Volume", _SIDE_MODES, "gex_side_idx")
+            side_mode = st.segmented_control(
+                "OI / Volume", _SIDE_MODES, default=_SIDE_MODES[0],
+                key="gex_side_mode", selection_mode="single",
+                help="Mirrored draws puts below the axis, so the two sides "
+                     "compare at one strike. Stacked adds them, so totals "
+                     "compare BETWEEN strikes.") or _SIDE_MODES[0]
 
     expiry = None if choice == "All expiries" else choice
     per_strike = gex.by_strike(chain, ctx.spx_price, expiry=expiry)
@@ -311,6 +280,9 @@ def render(ctx: ViewContext) -> None:
 
         st.divider()
         _draw_time_panels(ctx, shown)
+
+        st.divider()
+        _draw_dealer_structure(ctx, per_strike)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -875,3 +847,228 @@ def _draw_caption(totals: dict, expiry: str | None,
             "ones, so near-dated contracts dominate this view."
         )
     st.caption("  \n".join(f"· {line}" for line in lines))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Dealer structure — where the flow went, and whether it stayed
+#
+# These two panels answer what the per-strike ones cannot. Gamma exposure
+# describes what is LISTED; these describe what was TRADED today. The bubble
+# chart spreads that volume across expiry AND strike, so 0DTE gamma chasing
+# separates from monthly OPEX hedging instead of both collapsing into one
+# per-strike total; the positioning table reads the same volume against the
+# overnight change in open interest — the only thing in this data that can
+# tell a position opened from one contract changing hands forty times.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# The reference design's palette, kept exactly. Flow colour is a reading, and
+# a green here has to mean what green means on every other panel.
+_FLOW_FILL = {"call": "#10b981", "put": "#ef4444", "balanced": "#f59e0b"}
+_FLOW_EDGE = {"call": "#059669", "put": "#dc2626", "balanced": "#d97706"}
+_FLOW_NAME = {"call": "Call-dominated", "put": "Put-dominated",
+              "balanced": "Balanced / straddle"}
+_SPOT_ACCENT = "#38bdf8"
+_VOL_BAR = "#8b5cf6"
+
+_TONE_BADGE = {
+    "accumulation": ("rgba(16,185,129,.15)", "#34d399", "rgba(16,185,129,.3)"),
+    "churn":        ("rgba(148,163,184,.15)", "#cbd5e1", "rgba(148,163,184,.3)"),
+    "liquidation":  ("rgba(239,68,68,.15)", "#f87171", "rgba(239,68,68,.3)"),
+    "wall":         ("rgba(56,189,248,.15)", "#7dd3fc", "rgba(56,189,248,.3)"),
+    "quiet":        ("transparent", "#41586e", "transparent"),
+}
+
+
+def _draw_dealer_structure(ctx: ViewContext, per_strike: pd.DataFrame) -> None:
+    st.markdown(
+        '<div class="sh"><span class="sh-ico">🏛️</span>'
+        '<span class="sh-ttl">Dealer structure &amp; positioning</span>'
+        '<span class="sh-bdg">term structure · churn vs commitment</span>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+    _draw_term_bubbles(ctx)
+    _gap()
+    _draw_volume_vs_oi(ctx, per_strike)
+
+
+def _draw_term_bubbles(ctx: ViewContext) -> None:
+    """Volume across expiry and strike at once.
+
+    Deliberately ignores the Expiry control above. This panel exists to
+    COMPARE expiries; filtering it to one would leave a single column.
+    """
+    scale = "log" if st.toggle(
+        "Compress the largest bubbles (log scale)", key="gex_bubble_log",
+        help="Square root is the default and maps volume to bubble area. "
+             "Switch to log on a session where one strike has run so far "
+             "ahead that everything else has shrunk to a dot.",
+    ) else "sqrt"
+
+    points = _bubble_points(ctx.chain_df, ctx.spx_price, scale, ctx.snapshot_id)
+    if points.empty:
+        st.info(
+            "No volume within 4% of spot in this snapshot yet. This panel "
+            "fills in as the session trades."
+        )
+        return
+
+    st.plotly_chart(
+        _bubble_figure(points, ctx.spx_price, scale, ctx.snapshot_id),
+        use_container_width=True)
+    st.caption(
+        "· **Expiration vs strike.** Bubble AREA is contracts traded — square "
+        "root, not linear, because 0DTE trades many times what the monthly "
+        "does at the same strike and a linear radius would shrink the monthly "
+        "below a pixel. Colour is the put/call volume ratio there: green under "
+        "0.7, red over 1.3, amber between, which usually means straddles "
+        "rather than a standoff. Every collected expiry is shown whatever the "
+        "Expiry control is set to — the comparison BETWEEN them is the point."
+    )
+
+
+@st.cache_data(show_spinner=False, max_entries=8)
+def _bubble_points(_chain: pd.DataFrame, spot: float, scale: str,
+                   snapshot_id: int) -> pd.DataFrame:
+    return dealer.bubble_points(_chain, spot, scale=scale)
+
+
+@st.cache_data(show_spinner=False, max_entries=8)
+def _bubble_figure(_points: pd.DataFrame, spot: float, scale: str,
+                   snapshot_id: int):
+    points = _points
+    # Discrete columns ordered by days to expiry, plotted against the LABEL
+    # rather than the date: the gap between tomorrow and the monthly is then
+    # one column, not five weeks of empty axis.
+    order = (points[["expiry_label", "expiry_order"]]
+             .drop_duplicates().sort_values("expiry_order")["expiry_label"]
+             .tolist())
+
+    fig = go.Figure()
+    for flow in ("call", "put", "balanced"):
+        side = points[points["flow"] == flow]
+        if side.empty:
+            continue
+        fig.add_trace(go.Scatter(
+            x=side["expiry_label"], y=side["strike"], mode="markers",
+            name=_FLOW_NAME[flow],
+            marker=dict(
+                size=side["radius"] * 2.0,        # Plotly sizes by DIAMETER
+                sizemode="diameter",
+                color=_FLOW_FILL[flow], opacity=0.7,
+                line=dict(color=_FLOW_EDGE[flow], width=1),
+            ),
+            customdata=side[["call_volume", "put_volume", "total_volume",
+                             "pcr", "notional"]].to_numpy(),
+            hovertemplate=(
+                "%{x} · %{y:,.0f}<br>"
+                "Total volume %{customdata[2]:,.0f}<br>"
+                "Calls %{customdata[0]:,.0f} · Puts %{customdata[1]:,.0f}<br>"
+                "PCR %{customdata[3]:.2f}<br>"
+                "Premium %{customdata[4]:$,.0f}<extra></extra>"),
+        ))
+
+    fig.add_hline(y=spot, line=dict(color=_SPOT_ACCENT, width=1.5, dash="dash"))
+    fig.add_annotation(
+        x=0, xref="paper", y=spot, xanchor="left", yanchor="middle",
+        text=f"SPX SPOT {spot:,.2f}", showarrow=False,
+        font=dict(color="#ffffff", size=9), bgcolor="#0369a1", borderpad=3)
+
+    fig.update_layout(
+        xaxis=dict(type="category", categoryorder="array", categoryarray=order,
+                   gridcolor=_GRID, showgrid=True),
+        yaxis=dict(title="Strike", gridcolor=_GRID, tickformat="d"),
+        hovermode="closest",
+    )
+    _dark(fig, 460, legend=True)
+    return fig
+
+
+def _draw_volume_vs_oi(ctx: ViewContext, per_strike: pd.DataFrame) -> None:
+    """Today's volume beside the overnight change in open interest."""
+    prior = ctx.load_prior_session_oi(ctx.session_date)
+    rows = _positioning(per_strike, prior, ctx.spx_price, ctx.snapshot_id)
+    if rows.empty:
+        st.info("No strike within 2.5% of spot has traded yet today.")
+        return
+
+    st.markdown(_positioning_table(rows, ctx.spx_price), unsafe_allow_html=True)
+
+    if rows["delta_oi"].isna().all():
+        st.caption(
+            "· **No previous session to compare against**, so the change "
+            "column and every verdict are blank. Open interest is republished "
+            "once a day: without yesterday there is nothing to subtract, and "
+            "treating the unknown as zero would report the board as churn."
+        )
+        return
+    st.caption(
+        "· **Churn or commitment.** Volume alone cannot tell a position being "
+        "opened from one contract changing hands forty times — open interest "
+        "settles it, because it counts what still existed at the close. A "
+        "verdict is offered only where volume is in the top quarter of the "
+        "strikes shown; the rest is ordinary two-way trade, left blank rather "
+        "than labelled. **Open interest is published once, overnight**, so "
+        "these deltas do not move during the session."
+    )
+
+
+@st.cache_data(show_spinner=False, max_entries=8)
+def _positioning(_today: pd.DataFrame, _prior: pd.DataFrame, spot: float,
+                 snapshot_id: int) -> pd.DataFrame:
+    return dealer.positioning(_today, _prior, spot)
+
+
+def _positioning_table(rows: pd.DataFrame, spot: float) -> str:
+    """The strike rows as ONE HTML block.
+
+    One block rather than a Streamlit element per row: forty rows would be
+    forty layout containers rebuilt on every rerun, and this is a table, not
+    forty widgets.
+    """
+    widest_vol = float(rows["total_volume"].max()) or 1.0
+    deltas = rows["delta_oi"].abs()
+    widest_delta = (float(deltas.max()) if deltas.notna().any() else 1.0) or 1.0
+    nearest = (rows["strike"] - spot).abs().idxmin()
+
+    out = ['<div class="dealer-table">',
+           '<div class="dealer-row dealer-head">'
+           '<div>Strike</div><div>Session volume</div>'
+           '<div>Net &Delta;OI (overnight)</div>'
+           '<div class="c">Position verdict</div></div>']
+
+    for i, r in rows.iterrows():
+        atm = i == nearest
+        strike = f"{r['strike']:,.0f}" + (" ATM" if atm else "")
+        vol_pct = 100.0 * float(r["total_volume"]) / widest_vol
+
+        delta = r["delta_oi"]
+        if pd.isna(delta):
+            delta_bar, delta_text, delta_colour = 0.0, "—", "#41586e"
+        else:
+            delta_bar = 100.0 * abs(float(delta)) / widest_delta
+            delta_text = f"{delta:+,.0f}"
+            delta_colour = ("#10b981" if delta > 0
+                            else "#ef4444" if delta < 0 else "#64748b")
+
+        bg, fg, edge = _TONE_BADGE.get(r["tone"], _TONE_BADGE["quiet"])
+        badge = (f'<span class="dealer-badge" style="background:{bg};'
+                 f'color:{fg};border:1px solid {edge};">{r["verdict"]}</span>')
+
+        out.append(
+            f'<div class="dealer-row{" atm" if atm else ""}">'
+            f'<div class="dealer-strike{" atm" if atm else ""}">{strike}</div>'
+            f'<div class="dealer-bar"><div class="dealer-track">'
+            f'<div class="dealer-fill" style="width:{vol_pct:.1f}%;'
+            f'background:{_VOL_BAR};"></div></div>'
+            f'<div class="dealer-val">{_fmt_money(r["total_volume"])}</div>'
+            f'</div>'
+            f'<div class="dealer-bar"><div class="dealer-track">'
+            f'<div class="dealer-fill" style="width:{delta_bar:.1f}%;'
+            f'background:{delta_colour};"></div></div>'
+            f'<div class="dealer-val" style="color:{delta_colour};">'
+            f'{delta_text}</div></div>'
+            f'<div class="c">{badge}</div></div>'
+        )
+    out.append("</div>")
+    return "".join(out)

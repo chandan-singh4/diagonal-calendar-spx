@@ -663,11 +663,11 @@ def test_the_refresh_poller_adopts_the_snapshot_before_it_reruns():
     )
 
 
-def test_the_gamma_exposure_steppers_never_ask_for_a_second_script_run():
+def test_the_gamma_exposure_controls_never_ask_for_a_second_script_run():
     """A chevron press must not cost two passes over app.py.
 
-    The obvious way to write a stepper is to record the new index and call
-    st.rerun() so the label redraws. That doubles the cost of every click —
+    A control that records its new value and calls st.rerun() so the page
+    catches up doubles the cost of every click —
     measured at 3.8s a pass on this page, so ~7.6s of nothing happening — and
     the second pass exists only to show a string the first pass could have
     shown had it read the buttons before drawing the value.

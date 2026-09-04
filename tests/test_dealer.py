@@ -1,0 +1,328 @@
+"""core/dealer.py — the term-structure bubbles and the churn verdicts.
+
+WHAT THESE CAN AND CANNOT PROVE. The verdicts are heuristics: no data
+anywhere says whether "Heavy Accumulation" was the right word for a strike.
+So these tests do not try to show the labels are true. They pin the two
+things that CAN be wrong without anyone noticing:
+
+  * the arithmetic and the boundaries — a threshold flipped from >= to >, a
+    ratio taken against the wrong denominator, a percentile over the whole
+    chain instead of the strikes on screen;
+  * the order the rules are applied in, which is load-bearing. Churn's test
+    ("small net change") is satisfied by definition when the other two fail,
+    so checking it first silently relabels every genuine build as scalping.
+
+The bubble tests carry one measured number. On the live 2026-09-04 snapshot
+the busiest 0DTE strike traded 151,263 contracts; a monthly strike at the
+same price traded a small fraction of that. Linear radius is what would put
+the second below a pixel, and `test_the_smallest_bubble_survives_the_largest`
+pins that it does not.
+"""
+from __future__ import annotations
+
+import pandas as pd
+import pytest
+
+from core import dealer
+
+SPOT = 7700.0
+
+
+def _chain(rows: list[dict]) -> pd.DataFrame:
+    """A chain frame shaped like dataaccess.load_chain_df's output."""
+    return pd.DataFrame([
+        {"expiry": r.get("expiry", "2026-09-04"),
+         "dte": r.get("dte", 0),
+         "strike": r["strike"],
+         "right": r["right"],
+         "volume": r.get("volume", 100),
+         "mark": r.get("mark", 2.0)}
+        for r in rows
+    ])
+
+
+def _strikes(rows: list[dict]) -> pd.DataFrame:
+    """A frame shaped like core.gex.by_strike's output."""
+    return pd.DataFrame([
+        {"strike": r["strike"],
+         "call_volume": r.get("cv", 0.0), "put_volume": r.get("pv", 0.0),
+         "call_oi": r.get("coi", 0.0), "put_oi": r.get("poi", 0.0)}
+        for r in rows
+    ])
+
+
+def _prior(rows: list[dict]) -> pd.DataFrame:
+    return pd.DataFrame([
+        {"strike": r["strike"], "call_oi": r.get("coi", 0.0),
+         "put_oi": r.get("poi", 0.0)}
+        for r in rows
+    ])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Expiry naming — the x axis
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_the_columns_are_named_the_way_a_trader_names_them():
+    assert dealer.expiry_label("2026-09-04", 0) == "0DTE (Today)"
+    assert dealer.expiry_label("2026-09-05", 1) == "1DTE"
+    assert dealer.expiry_label("2026-09-11", 7) == "W-OPEX (Fri)"
+    assert dealer.expiry_label("2026-10-09", 14) == "Next Fri"
+    # Past a fortnight the count stops being how anyone refers to it.
+    assert dealer.expiry_label("2026-10-02", 28) == "Fri 2 Oct"
+
+
+def test_the_monthly_and_the_quarterly_are_told_apart():
+    """Both are third Fridays; only the quarterly ends a cycle. A chart that
+    called them the same thing would hide the one distinction the column
+    exists to make."""
+    assert dealer.expiry_label("2026-09-18", 14) == "Quarterly"   # September
+    assert dealer.expiry_label("2026-10-16", 42) == "Monthly OPEX"
+
+
+def test_the_third_fridays_am_contract_is_named_like_its_own_date():
+    """SPX lists two contracts for the third Friday and the morning one
+    arrives as "2026-09-18 (AM)". Parsed as a bare date it would raise."""
+    assert dealer.expiry_label("2026-09-18 (AM)", 14) == "Quarterly"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Bubble sizing and colour
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_the_smallest_bubble_survives_the_largest():
+    """The reason the scale is non-linear at all. On the live snapshot the
+    busiest 0DTE strike traded 151,263 contracts; a monthly strike trading a
+    hundred would get a radius of 0.02px under a linear scale — invisible.
+    Both ends must land inside the stated pixel range."""
+    small = dealer.radius(100, 151_263)
+    large = dealer.radius(151_263, 151_263)
+    assert dealer.MIN_RADIUS <= small <= dealer.MAX_RADIUS
+    assert large == pytest.approx(dealer.MAX_RADIUS)
+    assert small > dealer.MIN_RADIUS          # not flattened onto the floor
+    assert small < large
+
+
+def test_square_root_sizes_by_area_not_by_radius():
+    """Four times the volume must give four times the AREA, which is what an
+    eye compares. Area goes as r^2, so the radius doubles."""
+    quarter = dealer.radius(25, 100, min_radius=0.0, max_radius=100.0)
+    full = dealer.radius(100, 100, min_radius=0.0, max_radius=100.0)
+    assert full / quarter == pytest.approx(2.0)
+
+
+def test_log_compresses_harder_than_square_root():
+    """The reason the toggle exists: on a session where one strike has run
+    away, log lifts everything else back into view."""
+    sqrt_r = dealer.radius(100, 1_000_000, scale="sqrt")
+    log_r = dealer.radius(100, 1_000_000, scale="log")
+    assert log_r > sqrt_r
+
+
+def test_a_strike_that_traded_nothing_takes_the_floor_rather_than_vanishing():
+    assert dealer.radius(0, 1000) == dealer.MIN_RADIUS
+    assert dealer.radius(50, 0) == dealer.MIN_RADIUS
+
+
+def test_the_flow_bands_are_the_published_ones():
+    assert dealer.flow_bucket(0.69) == "call"
+    assert dealer.flow_bucket(0.70) == "balanced"       # boundary is inclusive
+    assert dealer.flow_bucket(1.30) == "balanced"
+    assert dealer.flow_bucket(1.31) == "put"
+
+
+def test_a_strike_with_no_call_volume_is_put_dominated_not_balanced():
+    """Divide by zero and the ratio is undefined; left as NaN it buckets as
+    "balanced", which is wrong in the one direction that matters — a strike
+    where only puts traded is the strongest put signal on the board."""
+    points = dealer.bubble_points(_chain([
+        {"strike": 7700, "right": "P", "volume": 5000},
+    ]), SPOT)
+    assert points["flow"].iloc[0] == "put"
+
+
+def test_bubbles_drop_strikes_outside_the_band_rather_than_clamping_them():
+    """Height on this chart IS a price. A clamped point would sit at a price
+    nothing traded at, which is worse than not drawing it."""
+    points = dealer.bubble_points(_chain([
+        {"strike": 7700, "right": "C"},
+        {"strike": 5000, "right": "C"},     # far below any 4% band
+    ]), SPOT)
+    assert points["strike"].tolist() == [7700.0]
+
+
+def test_both_sides_of_one_strike_become_one_bubble():
+    points = dealer.bubble_points(_chain([
+        {"strike": 7700, "right": "C", "volume": 300, "mark": 2.0},
+        {"strike": 7700, "right": "P", "volume": 100, "mark": 1.0},
+    ]), SPOT)
+    assert len(points) == 1
+    row = points.iloc[0]
+    assert row["total_volume"] == 400
+    assert row["pcr"] == pytest.approx(1 / 3)
+    assert row["flow"] == "call"
+    # Premium, not contracts: 300 x $2 x 100 + 100 x $1 x 100.
+    assert row["notional"] == pytest.approx(70_000.0)
+
+
+def test_one_expiry_does_not_absorb_another_at_the_same_strike():
+    """The whole point of the chart. Grouped by strike alone, 0DTE and the
+    monthly would merge and the term structure would disappear."""
+    points = dealer.bubble_points(_chain([
+        {"strike": 7700, "right": "C", "expiry": "2026-09-04", "dte": 0},
+        {"strike": 7700, "right": "C", "expiry": "2026-09-18", "dte": 14},
+    ]), SPOT)
+    assert len(points) == 2
+    assert points["expiry_order"].tolist() == [0, 14]     # ordered by dte
+
+
+def test_an_empty_or_shapeless_chain_returns_the_shaped_blank():
+    shapeless = pd.DataFrame({"strike": [7700.0], "right": ["C"]})
+    for frame in (pd.DataFrame(), shapeless):
+        out = dealer.bubble_points(frame, SPOT)
+        assert out.empty
+        assert list(out.columns) == list(dealer.BUBBLE_COLUMNS)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The classification engine
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_high_volume_with_almost_no_net_change_is_churn():
+    assert dealer.classify(100_000, 5_000, high_volume=True)[0] == "Intraday Churn"
+
+
+def test_high_volume_with_a_quarter_of_it_left_open_is_accumulation():
+    assert dealer.classify(100_000, 25_000, high_volume=True)[0] == "Heavy Accumulation"
+
+
+def test_high_volume_with_open_interest_falling_is_liquidation():
+    assert dealer.classify(100_000, -20_000, high_volume=True)[0] == "Position Liquidation"
+
+
+def test_no_ratio_can_satisfy_two_verdicts_at_once():
+    """The property that makes a verdict unambiguous: the three bands do not
+    overlap, so the answer cannot depend on which branch is tested first.
+
+    Written after a mutation test disproved the opposite claim — swapping the
+    branches left every test here passing, because churn (|r| <= 0.15) and
+    accumulation (r >= 0.25) have no number in common. Pinned as the real
+    invariant rather than as the order it happens to be written in."""
+    bands = {"Intraday Churn": lambda r: abs(r) <= dealer.CHURN_RATIO,
+             "Heavy Accumulation": lambda r: r >= dealer.ACCUMULATION_RATIO,
+             "Position Liquidation": lambda r: r <= -dealer.LIQUIDATION_RATIO}
+    for i in range(-100, 101):
+        ratio = i / 100.0
+        matched = [name for name, test in bands.items() if test(ratio)]
+        assert len(matched) <= 1, f"ratio {ratio} matches {matched}"
+
+    # And the ratio the caller actually passes is dOI over VOLUME, not the
+    # other way round: 250k on a million is a quarter, a build.
+    assert dealer.classify(1_000_000, 250_000,
+                           high_volume=True)[0] == "Heavy Accumulation"
+
+
+def test_the_middle_ground_is_opening_longs_not_a_blank():
+    """Above the churn ceiling, below the accumulation floor: more than
+    scalping, less than a build."""
+    assert dealer.classify(100_000, 19_000, high_volume=True)[0] == "Opening Longs"
+
+
+def test_a_quiet_strike_gets_no_verdict_at_all():
+    """A verdict on every row is a verdict on nothing. Most strikes in a
+    session are ordinary two-way trade and are left to say so."""
+    assert dealer.classify(500, 400, high_volume=False)[0] == "—"
+    assert dealer.classify(0, 0, high_volume=True)[0] == "—"
+
+
+def test_an_unknown_delta_is_never_read_as_no_change():
+    """NaN means "there is no previous session", not "nothing changed". Read
+    as zero it would report a busy strike as churn."""
+    assert dealer.classify(100_000, float("nan"), high_volume=True)[0] == "—"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# positioning() — the table behind the second chart
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_the_delta_is_todays_open_interest_minus_the_previous_sessions():
+    rows = dealer.positioning(
+        _strikes([{"strike": 7700, "cv": 60_000, "pv": 40_000,
+                   "coi": 9_000, "poi": 1_000}]),
+        _prior([{"strike": 7700, "coi": 5_000, "poi": 1_000}]),
+        SPOT)
+    assert rows["delta_oi"].iloc[0] == 4_000
+    assert rows["total_volume"].iloc[0] == 100_000
+
+
+def test_a_strike_absent_yesterday_counts_its_whole_open_interest_as_new():
+    rows = dealer.positioning(
+        _strikes([{"strike": 7700, "cv": 100_000, "coi": 30_000}]),
+        _prior([{"strike": 7600, "coi": 1_000}]),
+        SPOT)
+    assert rows["delta_oi"].iloc[0] == 30_000
+    assert rows["verdict"].iloc[0] == "Heavy Accumulation"
+
+
+def test_the_high_volume_cut_is_taken_over_the_strikes_shown():
+    """A percentile over the whole chain would sit near zero — the wings are
+    mostly untraded — and every strike on screen would clear it."""
+    rows = dealer.positioning(
+        _strikes([
+            {"strike": 7690, "cv": 10, "coi": 5},          # quiet
+            {"strike": 7695, "cv": 20, "coi": 5},          # quiet
+            {"strike": 7700, "cv": 100_000, "coi": 1_000},  # the busy one
+        ]),
+        _prior([{"strike": s, "coi": 0} for s in (7690, 7695, 7700)]),
+        SPOT)
+    verdicts = dict(zip(rows["strike"], rows["verdict"]))
+    assert verdicts[7690.0] == "—"
+    assert verdicts[7695.0] == "—"
+    assert verdicts[7700.0] != "—"
+
+
+def test_strikes_beyond_the_range_are_not_in_the_table():
+    rows = dealer.positioning(
+        _strikes([{"strike": 7700, "cv": 100}, {"strike": 6000, "cv": 100}]),
+        _prior([{"strike": 7700}]), SPOT)
+    assert rows["strike"].tolist() == [7700.0]
+
+
+def test_with_no_previous_session_every_verdict_is_blank():
+    """The first collected day. Treating the unknown as zero change would
+    report the entire board as churn — a confident answer from no data."""
+    rows = dealer.positioning(
+        _strikes([{"strike": 7700, "cv": 100_000, "coi": 50_000}]),
+        pd.DataFrame(), SPOT)
+    assert rows["verdict"].iloc[0] == "—"
+    assert pd.isna(rows["delta_oi"].iloc[0])
+
+
+def test_the_walls_are_the_biggest_out_of_the_money_gains_on_each_side():
+    positions = pd.DataFrame({
+        "strike": [7500.0, 7690.0, 7710.0, 7900.0],
+        "delta_oi": [30_000.0, 99_000.0, 99_000.0, 20_000.0],
+    })
+    found = dealer.walls(positions, SPOT)
+    # 7690 and 7710 carry the largest gains but are inside 1% of spot: that
+    # is the at-the-money churn every session produces, not a wall.
+    assert found["put_wall"] == 7500.0
+    assert found["call_wall"] == 7900.0
+
+
+def test_a_side_with_no_gain_reports_no_wall_rather_than_the_nearest_strike():
+    positions = pd.DataFrame({"strike": [7500.0, 7900.0],
+                              "delta_oi": [30_000.0, -5_000.0]})
+    found = dealer.walls(positions, SPOT)
+    assert found["put_wall"] == 7500.0
+    assert found["call_wall"] is None
+
+
+def test_a_wall_label_never_overwrites_a_louder_verdict():
+    """The wall is the same fact told at a coarser resolution. A strike
+    already called Heavy Accumulation is not improved by renaming it."""
+    rows = dealer.positioning(
+        _strikes([{"strike": 7500, "pv": 100_000, "poi": 50_000}]),
+        _prior([{"strike": 7500, "poi": 0}]),
+        SPOT, strike_range_percent=5.0)
+    assert rows["verdict"].iloc[0] == "Heavy Accumulation"
