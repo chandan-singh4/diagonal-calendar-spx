@@ -328,24 +328,35 @@ def _column(frame: pd.DataFrame, name: str) -> pd.Series:
     return pd.Series(0.0, index=frame.index)
 
 
-def day_labels(market_open: bool) -> dict[str, str]:
-    """What to call each side of the positioning panel right now.
+def day_label(settled: str | None, today: date | None = None) -> str:
+    """What to call the session this panel is showing.
 
-    The data does not change when the bell rings; what it MEANS does. The same
-    volume column is a number still being written at 11:00 and a finished
-    total at 16:30, and the reader has no way to tell which unless the label
-    says so. So the word tracks the market:
+    The data does not change when the bell rings; what it means does. Tonight
+    the exchange publishes a new count, and the session these columns describe
+    stops being yesterday's and becomes today's — the same table, a different
+    word. So the heading is derived from the date rather than written into it.
 
-        market open   →  "Live"   — today's volume, still moving
-        market shut   →  "Today"  — today's volume, final
+        today's date   →  "Today"
+        the day before →  "Yesterday"
+        anything else  →  the day itself, because "yesterday" after a weekend
+                          or a holiday is simply false — a Monday reader is
+                          looking at Friday and should be told so
 
-    "Yesterday" never needs qualifying: that session is over whenever anyone
-    is looking at it.
-
-    Kept here rather than in the view because it is a rule about what the data
-    means, and the view should not be the only place that knows it.
+    Kept here rather than in the view because it is a claim about what the
+    data means, and the view should not be the only place that knows it.
     """
-    return {"prior": "Yesterday", "current": "Live" if market_open else "Today"}
+    if not settled:
+        return "the last completed session"
+    try:
+        day = date.fromisoformat(str(settled)[:10])
+    except ValueError:
+        return "the last completed session"
+    today = today or date.today()
+    if day == today:
+        return "Today"
+    if (today - day).days == 1:
+        return "Yesterday"
+    return f"{day:%a} {day.day} {day:%b}"
 
 
 def high_volume_cut(total_volume: pd.Series,
@@ -482,6 +493,8 @@ def positioning(today: pd.DataFrame, prior: pd.DataFrame, spot: float, *,
         work["tone"] = "quiet"
         return work.sort_values("strike", ignore_index=True)[list(VERDICT_COLUMNS)]
 
+    # prior_session rides along on the read and is not a positioning column;
+    # dropping it here keeps it out of the merge and out of the output frame.
     settled = pd.DataFrame({
         "strike": prior["strike"],
         "prior_oi": prior["call_oi"] + prior["put_oi"],

@@ -741,11 +741,13 @@ def _draw_oi_change(ctx: ViewContext, shown: pd.DataFrame,
         st.info("Open interest is unchanged from the previous session.")
         return
     st.plotly_chart(fig, use_container_width=True)
+    day = dealer.day_label(_settled_session(prior))
     st.caption(
         "· **What this shows:** how many option contracts were newly opened "
-        "or closed out at each price level since yesterday. **Open interest** "
+        f"or closed out at each price level during {day.lower()}. "
+        "**Open interest** "
         "is the count of contracts that exist; it is published once a day, "
-        "overnight. Today's count minus yesterday's is therefore real "
+        "overnight. The latest count minus the one before it is therefore real "
         "positions being put on (bars up) or taken off (bars down) — not the "
         "same contract being traded back and forth. Puts are drawn "
         "downward. **No data vendor sells this history; yours goes back to "
@@ -873,7 +875,7 @@ def _draw_dealer_structure(ctx: ViewContext, per_strike: pd.DataFrame,
     st.markdown(
         '<div class="sh"><span class="sh-ico">🏛️</span>'
         '<span class="sh-ttl">Dealer structure &amp; positioning</span>'
-        '<span class="sh-bdg">term structure · what stuck yesterday</span>'
+        '<span class="sh-bdg">term structure · what stuck last session</span>'
         '</div>',
         unsafe_allow_html=True,
     )
@@ -1145,31 +1147,22 @@ def _draw_volume_vs_oi(ctx: ViewContext, per_strike: pd.DataFrame,
         st.info("No strike within 2.5% of spot has traded yet today.")
         return
 
-    # Which DAY the row describes, chosen explicitly rather than mixed. The
-    # two are never blended: today's change in open interest does not exist
-    # yet, so the Today view says "tonight" in that column instead of
-    # borrowing yesterday's figure to fill it.
-    labels = dealer.day_labels(_market_is_open())
-    options = [labels["prior"], labels["current"]]
-    day = st.segmented_control(
-        "Day", options, default=options[0], key="gex_positioning_day",
-        selection_mode="single", label_visibility="collapsed",
-        help=f"{labels['prior']} is the finished session: volume, what stuck, "
-             f"and a verdict. {labels['current']} is this session's volume — "
-             "the exchange republishes the contract count after the close, so "
-             "today's verdict cannot exist before tonight.") or options[0]
-
-    st.markdown(
-        _positioning_table(rows, ctx.spx_price, day == labels["current"], day),
-        unsafe_allow_html=True)
-    _draw_worked_example(rows, per_strike, prior, ctx.session_date)
+    # ONE table, and the heading says which session it is. No control: there
+    # is only one session whose volume and change in open interest are both
+    # published, and offering a second view of it was a choice nobody needed
+    # to make. The word is derived from the date, so tonight's publish moves
+    # it from "Yesterday" to "Today" on its own.
+    day = dealer.day_label(_settled_session(prior))
+    st.markdown(_positioning_table(rows, ctx.spx_price, day),
+                unsafe_allow_html=True)
+    _draw_worked_example(rows, per_strike, prior, day)
 
     if rows["delta_oi"].isna().all():
         st.caption(
             "· **There is no previous day to compare against**, so the "
             "change column and every verdict are blank. The count of "
             "existing contracts is published only once a day, overnight — "
-            "without yesterday's number there is nothing to subtract from "
+            "without the previous day's number there is nothing to subtract from "
             "today's. Showing a zero instead would be a guess dressed up as "
             "a reading."
         )
@@ -1180,11 +1173,12 @@ def _draw_volume_vs_oi(ctx: ViewContext, per_strike: pd.DataFrame,
         "and over. Volume alone cannot tell those apart. The count of "
         "contracts that exist settles it, because it only counts what was "
         "still open at the close.  " "\n"
-        "· **This table is about YESTERDAY.** The exchange publishes that "
-        "count once a day, after the close, so the newest one available "
-        "covers yesterday's session. Today's trading has not been counted "
-        "anywhere yet — it arrives tonight. Both the change and the verdict "
-        "are therefore yesterday's, measured against yesterday's volume. "
+        f"· **This table is about {day.upper()}**, the last session the "
+        "exchange has published a contract count for. It publishes one a day, "
+        "after the close. Today's trading has not been counted anywhere yet "
+        "— it arrives tonight. Both the change and the verdict therefore "
+        f"belong to {day.lower()} and are measured against "
+        f"{day.lower()}'s own volume. "
         "**Today's own volume is deliberately not in this table**, because "
         "it must not be divided by this change: mixing the two days "
         "produced changes larger than the whole day's trading on 20% of "
@@ -1197,7 +1191,7 @@ def _draw_volume_vs_oi(ctx: ViewContext, per_strike: pd.DataFrame,
 
 
 def _draw_worked_example(rows: pd.DataFrame, today: pd.DataFrame,
-                        prior: pd.DataFrame, session_date: str) -> None:
+                        prior: pd.DataFrame, day: str) -> None:
     """The arithmetic behind the biggest row, in the numbers on screen.
 
     Regenerated on every render from the same frames the table was drawn
@@ -1231,10 +1225,11 @@ def _draw_worked_example(rows: pd.DataFrame, today: pd.DataFrame,
     with st.expander(f"Show me how the {ex['strike']:,.0f} row was calculated"):
         st.markdown(
             f'''<div class="worked">
-<p><b>First, the important bit: this row is about YESTERDAY, not today.</b>
+<p><b>First, the important bit: this row is about
+{day.upper()}, not today.</b>
 The exchange counts up how many contracts exist only once, after the close.
 So the newest count available right now was published last night, and it
-covers yesterday&rsquo;s trading. Today&rsquo;s trading has not been counted
+covers <b>{day.lower()}</b>. Today&rsquo;s trading has not been counted
 anywhere yet and will not be until tonight.</p>
 <p>Take the <b>{ex["strike"]:,.0f}</b> row &mdash; the biggest change on this
 screen.</p>
@@ -1253,7 +1248,7 @@ screen.</p>
 </table>
 <p>That <b>{ex["delta_oi"]:+,.0f}</b> is the &Delta;OI column.
 {direction[0].upper() + direction[1:]}.</p>
-<p><b>Now the volume it is measured against.</b> Yesterday
+<p><b>Now the volume it is measured against.</b> {day}
 {_compact(ex["total_volume"])} contracts changed hands here
 ({ex["call_volume"]:,.0f} calls, {ex["put_volume"]:,.0f} puts). Only
 {abs(ex["delta_oi"]):,.0f} of those left a lasting position behind &mdash;
@@ -1264,7 +1259,7 @@ before the bell.</p>
 {verdict}.</p>
 <p class="note"><b>Why today&rsquo;s volume is shown but never divided by.</b>
 {_compact(ex["today_volume"])} contracts have traded here today, and none of
-it has reached the contract count yet. Dividing yesterday&rsquo;s change by
+it has reached the contract count yet. Dividing that change by
 today&rsquo;s volume would be mixing two different days &mdash; across this
 record it produced a change bigger than the entire day&rsquo;s volume on
 <b>20% of contracts</b>, which cannot happen, since no more positions can be
@@ -1291,26 +1286,29 @@ def _positioning(_today: pd.DataFrame, _prior: pd.DataFrame, spot: float,
     return dealer.positioning(_today, _prior, spot)
 
 
-def _market_is_open() -> bool:
-    """Read from the same pure function the collector schedules on, so the
-    label cannot start disagreeing with whether data is actually arriving."""
-    now_et = datetime.now(UTC).astimezone(ZoneInfo(config.DISPLAY_TIMEZONE))
-    return core_session.session_of(now_et, config.MARKET_HOLIDAYS) is not None
+def _settled_session(prior: pd.DataFrame) -> str | None:
+    """The date the prior-session read actually landed on.
+
+    Carried by the query rather than assumed to be yesterday: after a weekend
+    or a holiday it is not, and a heading that says "yesterday" on a Monday
+    is simply wrong about the data underneath it.
+    """
+    if prior is None or prior.empty or "prior_session" not in prior.columns:
+        return None
+    return str(prior["prior_session"].iloc[0])
 
 
-def _positioning_table(rows: pd.DataFrame, spot: float, live: bool,
-                       day: str) -> str:
+def _positioning_table(rows: pd.DataFrame, spot: float, day: str) -> str:
     """The strike rows as ONE HTML block.
 
     One block rather than a Streamlit element per row: forty rows would be
     forty layout containers rebuilt on every rerun, and this is a table, not
     forty widgets.
     """
-    # ONE volume column, showing the day the reader picked. Both at once was
-    # two bars that must never be compared with each other, and it read as
-    # clutter — correctly, because that is what it was.
-    column = "total_volume" if live else "settled_volume"
-    widest_vol = float(rows[column].max()) or 1.0
+    # ONE volume column: the session the change in open interest came from.
+    # Today's volume was drawn beside it for a while and was too much to read
+    # — correctly, since the two must never be compared with each other.
+    widest_vol = float(rows["settled_volume"].max()) or 1.0
     deltas = rows["delta_oi"].abs()
     widest_delta = (float(deltas.max()) if deltas.notna().any() else 1.0) or 1.0
     nearest = (rows["strike"] - spot).abs().idxmin()
@@ -1318,26 +1316,17 @@ def _positioning_table(rows: pd.DataFrame, spot: float, live: bool,
     out = ['<div class="dealer-table">',
            '<div class="dealer-row dealer-head">'
            f'<div>Strike</div><div>Traded {day.lower()}</div>'
-           # The change column is NOT the same day as the volume column in
-           # the live view — it does not exist yet — so the header says when
-           # it will, rather than borrowing the word beside it.
-           + (f'<div>Net &Delta;OI (arrives tonight)</div>' if live
-              else f'<div>Net &Delta;OI ({day.lower()})</div>')
+           + f'<div>Net &Delta;OI ({day.lower()})</div>'
            + '<div class="c">Position verdict</div></div>']
 
     for i, r in rows.iterrows():
         atm = i == nearest
         strike = f"{r['strike']:,.0f}" + (" ATM" if atm else "")
-        shown_volume = float(r[column])
+        shown_volume = float(r["settled_volume"])
         vol_pct = 100.0 * shown_volume / widest_vol
 
-        # Today's change has not been published yet — it is not zero, not
-        # missing data, and not yesterday's. It is a number that does not
-        # exist until after the close, and the cell says exactly that.
-        delta = float("nan") if live else r["delta_oi"]
-        if live:
-            delta_bar, delta_text, delta_colour = 0.0, "tonight", "#41586e"
-        elif pd.isna(delta):
+        delta = r["delta_oi"]
+        if pd.isna(delta):
             delta_bar, delta_text, delta_colour = 0.0, "—", "#41586e"
         else:
             delta_bar = 100.0 * abs(float(delta)) / widest_delta
@@ -1345,9 +1334,8 @@ def _positioning_table(rows: pd.DataFrame, spot: float, live: bool,
             delta_colour = ("#10b981" if delta > 0
                             else "#ef4444" if delta < 0 else "#64748b")
 
-        tone = "quiet" if live else r["tone"]
-        verdict = "tonight" if live else r["verdict"]
-        bg, fg, edge = _TONE_BADGE.get(tone, _TONE_BADGE["quiet"])
+        verdict = r["verdict"]
+        bg, fg, edge = _TONE_BADGE.get(r["tone"], _TONE_BADGE["quiet"])
         badge = (f'<span class="dealer-badge" style="background:{bg};'
                  f'color:{fg};border:1px solid {edge};">{verdict}</span>')
 

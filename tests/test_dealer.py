@@ -20,6 +20,8 @@ pins that it does not.
 """
 from __future__ import annotations
 
+from datetime import date
+
 import pandas as pd
 import pytest
 
@@ -517,19 +519,29 @@ def test_there_is_nothing_to_explain_from_an_empty_board():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# day_labels — the word tracks the market
+# day_label — the heading is derived, not written
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_the_current_session_is_called_live_only_while_it_is():
-    """The data does not change when the bell rings; what it MEANS does. The
-    same volume column is a number still being written at 11:00 and a finished
-    total at 16:30, and nothing else on the row tells the two apart."""
-    assert dealer.day_labels(market_open=True)["current"] == "Live"
-    assert dealer.day_labels(market_open=False)["current"] == "Today"
+def test_the_heading_moves_from_yesterday_to_today_by_itself():
+    """The data does not change when the exchange publishes; what it means
+    does. Tonight's count makes this same table today's, so the word is
+    derived from the date rather than typed into the heading."""
+    friday = date(2026, 9, 4)
+    assert dealer.day_label("2026-09-04", friday) == "Today"
+    assert dealer.day_label("2026-09-03", friday) == "Yesterday"
 
 
-def test_yesterday_is_never_qualified():
-    """That session is over whichever side of the bell the reader is on, so a
-    label that changed would be describing the clock, not the data."""
-    assert dealer.day_labels(True)["prior"] == dealer.day_labels(False)["prior"]
-    assert dealer.day_labels(True)["prior"] == "Yesterday"
+def test_yesterday_is_not_said_when_it_would_be_false():
+    """A Monday reader is looking at Friday. Calling that "yesterday" is not a
+    rounding — it names the wrong session, and the reader has no way to tell
+    from the screen."""
+    monday = date(2026, 9, 7)
+    assert dealer.day_label("2026-09-04", monday) == "Fri 4 Sep"
+    assert dealer.day_label("2026-08-28", monday) == "Fri 28 Aug"
+
+
+def test_an_unknown_session_is_named_as_unknown():
+    """No prior session, or a date the read could not supply. Better a vague
+    phrase than a confident wrong day."""
+    assert dealer.day_label(None) == "the last completed session"
+    assert dealer.day_label("not-a-date") == "the last completed session"
