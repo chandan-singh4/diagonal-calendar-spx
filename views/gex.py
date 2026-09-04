@@ -857,6 +857,9 @@ _FLOW_NAME = {"call": "Call-dominated", "put": "Put-dominated",
               "balanced": "Balanced / straddle"}
 _SPOT_ACCENT = "#38bdf8"
 _VOL_BAR = "#8b5cf6"
+# Today's volume is context, not evidence: it is drawn, but muted, because
+# nothing on this panel is computed from it.
+_TODAY_BAR = "rgba(139,92,246,0.32)"
 
 _TONE_BADGE = {
     "accumulation": ("rgba(16,185,129,.15)", "#34d399", "rgba(16,185,129,.3)"),
@@ -873,7 +876,7 @@ def _draw_dealer_structure(ctx: ViewContext, per_strike: pd.DataFrame,
     st.markdown(
         '<div class="sh"><span class="sh-ico">🏛️</span>'
         '<span class="sh-ttl">Dealer structure &amp; positioning</span>'
-        '<span class="sh-bdg">term structure · churn vs commitment</span>'
+        '<span class="sh-bdg">term structure · what stuck yesterday</span>'
         '</div>',
         unsafe_allow_html=True,
     )
@@ -1153,13 +1156,22 @@ def _draw_volume_vs_oi(ctx: ViewContext, per_strike: pd.DataFrame,
         )
         return
     st.caption(
-        "· **Churn or commitment.** Volume alone cannot tell a position being "
-        "opened from one contract changing hands forty times — open interest "
-        "settles it, because it counts what still existed at the close. A "
-        "verdict is offered only where volume is in the top quarter of the "
-        "strikes shown; the rest is ordinary two-way trade, left blank rather "
-        "than labelled. **Open interest is published once, overnight**, so "
-        "these deltas do not move during the session."
+        "· **What this shows:** whether the trading at each price level left "
+        "real positions behind, or was the same contracts changing hands over "
+        "and over. Volume alone cannot tell those apart. The count of "
+        "contracts that exist settles it, because it only counts what was "
+        "still open at the close.  " "\n"
+        "· **This table is about YESTERDAY.** The exchange publishes that "
+        "count once a day, after the close, so the newest one available "
+        "covers yesterday's session. Today's trading has not been counted "
+        "anywhere yet — it arrives tonight. Both the change and the verdict "
+        "are therefore yesterday's, measured against yesterday's volume. "
+        "**Today's volume is shown in its own column for comparison and is "
+        "never divided by**; mixing the two days produced changes larger than "
+        "the whole day's trading on 20% of contracts, which cannot happen.  " "\n"
+        "· A verdict is offered only where that day's volume was in the "
+        "busiest quarter of the price levels shown. The rest is ordinary "
+        "two-way trade and is left blank rather than labelled."
     )
 
 
@@ -1189,43 +1201,55 @@ def _draw_worked_example(rows: pd.DataFrame, today: pd.DataFrame,
         f"{_compact(ex['cut'])} mark — the busiest quarter of the strikes "
         f"shown — so this strike is too quiet to call either way"
     )
-    direction = ("<b>more</b> contracts exist than yesterday, so positions "
-                 "were opened" if ex["delta_oi"] >= 0 else
-                 "<b>fewer</b> contracts exist than yesterday, so positions "
-                 "were closed")
+    direction = ("<b>more</b> contracts existed at the end of that day than "
+                 "the day before, so positions were opened"
+                 if ex["delta_oi"] >= 0 else
+                 "<b>fewer</b> contracts existed at the end of that day than "
+                 "the day before, so positions were closed")
 
     with st.expander(f"Show me how the {ex['strike']:,.0f} row was calculated"):
         st.markdown(
             f'''<div class="worked">
-<p>Take the <b>{ex["strike"]:,.0f}</b> row — the biggest change on this
-screen. Two numbers go into it, and one of them is from yesterday.</p>
+<p><b>First, the important bit: this row is about YESTERDAY, not today.</b>
+The exchange counts up how many contracts exist only once, after the close.
+So the newest count available right now was published last night, and it
+covers yesterday&rsquo;s trading. Today&rsquo;s trading has not been counted
+anywhere yet and will not be until tonight.</p>
+<p>Take the <b>{ex["strike"]:,.0f}</b> row &mdash; the biggest change on this
+screen.</p>
 <table>
   <tr><th></th><th>Calls</th><th>Puts</th><th>Total</th></tr>
-  <tr><td>Contracts open at yesterday&rsquo;s close</td>
+  <tr><td>Contracts open, count before last</td>
       <td>{ex["was_call"]:,.0f}</td><td>{ex["was_put"]:,.0f}</td>
       <td>{ex["was_total"]:,.0f}</td></tr>
-  <tr><td>Contracts open now</td>
+  <tr><td>Contracts open, latest count</td>
       <td>{ex["now_call"]:,.0f}</td><td>{ex["now_put"]:,.0f}</td>
       <td>{ex["now_total"]:,.0f}</td></tr>
-  <tr class="sum"><td>Change &mdash; today minus yesterday</td>
+  <tr class="sum"><td>Change</td>
       <td>{ex["now_call"] - ex["was_call"]:+,.0f}</td>
       <td>{ex["now_put"] - ex["was_put"]:+,.0f}</td>
       <td>{ex["delta_oi"]:+,.0f}</td></tr>
 </table>
-<p>That <b>{ex["delta_oi"]:+,.0f}</b> is the number in the &Delta;OI column.
+<p>That <b>{ex["delta_oi"]:+,.0f}</b> is the &Delta;OI column.
 {direction[0].upper() + direction[1:]}.</p>
-<p><b>Now the volume.</b> {_compact(ex["total_volume"])} contracts changed
-hands here today ({ex["call_volume"]:,.0f} calls, {ex["put_volume"]:,.0f}
-puts). But only {abs(ex["delta_oi"]):,.0f} of those left a lasting position
-behind &mdash; the rest was the same contracts being traded back and forth
-between people closing out the same day.</p>
+<p><b>Now the volume it is measured against.</b> Yesterday
+{_compact(ex["total_volume"])} contracts changed hands here
+({ex["call_volume"]:,.0f} calls, {ex["put_volume"]:,.0f} puts). Only
+{abs(ex["delta_oi"]):,.0f} of those left a lasting position behind &mdash;
+the rest was the same contracts being passed around by people who closed out
+before the bell.</p>
 <p><b>{abs(ex["delta_oi"]):,.0f} &divide; {ex["total_volume"]:,.0f} =
-{abs(ex["ratio"]):.0%}</b> of the day&rsquo;s trading stuck. And {reason}, so
+{abs(ex["ratio"]):.0%}</b> of that day&rsquo;s trading stuck. And {reason}, so
 {verdict}.</p>
-<p class="note">Both counts are end-of-day figures. The exchange publishes
-how many contracts exist only once, overnight, so this &Delta;OI column is
-fixed for the whole of {session_date} &mdash; only the volume half moves
-during the day. It is not a stale reading.</p>
+<p class="note"><b>Why today&rsquo;s volume is shown but never divided by.</b>
+{_compact(ex["today_volume"])} contracts have traded here today, and none of
+it has reached the contract count yet. Dividing yesterday&rsquo;s change by
+today&rsquo;s volume would be mixing two different days &mdash; across this
+record it produced a change bigger than the entire day&rsquo;s volume on
+<b>20% of contracts</b>, which cannot happen, since no more positions can be
+opened than were traded. Today&rsquo;s number is there for comparison only.
+<b>A live churn reading for today is not possible from this data</b>; it
+arrives tonight.</p>
 </div>''',
             unsafe_allow_html=True)
 
@@ -1249,21 +1273,25 @@ def _positioning_table(rows: pd.DataFrame, spot: float) -> str:
     forty layout containers rebuilt on every rerun, and this is a table, not
     forty widgets.
     """
-    widest_vol = float(rows["total_volume"].max()) or 1.0
+    widest_vol = float(rows["settled_volume"].max()) or 1.0
+    widest_today = float(rows["total_volume"].max()) or 1.0
     deltas = rows["delta_oi"].abs()
     widest_delta = (float(deltas.max()) if deltas.notna().any() else 1.0) or 1.0
     nearest = (rows["strike"] - spot).abs().idxmin()
 
     out = ['<div class="dealer-table">',
            '<div class="dealer-row dealer-head">'
-           '<div>Strike</div><div>Session volume</div>'
-           '<div>Net &Delta;OI (overnight)</div>'
+           '<div>Strike</div><div>Traded yesterday</div>'
+           '<div>Net &Delta;OI (yesterday)</div>'
+           '<div>Traded today</div>'
            '<div class="c">Position verdict</div></div>']
 
     for i, r in rows.iterrows():
         atm = i == nearest
         strike = f"{r['strike']:,.0f}" + (" ATM" if atm else "")
-        vol_pct = 100.0 * float(r["total_volume"]) / widest_vol
+        settled = float(r["settled_volume"])
+        vol_pct = 100.0 * settled / widest_vol
+        today_pct = 100.0 * float(r["total_volume"]) / widest_today
 
         delta = r["delta_oi"]
         if pd.isna(delta):
@@ -1284,13 +1312,18 @@ def _positioning_table(rows: pd.DataFrame, spot: float) -> str:
             f'<div class="dealer-bar"><div class="dealer-track">'
             f'<div class="dealer-fill" style="width:{vol_pct:.1f}%;'
             f'background:{_VOL_BAR};"></div></div>'
-            f'<div class="dealer-val">{_fmt_money(r["total_volume"])}</div>'
+            f'<div class="dealer-val">{_fmt_money(settled)}</div>'
             f'</div>'
             f'<div class="dealer-bar"><div class="dealer-track">'
             f'<div class="dealer-fill" style="width:{delta_bar:.1f}%;'
             f'background:{delta_colour};"></div></div>'
             f'<div class="dealer-val" style="color:{delta_colour};">'
             f'{delta_text}</div></div>'
+            f'<div class="dealer-bar today"><div class="dealer-track">'
+            f'<div class="dealer-fill" style="width:{today_pct:.1f}%;'
+            f'background:{_TODAY_BAR};"></div></div>'
+            f'<div class="dealer-val">{_fmt_money(r["total_volume"])}</div>'
+            f'</div>'
             f'<div class="c">{badge}</div></div>'
         )
     out.append("</div>")

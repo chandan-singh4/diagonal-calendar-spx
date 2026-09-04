@@ -93,8 +93,12 @@ BUBBLE_COLUMNS = ("expiry", "expiry_label", "expiry_order", "strike",
                   "call_volume", "put_volume", "total_volume", "pcr",
                   "notional", "flow", "radius")
 
+# `total_volume` is TODAY's trading, shown for context. `settled_volume` is
+# the PRIOR session's, and it is the one every verdict is computed against —
+# see positioning() for why they are not interchangeable.
 VERDICT_COLUMNS = ("strike", "call_volume", "put_volume", "total_volume",
-                   "delta_oi", "verdict", "tone")
+                   "settled_call_volume", "settled_put_volume",
+                   "settled_volume", "delta_oi", "verdict", "tone")
 
 
 def _blank(columns) -> pd.DataFrame:
@@ -312,6 +316,18 @@ def classify(volume: float, delta_oi: float, *, high_volume: bool,
     return "—", "quiet"
 
 
+def _column(frame: pd.DataFrame, name: str) -> pd.Series:
+    """A column, or zeros shaped like the frame when it is not there.
+
+    The prior-session read gained its volume columns after this module was
+    written, and a caller holding an older frame gets zero volume — no
+    verdict — rather than a KeyError.
+    """
+    if name in frame.columns:
+        return pd.to_numeric(frame[name], errors="coerce").fillna(0.0)
+    return pd.Series(0.0, index=frame.index)
+
+
 def high_volume_cut(total_volume: pd.Series,
                     percentile: float = HIGH_VOLUME_PERCENTILE) -> float:
     """The volume a strike must reach before it is given a verdict.
@@ -363,17 +379,20 @@ def worked_example(rows: pd.DataFrame, today: pd.DataFrame,
 
     now_call, now_put = _at(today, "call_oi"), _at(today, "put_oi")
     was_call, was_put = _at(prior, "call_oi"), _at(prior, "put_oi")
-    volume = float(pick["total_volume"])
-    cut = high_volume_cut(rows["total_volume"], percentile)
+    # The SETTLED volume — the session the change came from. Explaining the
+    # verdict with today's volume would show a division the code never did.
+    volume = float(pick["settled_volume"])
+    cut = high_volume_cut(rows["settled_volume"], percentile)
 
     return {
         "strike": strike,
         "was_call": was_call, "was_put": was_put, "was_total": was_call + was_put,
         "now_call": now_call, "now_put": now_put, "now_total": now_call + now_put,
         "delta_oi": float(pick["delta_oi"]),
-        "call_volume": float(pick["call_volume"]),
-        "put_volume": float(pick["put_volume"]),
+        "call_volume": float(pick["settled_call_volume"]),
+        "put_volume": float(pick["settled_put_volume"]),
         "total_volume": volume,
+        "today_volume": float(pick["total_volume"]),
         "ratio": (float(pick["delta_oi"]) / volume) if volume else float("nan"),
         "cut": cut,
         "high_volume": volume >= cut and volume > 0,
@@ -392,11 +411,28 @@ def positioning(today: pd.DataFrame, prior: pd.DataFrame, spot: float, *,
                 wall_moneyness: float = WALL_MONEYNESS) -> pd.DataFrame:
     """Volume, overnight open-interest change and a verdict, per strike.
 
-    `today` is core.gex.by_strike's frame — it already carries call and put
-    volume and open interest per strike — and `prior` is the previous
-    session's open interest. The two must come from DIFFERENT sessions: open
-    interest does not move intraday, so differencing within one day returns
-    zeros and every verdict collapses to churn.
+    **THE VERDICT IS ABOUT YESTERDAY, AND IT HAS TO BE.** Open interest is
+    republished once, overnight. Today's published figure minus yesterday's
+    is therefore what was opened or closed during YESTERDAY's session, not
+    today's — today's trading has not been counted anywhere yet and will not
+    be until tonight. So the ratio behind every verdict divides that change
+    by the PRIOR session's volume, the trading it actually came from.
+
+    Measured on this record: against today's volume, 20.0% of contracts
+    showed an open-interest change larger than everything that traded today —
+    arithmetically impossible, because no more contracts can be opened than
+    changed hands. Against the prior session's own volume, 4.9%. The earlier
+    version of this function divided by today's volume and was wrong.
+
+    Today's volume is still carried, as `total_volume`, because it is worth
+    seeing beside the verdict — but it is context, not evidence. A live
+    churn reading for TODAY cannot be had from this data at all, and the
+    panel says so rather than approximating one.
+
+    `today` is core.gex.by_strike's frame and `prior` is the previous
+    session's open interest AND volume. The two must come from DIFFERENT
+    sessions: open interest does not move intraday, so differencing within
+    one day returns zeros and every verdict collapses to churn.
 
     The high-volume cut is a percentile of the strikes IN RANGE, not of the
     whole chain. Taken over the far wings it would sit near zero and mark the
@@ -418,25 +454,37 @@ def positioning(today: pd.DataFrame, prior: pd.DataFrame, spot: float, *,
     work["total_volume"] = work["call_volume"] + work["put_volume"]
 
     if prior is None or prior.empty:
+        work["settled_call_volume"] = float("nan")
+        work["settled_put_volume"] = float("nan")
+        work["settled_volume"] = float("nan")
         work["delta_oi"] = float("nan")
         work["verdict"] = "—"
         work["tone"] = "quiet"
         return work.sort_values("strike", ignore_index=True)[list(VERDICT_COLUMNS)]
 
-    prior_total = prior[["strike", "call_oi", "put_oi"]].assign(
-        prior_oi=lambda d: d["call_oi"] + d["put_oi"])[["strike", "prior_oi"]]
-    merged = work.merge(prior_total, on="strike", how="left")
+    settled = pd.DataFrame({
+        "strike": prior["strike"],
+        "prior_oi": prior["call_oi"] + prior["put_oi"],
+        "settled_call_volume": _column(prior, "call_volume"),
+        "settled_put_volume": _column(prior, "put_volume"),
+    })
+    merged = work.merge(settled, on="strike", how="left")
     merged["prior_oi"] = merged["prior_oi"].fillna(0.0)
     merged["delta_oi"] = merged["call_oi"] + merged["put_oi"] - merged["prior_oi"]
+    merged["settled_call_volume"] = merged["settled_call_volume"].fillna(0.0)
+    merged["settled_put_volume"] = merged["settled_put_volume"].fillna(0.0)
+    merged["settled_volume"] = (merged["settled_call_volume"]
+                                + merged["settled_put_volume"])
 
-    cut = high_volume_cut(merged["total_volume"], high_volume_percentile)
+    # Over the volume the CHANGE came from, for the same reason the ratio is.
+    cut = high_volume_cut(merged["settled_volume"], high_volume_percentile)
 
     verdicts = [
         classify(v, d, high_volume=(v >= cut and v > 0),
                  churn_ratio=churn_ratio,
                  accumulation_ratio=accumulation_ratio,
                  liquidation_ratio=liquidation_ratio)
-        for v, d in zip(merged["total_volume"], merged["delta_oi"])
+        for v, d in zip(merged["settled_volume"], merged["delta_oi"])
     ]
     merged["verdict"] = [v for v, _ in verdicts]
     merged["tone"] = [t for _, t in verdicts]

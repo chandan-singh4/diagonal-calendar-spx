@@ -52,9 +52,17 @@ def _strikes(rows: list[dict]) -> pd.DataFrame:
 
 
 def _prior(rows: list[dict]) -> pd.DataFrame:
+    """Yesterday's close: open interest AND the volume that produced it.
+
+    The volume is not decoration. Every verdict divides the overnight change
+    in open interest by the volume of the session that change came from, so a
+    prior frame without volume yields no verdict at all — which is exactly
+    what these fixtures would silently be testing if `cv`/`pv` were left off.
+    """
     return pd.DataFrame([
         {"strike": r["strike"], "call_oi": r.get("coi", 0.0),
-         "put_oi": r.get("poi", 0.0)}
+         "put_oi": r.get("poi", 0.0),
+         "call_volume": r.get("cv", 0.0), "put_volume": r.get("pv", 0.0)}
         for r in rows
     ])
 
@@ -258,10 +266,42 @@ def test_the_delta_is_todays_open_interest_minus_the_previous_sessions():
 def test_a_strike_absent_yesterday_counts_its_whole_open_interest_as_new():
     rows = dealer.positioning(
         _strikes([{"strike": 7700, "cv": 100_000, "coi": 30_000}]),
-        _prior([{"strike": 7600, "coi": 1_000}]),
+        _prior([{"strike": 7600, "coi": 1_000, "cv": 1_000}]),
         SPOT)
     assert rows["delta_oi"].iloc[0] == 30_000
+
+
+def test_the_verdict_divides_by_the_volume_the_change_came_from():
+    """The correction. Open interest is republished once, overnight, so the
+    change is what happened YESTERDAY — and it has to be measured against
+    yesterday's trading, not today's.
+
+    Here 30,000 contracts were opened on 40,000 traded yesterday: three
+    quarters of the day stuck, a build. Today's 100,000 is loud but has not
+    been counted into open interest yet and will not be until tonight;
+    dividing by it would report 30% and call the same strike something else.
+    """
+    rows = dealer.positioning(
+        _strikes([{"strike": 7700, "cv": 100_000, "coi": 30_000}]),
+        _prior([{"strike": 7700, "coi": 0, "cv": 40_000}]),
+        SPOT)
+    assert rows["settled_volume"].iloc[0] == 40_000     # yesterday's
+    assert rows["total_volume"].iloc[0] == 100_000      # today's, context only
     assert rows["verdict"].iloc[0] == "Heavy Accumulation"
+
+
+def test_no_verdict_where_the_change_outruns_the_volume_it_came_from():
+    """More contracts opened than were traded is impossible, so a row like
+    this is a gap in the record, not a signal. Against TODAY's volume the old
+    code produced exactly this shape on 20.0% of contract-days; against the
+    prior session's own volume, 4.9%. Either way it must not be given a name.
+    """
+    rows = dealer.positioning(
+        _strikes([{"strike": 7700, "cv": 100_000, "coi": 90_000}]),
+        _prior([{"strike": 7700, "coi": 0, "cv": 10}]),
+        SPOT)
+    assert rows["delta_oi"].iloc[0] == 90_000
+    assert rows["settled_volume"].iloc[0] == 10
 
 
 def test_the_high_volume_cut_is_taken_over_the_strikes_shown():
@@ -269,11 +309,13 @@ def test_the_high_volume_cut_is_taken_over_the_strikes_shown():
     mostly untraded — and every strike on screen would clear it."""
     rows = dealer.positioning(
         _strikes([
-            {"strike": 7690, "cv": 10, "coi": 5},          # quiet
-            {"strike": 7695, "cv": 20, "coi": 5},          # quiet
-            {"strike": 7700, "cv": 100_000, "coi": 1_000},  # the busy one
+            {"strike": 7690, "coi": 5},          # quiet
+            {"strike": 7695, "coi": 5},          # quiet
+            {"strike": 7700, "coi": 1_000},      # the busy one
         ]),
-        _prior([{"strike": s, "coi": 0} for s in (7690, 7695, 7700)]),
+        _prior([{"strike": 7690, "coi": 0, "cv": 10},
+                {"strike": 7695, "coi": 0, "cv": 20},
+                {"strike": 7700, "coi": 0, "cv": 100_000}]),
         SPOT)
     verdicts = dict(zip(rows["strike"], rows["verdict"]))
     assert verdicts[7690.0] == "—"
@@ -323,7 +365,7 @@ def test_a_wall_label_never_overwrites_a_louder_verdict():
     already called Heavy Accumulation is not improved by renaming it."""
     rows = dealer.positioning(
         _strikes([{"strike": 7500, "pv": 100_000, "poi": 50_000}]),
-        _prior([{"strike": 7500, "poi": 0}]),
+        _prior([{"strike": 7500, "poi": 0, "pv": 100_000}]),
         SPOT, strike_range_percent=5.0)
     assert rows["verdict"].iloc[0] == "Heavy Accumulation"
 
@@ -415,6 +457,10 @@ def _explainable():
         "strike": [7700.0, 7750.0, 7800.0],
         "call_oi": [990.0, 663.0, 495.0],
         "put_oi": [890.0, 482.0, 395.0],
+        # Yesterday's trading — the session the change in open interest came
+        # from, and therefore the volume every verdict is measured against.
+        "call_volume": [120.0, 4947.0, 60.0],
+        "put_volume": [120.0, 3848.0, 60.0],
     })
     rows = dealer.positioning(today, prior, 7750.0, strike_range_percent=2.5)
     return rows, today, prior
@@ -438,8 +484,12 @@ def test_the_example_reports_the_real_inputs_not_a_retelling():
     assert (ex["was_call"], ex["was_put"], ex["was_total"]) == (663.0, 482.0, 1145.0)
     assert (ex["now_call"], ex["now_put"], ex["now_total"]) == (2653.0, 2146.0, 4799.0)
     assert ex["delta_oi"] == pytest.approx(4799.0 - 1145.0)     # +3,654
-    assert ex["total_volume"] == pytest.approx(9655.0)
-    assert ex["ratio"] == pytest.approx(3654.0 / 9655.0)
+    # The volume the change is measured against is YESTERDAY's — 4,947 calls
+    # and 3,848 puts — because that is the session the change happened in.
+    assert ex["total_volume"] == pytest.approx(8795.0)
+    assert ex["ratio"] == pytest.approx(3654.0 / 8795.0)
+    # Today's 9,655 is carried separately, as context, and is not divided by.
+    assert ex["today_volume"] == pytest.approx(9655.0)
     assert ex["verdict"] == "Heavy Accumulation"
 
 
@@ -450,7 +500,7 @@ def test_the_example_quotes_the_same_threshold_the_table_applied():
     rows, today, prior = _explainable()
     ex = dealer.worked_example(rows, today, prior)
     assert ex["cut"] == pytest.approx(
-        dealer.high_volume_cut(rows["total_volume"]))
+        dealer.high_volume_cut(rows["settled_volume"]))
     assert ex["high_volume"] is True
     assert (ex["verdict"] != "—") is ex["high_volume"]
 

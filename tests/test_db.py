@@ -1961,3 +1961,19 @@ def test_prior_session_oi_is_empty_on_the_first_day_of_collection(temp_db):
     sid = add_snapshot(temp_db, f"{today} 14:00:00")
     db.insert_option_rows(temp_db, [opt(sid, FRONT, CALL_STRIKE, "C")])
     assert db.get_prior_session_oi(temp_db, today) == []
+
+
+def test_prior_session_oi_returns_that_session_s_volume_too(temp_db):
+    """Not an extra column — the half that makes the other half readable.
+
+    The overnight change in open interest is what was opened during the PRIOR
+    session, so the only volume it can honestly be divided by is that same
+    session's. Over 20,358 contract-days of this record, dividing by today's
+    volume instead produced a change larger than the entire day's trading on
+    20.0% of contracts, which cannot happen: no more positions can be opened
+    than were traded. Against the prior session's own volume, 4.9%."""
+    session = _gex_seed(temp_db)
+    rows = db.get_prior_session_oi(temp_db, session)
+    call = next(r for r in rows if r["strike"] == CALL_STRIKE)
+    assert "call_volume" in call.keys() and "put_volume" in call.keys()
+    assert call["call_volume"] > 0
