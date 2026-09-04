@@ -85,8 +85,18 @@ h3 {
 }
 p, li { font-family:var(--sans) !important; color:var(--text-2); font-size:.875rem; }
 hr { display:none !important; }
+/* Captions are where every caveat on this dashboard is written -- what a
+   number assumes, when it goes blank, what it cannot tell you. At --text-3
+   on --bg they measured 1.97:1 against the background, well under the
+   4.5:1 that ordinary body text is expected to reach, and a warning nobody
+   can read is not a warning. Raised to --text-2, which measures 5.77:1, and to a size
+   that does not need leaning in for.                                                    */
 [data-testid="stCaptionContainer"] p, .stCaption p, .stCaption {
-  color:var(--text-3) !important; font-size:.68rem !important;
+  color:var(--text-2) !important; font-size:.76rem !important;
+  line-height:1.55 !important;
+}
+[data-testid="stCaptionContainer"] strong, .stCaption strong {
+  color:var(--text) !important; font-weight:600 !important;
 }
 
 /* ── Tabs — main navigation ───────────────────────────────────────────── */

@@ -590,11 +590,12 @@ def _draw_cumulative_volume(intraday: pd.DataFrame, shown: pd.DataFrame,
         return
     st.plotly_chart(fig, use_container_width=True)
     st.caption(
-        "· **Cumulative net volume** — calls traded minus puts traded at each "
-        "strike, as the session accumulates. Above zero the strike is being "
-        "bought on the call side, below it on the put side; a line that "
-        "flattens has stopped attracting flow. The eight busiest strikes of "
-        "the displayed window."
+        "· **What this shows:** calls traded minus puts traded at each price "
+        "level, adding up as the day goes on. A line **above zero** means "
+        "more people are buying calls there (bets the market rises); "
+        "**below zero**, more puts (bets it falls, or protection). A line "
+        "that goes flat means trading at that price has stopped. Only the "
+        "eight busiest price levels are drawn, or the chart is unreadable."
     )
 
 
@@ -666,10 +667,13 @@ def _draw_zero_dte_flow(ctx: ViewContext, span: list) -> None:
     ])
     st.plotly_chart(fig, use_container_width=True)
     st.caption(
-        "· **0DTE GEX flow** — one line per key strike, for contracts expiring "
-        "today. Gamma is at its most violent here: these positions are hours "
-        "from settlement, so a strike's exposure can invert in minutes. Key "
-        "levels are the strikes carrying the largest exposure right now."
+        "· **What this shows:** the same gamma figure as the charts above, "
+        "but only for options that **expire today**, and traced through the "
+        "day instead of frozen at this moment. These are the fastest-moving "
+        "options on the board — they are worthless or settled by this "
+        "afternoon — so a price level can swing from one side to the other "
+        "in minutes. **Key levels** are simply the price levels with the most "
+        "gamma sitting on them right now."
     )
 
 
@@ -729,11 +733,14 @@ def _draw_oi_change(ctx: ViewContext, shown: pd.DataFrame) -> None:
         return
     st.plotly_chart(fig, use_container_width=True)
     st.caption(
-        "· **New positioning.** Open interest is republished once a day, "
-        "overnight, so today's figure minus yesterday's is contracts actually "
-        "opened (up) or closed (down) — the closest this data comes to a "
-        "direct reading of what was put on. Puts are drawn downward. "
-        "**No vendor sells this history; yours goes back to 23 June.**"
+        "· **What this shows:** how many option contracts were newly opened "
+        "or closed out at each price level since yesterday. **Open interest** "
+        "is the count of contracts that exist; it is published once a day, "
+        "overnight. Today's count minus yesterday's is therefore real "
+        "positions being put on (bars up) or taken off (bars down) — not the "
+        "same contract being traded back and forth. Puts are drawn "
+        "downward. **No data vendor sells this history; yours goes back to "
+        "23 June because this dashboard has been recording it.**"
     )
 
 
@@ -776,41 +783,47 @@ def _draw_caption(totals: dict, expiry: str | None,
     """
     lo, hi = per_strike["strike"].min(), per_strike["strike"].max()
     lines = [
-        "**Violet shading is the day's put volume, blue is call volume**, on "
-        "the right-hand axis; grey is where they overlap. Puts are drawn "
-        "downward in the lower panels, and the hover shows the true count.",
-        "**Ratio and sentiment cover the displayed bars only**, so they change "
-        "with the strike window — sentiment is the *percentage of shown "
-        "strikes with positive net gamma*, and the ratio is the larger side "
-        "divided by the smaller, signed by which one wins. These are Option "
-        "Alpha's published definitions, so the figures should agree with "
-        "theirs on the same chain.",
-        "**Gamma flip is blank when the crossing lands within a tenth of "
-        "either end of the collected strikes.** The running total starts at "
-        "the lowest strike held, so a chain that stops before the far puts do "
-        "reports a flip pushed against its own boundary rather than a real "
-        "one. That is common on an 0DTE selection, where collection reaches "
-        "about ±100 points.",
-        "**Gamma exposure assumes dealers are long calls and short puts.** "
-        "That is the standard convention and it is an assumption, not data — "
-        "nobody publishes dealer inventory. Every figure here inherits it, "
-        "and the record now holds enough history to test it.",
-        f"**The chain is recorded between {lo:,.0f} and {hi:,.0f}** — the "
-        f"collector keeps ±300 points around spot. Gamma at that edge measured "
-        f"0.2% of its at-the-money value, so the cost is small, but strikes "
-        f"beyond it are absent rather than empty.",
+        "**Reading the shading:** the faint violet is how many puts traded "
+        "today at each price level, the faint blue is calls; grey is where "
+        "they overlap. It is measured on the right-hand scale, not the left. "
+        "In the two lower panels puts are drawn downward so the two sides can "
+        "be compared at a glance — hovering shows the real, positive count.",
+        "**Ratio and Sentiment describe only the bars you can see**, so they "
+        "move if the strike range changes. Sentiment is the percentage of "
+        "the price levels shown that have positive gamma. Ratio is the "
+        "bigger side divided by the smaller, with the sign showing which one "
+        "won. These are Option Alpha's published definitions, so the numbers "
+        "should match theirs on the same data.",
+        "**Gamma flip is left blank when the crossing point lands near "
+        "either edge of the data.** The running total starts at the lowest "
+        "price level recorded, so if the record stops before the far "
+        "downside options do, the crossing gets pushed up against that edge "
+        "and is an artefact of where collection stopped, not a real level. "
+        "A blank is the honest answer. This happens often on a same-day "
+        "expiry, where only about ±100 points are collected.",
+        "**Every gamma number here rests on one assumption: that the market "
+        "makers on the other side are holding calls and owe puts.** That is "
+        "the standard convention, but it is an assumption, not measured "
+        "data — nobody publishes what dealers actually hold. If it is wrong, "
+        "every figure on this tab has the wrong sign.",
+        f"**Only prices between {lo:,.0f} and {hi:,.0f} are recorded** — "
+        f"about ±300 points either side of where SPX is now. Options further "
+        f"out are missing from these totals rather than being zero. At that "
+        f"edge they carried 0.2% of the gamma of an at-the-money option, so "
+        f"the amount left out is small.",
     ]
     if view == "Delta Exposure":
         lines.insert(1, (
-            "**Delta exposure carries no dealer sign, unlike gamma.** A put's "
-            "delta is already negative, so imposing the convention again would "
-            "double-count it. This panel is the chain's own delta — a "
-            "description of what is listed, needing no assumption to be true."
+            "**Delta Exposure does not use the dealer assumption above.** A "
+            "put's delta is already a negative number, so applying the "
+            "convention again would count it twice. This panel is simply "
+            "what the option chain itself reports."
         ))
     if expiry is None:
         lines.append(
-            "**All expiries are summed.** Gamma concentrates in the nearest "
-            "ones, so near-dated contracts dominate this view."
+            "**All expiry dates are added together here.** Options expiring "
+            "soonest carry far more gamma than distant ones, so this view is "
+            "dominated by the nearest few dates."
         )
     st.caption("  \n".join(f"· {line}" for line in lines))
 
@@ -905,12 +918,14 @@ def _draw_net_flow(ctx: ViewContext) -> None:
     st.plotly_chart(_net_flow_figure(rows, ctx.spx_price, ctx.snapshot_id, scope),
                     use_container_width=True)
     st.caption(
-        "· **Cumulative net flow** — net GEX at each strike now, MINUS the "
-        "same figure at the first snapshot of the session. The charts above "
-        "show the board, which is mostly yesterday's positions; this shows "
-        "what today changed. A strike can carry huge exposure and have seen "
-        "no trade at all. Each snapshot is scaled by its own spot price, so "
-        "the index's move is not folded into the figure."
+        "· **What this shows:** how much the gamma at each price level has "
+        "**changed since this morning**. Green to the right means gamma was "
+        "added there today; red to the left means it was taken away. "
+        "**Why it is separate from the charts above:** those show everything "
+        "sitting on the board, and most of that was put on days or weeks "
+        "ago. A price level can be piled high and have seen no trading at "
+        "all today. This is the only chart here that shows what *today* did. "
+        "The dotted line is the current SPX price."
     )
 
 
@@ -1019,20 +1034,26 @@ def _draw_term_bubbles(ctx: ViewContext) -> None:
     expiries_all = points["expiry_label"].nunique()
     expiries_drawn = drawn["expiry_label"].nunique()
     # Never claim "every expiry" when the guard has trimmed some off the end.
-    columns = (f"Every collected expiry ({expiries_drawn})"
+    columns = (f"every expiry date on record ({expiries_drawn}) is drawn"
                if expiries_drawn == expiries_all
-               else f"The {expiries_drawn} nearest expiries "
-                    f"of {expiries_all} collected")
+               else f"the {expiries_drawn} nearest expiry dates are drawn, "
+                    f"out of {expiries_all} on record")
     st.caption(
-        f"· **Expiration vs strike.** {columns}, and within each the "
-        f"**{dealer.TOP_STRIKES_PER_EXPIRY} busiest strikes** — the 4% band "
-        "holds about 120 strikes and drawing them all fuses each column into "
-        "a solid bar. Bubble AREA is contracts traded, square root rather than "
-        "linear because 0DTE trades many times what the monthly does at the "
-        "same strike. Colour is the put/call volume ratio: green under 0.7, "
-        "red over 1.3, amber between, which usually means straddles rather "
-        "than a standoff. The Expiry control above does not filter this "
-        "panel — the comparison BETWEEN expiries is the point."
+        "· **What this shows:** where today's trading actually happened — "
+        "across both **when the option expires** (bottom) and **what price "
+        "it is betting on** (side). **Bigger bubble = more contracts "
+        "traded.** **Green** means mostly calls were traded there (upside "
+        "bets), **red** mostly puts (downside bets or protection), and "
+        "**amber** means roughly equal amounts of both, which usually means "
+        "people are betting on a big move without picking a direction. The "
+        "blue dashed line is the current SPX price.  " "\n"
+        f"· **What is left out:** {columns}, and within each only the "
+        f"**{dealer.TOP_STRIKES_PER_EXPIRY} busiest price levels**. There are "
+        "about 120 price levels in range; drawing them all turns each column "
+        "into one solid blob. Bubble size grows more slowly than the volume "
+        "it represents, or a quiet expiry would shrink to a dot next to "
+        "today's. **The Expiry box at the top does not change this chart** — "
+        "comparing the different expiry dates is the whole point of it."
     )
 
 
@@ -1108,10 +1129,12 @@ def _draw_volume_vs_oi(ctx: ViewContext, per_strike: pd.DataFrame) -> None:
 
     if rows["delta_oi"].isna().all():
         st.caption(
-            "· **No previous session to compare against**, so the change "
-            "column and every verdict are blank. Open interest is republished "
-            "once a day: without yesterday there is nothing to subtract, and "
-            "treating the unknown as zero would report the board as churn."
+            "· **There is no previous day to compare against**, so the "
+            "change column and every verdict are blank. The count of "
+            "existing contracts is published only once a day, overnight — "
+            "without yesterday's number there is nothing to subtract from "
+            "today's. Showing a zero instead would be a guess dressed up as "
+            "a reading."
         )
         return
     st.caption(
