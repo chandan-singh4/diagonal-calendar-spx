@@ -179,16 +179,23 @@ def _stepper(label: str, options: list[str], key: str) -> str:
     with st.container(key=f"step_{key}"):
         st.markdown(f'<div class="step-lbl">{label}</div>',
                     unsafe_allow_html=True)
-        back, name, fwd = st.columns([1, 6, 1], gap="small",
+        back, name, fwd = st.columns([1, 4, 1], gap="small",
                                      vertical_alignment="center")
+        # The arrows are read BEFORE the value is drawn, so a click takes
+        # effect in the run it happened in. The obvious version — record the
+        # new index and call st.rerun() so the label refreshes — costs a
+        # SECOND full pass over app.py for every click, which on this page
+        # measured 3.8s of nothing happening. tests/test_layering.py pins
+        # that st.rerun() does not come back here.
         with back:
-            if st.button("◀", key=f"{key}_prev"):
-                st.session_state[key] = (idx - 1) % len(options)
-                st.rerun()
+            stepped_back = st.button("◀", key=f"{key}_prev")
         with fwd:
-            if st.button("▶", key=f"{key}_next"):
-                st.session_state[key] = (idx + 1) % len(options)
-                st.rerun()
+            stepped_fwd = st.button("▶", key=f"{key}_next")
+        if stepped_back:
+            idx = (idx - 1) % len(options)
+        elif stepped_fwd:
+            idx = (idx + 1) % len(options)
+        st.session_state[key] = idx
         with name:
             st.markdown(f'<div class="step-val">{options[idx]}</div>',
                         unsafe_allow_html=True)
@@ -260,20 +267,23 @@ def render(ctx: ViewContext) -> None:
     # here would be a second thing to keep in step with core/contract.py.
     dte_by_expiry = chain.groupby("expiry")["dte"].first().astype(int).to_dict()
 
-    c1, c3, c4 = st.columns([2, 1, 1], vertical_alignment="bottom")
-    with c1:
-        choice = st.selectbox(
-            "Expiry", ["All expiries", *expiries], key="gex_expiry",
-            format_func=lambda e: (e if e == "All expiries"
-                                   else fmt.exp_label(e, dte_by_expiry)),
-            help="All expiries is the whole-chain figure most GEX commentary "
-                 "refers to. The third Friday appears twice because SPX lists "
-                 "two contracts for it.",
-        )
-    with c3:
-        view = _stepper("View", _VIEWS, "gex_view_idx")
-    with c4:
-        side_mode = _stepper("OI / Volume", _SIDE_MODES, "gex_side_idx")
+    # Capped to the same width as the charts below, so the control row
+    # and the panels it drives share one left and right edge.
+    with st.container(key="gexcontrols"):
+        c1, c3, c4 = st.columns([2, 1, 1], vertical_alignment="bottom")
+        with c1:
+            choice = st.selectbox(
+                "Expiry", ["All expiries", *expiries], key="gex_expiry",
+                format_func=lambda e: (e if e == "All expiries"
+                                       else fmt.exp_label(e, dte_by_expiry)),
+                help="All expiries is the whole-chain figure most GEX commentary "
+                     "refers to. The third Friday appears twice because SPX lists "
+                     "two contracts for it.",
+            )
+        with c3:
+            view = _stepper("View", _VIEWS, "gex_view_idx")
+        with c4:
+            side_mode = _stepper("OI / Volume", _SIDE_MODES, "gex_side_idx")
 
     expiry = None if choice == "All expiries" else choice
     per_strike = gex.by_strike(chain, ctx.spx_price, expiry=expiry)
@@ -290,13 +300,17 @@ def render(ctx: ViewContext) -> None:
     totals = gex.summary(shown)          # displayed bars, per the documentation
 
     _draw_headline(totals)
-    _draw_strike_panels(ctx, shown, view, expiry, side_mode == "Stacked")
-    _gap()
-    _draw_cumulative_curve(ctx, shown)
-    _draw_caption(totals, expiry, per_strike, view)
+    # Wrapped so the stylesheet can cap the width. Full-bleed on a wide
+    # monitor stretches a ~450px panel across ~1700px: the bars turn into
+    # ribbons and the shape of the curve — the thing being read — flattens.
+    with st.container(key="gexbody"):
+        _draw_strike_panels(ctx, shown, view, expiry, side_mode == "Stacked")
+        _gap()
+        _draw_cumulative_curve(ctx, shown)
+        _draw_caption(totals, expiry, per_strike, view)
 
-    st.divider()
-    _draw_time_panels(ctx, shown)
+        st.divider()
+        _draw_time_panels(ctx, shown)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -339,6 +353,27 @@ def _draw_headline(totals: dict) -> None:
 
 def _draw_strike_panels(ctx: ViewContext, shown: pd.DataFrame,
                         view: str, expiry: str | None, stack: bool) -> None:
+    fig = _strike_figure(shown, ctx.chain_df, ctx.spx_price, view, expiry,
+                         stack, ctx.snapshot_id)
+    with st.container(key="chartcard_gex"):
+        st.plotly_chart(fig, use_container_width=True)
+
+
+# MEMOISED FIGURES. Building these is the bulk of what a click on this tab
+# costs — a chevron press was rebuilding five Plotly figures from scratch,
+# and four of them do not depend on what the chevron changed. The cache key
+# is the SNAPSHOT plus the choices that actually alter the drawing; the
+# frames are passed with a leading underscore so Streamlit skips hashing
+# them, which on a 3,000-row chain costs more than the redraw it saves.
+#
+# Nothing may mutate a figure after it is returned. A cached object is shared
+# with every later hit, so a caller that edited one would corrupt every
+# subsequent render — and silently, since it would look right the first time.
+@st.cache_data(show_spinner=False, max_entries=16)
+def _strike_figure(_shown: pd.DataFrame, _chain: pd.DataFrame, spot: float,
+                   view: str, expiry: str | None, stack: bool,
+                   snapshot_id: int):
+    shown, ctx_chain = _shown, _chain
     fig = make_subplots(
         rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.14,
         row_heights=[0.48, 0.26, 0.26],
@@ -376,7 +411,7 @@ def _draw_strike_panels(ctx: ViewContext, shown: pd.DataFrame,
         _add_bar(fig, shown["strike"], shown["net_gex"], colours, 1,
                  "Strike %{x:,.0f}<br>Net GEX %{y:,.0f}<extra></extra>")
     else:
-        dex = gex.dex_by_strike(ctx.chain_df, ctx.spx_price, expiry=expiry)
+        dex = gex.dex_by_strike(ctx_chain, spot, expiry=expiry)
         dex = dex[dex["strike"].isin(shown["strike"])]
         _add_bar(fig, dex["strike"], dex["call_dex"], _CALL, 1,
                  "Strike %{x:,.0f}<br>Call DEX %{y:,.0f}<extra></extra>")
@@ -403,14 +438,14 @@ def _draw_strike_panels(ctx: ViewContext, shown: pd.DataFrame,
              custom=shown["put_volume"])
 
     for row in (1, 2, 3):
-        fig.add_vline(x=ctx.spx_price,
+        fig.add_vline(x=spot,
                       line=dict(color="#8fa9c4", width=1, dash="dot"),
                       row=row, col=1)
     # Anchored just INSIDE the panel, not above it: at the top edge this label
     # lands on the "Gamma Exposure" subplot title and the two overprint.
     fig.add_annotation(
-        x=ctx.spx_price, y=0.98, yref="y domain", row=1, col=1,
-        text=f"{ctx.spx_price:,.2f}", showarrow=False, yanchor="top",
+        x=spot, y=0.98, yref="y domain", row=1, col=1,
+        text=f"{spot:,.2f}", showarrow=False, yanchor="top",
         font=dict(color=_BRIGHT, size=10), bgcolor="#16283d", borderpad=3,
     )
 
@@ -465,15 +500,17 @@ def _draw_strike_panels(ctx: ViewContext, shown: pd.DataFrame,
     # which is three labels across a twenty-strike window.
     span = float(shown["strike"].max() - shown["strike"].min())
     step = max(5.0, round(span / 18.0 / 5.0) * 5.0) if span > 0 else 5.0
+    # Plain integers, level. A strike is an identifier, not a quantity: the
+    # thousands comma in "7,620" is punctuation nobody uses saying the number
+    # out loud, and the -45 degree tilt was only there to make room for the
+    # extra width it took. Without it they fit horizontally.
     fig.update_xaxes(showticklabels=True, ticks="outside", ticklen=4,
-                     tickcolor=_GRID, tickangle=-45, dtick=step,
-                     tickformat=",.0f")
+                     tickcolor=_GRID, tickangle=0, dtick=step,
+                     tickformat="d")
     fig.update_xaxes(title_text=None, row=3, col=1)
     fig.update_layout(barmode="relative", bargap=0.15)
     _dark(fig, 940)
-
-    with st.container(key="chartcard_gex"):
-        st.plotly_chart(fig, use_container_width=True)
+    return fig
 
 
 def _draw_cumulative_curve(ctx: ViewContext, shown: pd.DataFrame) -> None:
@@ -492,6 +529,14 @@ def _draw_cumulative_curve(ctx: ViewContext, shown: pd.DataFrame) -> None:
     """
     if shown.empty:
         return
+    st.plotly_chart(_curve_figure(shown, ctx.spx_price, ctx.snapshot_id),
+                    use_container_width=True)
+    st.caption(_CURVE_CAPTION)
+
+
+@st.cache_data(show_spinner=False, max_entries=8)
+def _curve_figure(_shown: pd.DataFrame, spot: float, snapshot_id: int):
+    shown = _shown
     curve = gex.cumulative_net(shown)
     flip = gex.flip_strike(shown)
 
@@ -502,8 +547,7 @@ def _draw_cumulative_curve(ctx: ViewContext, shown: pd.DataFrame) -> None:
         fillcolor="rgba(77,142,255,0.12)",
         hovertemplate="Strike %{x:,.0f}<br>Cumulative %{y:,.0f}<extra></extra>"))
     fig.add_hline(y=0, line=dict(color="#2a3f56", width=1))
-    fig.add_vline(x=ctx.spx_price,
-                  line=dict(color="#8fa9c4", width=1, dash="dot"))
+    fig.add_vline(x=spot, line=dict(color="#8fa9c4", width=1, dash="dot"))
     if flip is not None and shown["strike"].min() <= flip <= shown["strike"].max():
         fig.add_vline(x=flip, line=dict(color=_FLIP, width=1, dash="dash"))
         fig.add_annotation(
@@ -517,19 +561,20 @@ def _draw_cumulative_curve(ctx: ViewContext, shown: pd.DataFrame) -> None:
                    zerolinecolor="#3c5570", **_money_ticks(curve)),
     )
     _dark(fig, 300)
-    st.plotly_chart(fig, use_container_width=True)
-    st.caption(
-        "· **Cumulative gamma curve.** Above zero is the damped, mean-reverting "
-        "regime; below zero, dealer hedging amplifies the move instead. The "
-        "dashed line is where it crosses — the same flip strike marked above. "
-        "It is BLANK when the crossing lands within a tenth of either end of "
-        "the collected strikes: the running total starts at the lowest strike "
-        "held, so a chain that stops before the far puts do reports a flip "
-        "pushed up against its own boundary. That is common on an 0DTE "
-        "selection, where collection reaches about ±100 points. Otherwise, "
-        "and the steeper the crossing, the more decisively the regime changes "
-        "as SPX passes through it."
-    )
+    return fig
+
+
+_CURVE_CAPTION = (
+    "· **Cumulative gamma curve.** Above zero is the damped, mean-reverting "
+    "regime; below zero, dealer hedging amplifies the move instead. The dashed "
+    "line is where it crosses — the same flip strike marked above, and the "
+    "steeper the crossing, the more decisively the regime changes as SPX "
+    "passes through it. It is BLANK when the crossing lands within a tenth of "
+    "either end of the collected strikes: the running total starts at the "
+    "lowest strike held, so a chain that stops before the far puts do reports "
+    "a flip pushed up against its own boundary. That is common on an 0DTE "
+    "selection, where collection reaches about ±100 points."
+)
 
 
 def _add_bar(fig, x, y, colour, row, hover, secondary: bool = False,
@@ -566,7 +611,7 @@ def _draw_time_panels(ctx: ViewContext, shown: pd.DataFrame) -> None:
     intraday = to_display_time(intraday, config.DISPLAY_TIMEZONE)
 
     span = _session_x_range(ctx.session_date)
-    _draw_cumulative_volume(intraday, shown, span)
+    _draw_cumulative_volume(intraday, shown, span, ctx.snapshot_id)
     _gap()
     _draw_zero_dte_flow(ctx, span)
     _gap()
@@ -607,7 +652,23 @@ def _time_axis(span: list) -> dict:
 
 
 def _draw_cumulative_volume(intraday: pd.DataFrame, shown: pd.DataFrame,
-                            span: list) -> None:
+                            span: list, snapshot_id: int) -> None:
+    fig = _volume_figure(intraday, shown, span, snapshot_id)
+    if fig is None:
+        return
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption(
+        "· **Cumulative net volume** — calls traded minus puts traded at each "
+        "strike, as the session accumulates. Above zero the strike is being "
+        "bought on the call side, below it on the put side; a line that "
+        "flattens has stopped attracting flow. The eight busiest strikes of "
+        "the displayed window."
+    )
+
+
+@st.cache_data(show_spinner=False, max_entries=4)
+def _volume_figure(_intraday: pd.DataFrame, _shown: pd.DataFrame,
+                   span: list, snapshot_id: int):
     """Net volume building up through the day, per strike.
 
     The broker's `volume` field is already a running total for the session, so
@@ -616,12 +677,13 @@ def _draw_cumulative_volume(intraday: pd.DataFrame, shown: pd.DataFrame,
     worked early, which only came alive after lunch, and where the call side
     handed over to the put side.
     """
+    intraday, shown = _intraday, _shown
     strikes = list(shown["strike"])
     if not strikes:
-        return
+        return None
     work = intraday[intraday["strike"].isin(strikes)].copy()
     if work.empty:
-        return
+        return None
     work["net_volume"] = work["call_volume"] - work["put_volume"]
 
     peak = (work.groupby("strike")["net_volume"].apply(lambda s: s.abs().max())
@@ -643,14 +705,7 @@ def _draw_cumulative_volume(intraday: pd.DataFrame, shown: pd.DataFrame,
                                  gridcolor=_GRID,
                                  **_money_ticks(work["net_volume"])))
     _dark(fig, 320, legend=True)
-    st.plotly_chart(fig, use_container_width=True)
-    st.caption(
-        "· **Cumulative net volume** — calls traded minus puts traded at each "
-        "strike, as the session accumulates. Above zero the strike is being "
-        "bought on the call side, below it on the put side; a line that "
-        "flattens has stopped attracting flow. The eight busiest strikes of "
-        "the displayed window."
-    )
+    return fig
 
 
 def _draw_zero_dte_flow(ctx: ViewContext, span: list) -> None:
@@ -664,19 +719,10 @@ def _draw_zero_dte_flow(ctx: ViewContext, span: list) -> None:
         )
         return
 
-    zero = to_display_time(zero, config.DISPLAY_TIMEZONE).copy()
-    scale = zero["underlying_price"].map(gex.dollar_scale)
-    zero["net_gex"] = (zero["call_gamma_oi"] - zero["put_gamma_oi"]) * scale
-
-    latest = zero[zero["timestamp"] == zero["timestamp"].max()]
-    levels = (latest.assign(mag=latest["net_gex"].abs())
-              .nlargest(7, "mag")["strike"].tolist())
-    if not levels:
+    built = _flow_figure(zero, span, ctx.snapshot_id)
+    if built is None:
         return
-
-    total_now = float(latest["net_gex"].sum())
-    first_ts = zero["timestamp"].min()
-    total_open = float(zero[zero["timestamp"] == first_ts]["net_gex"].sum())
+    fig, total_now, total_open, levels = built
 
     _strip([
         _metric("0DTE GEX now", _fmt_money(total_now),
@@ -686,6 +732,36 @@ def _draw_zero_dte_flow(ctx: ViewContext, span: list) -> None:
         _metric("Key levels",
                 " · ".join(f"{s:,.0f}" for s in sorted(levels)[:3])),
     ])
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption(
+        "· **0DTE GEX flow** — one line per key strike, for contracts expiring "
+        "today. Gamma is at its most violent here: these positions are hours "
+        "from settlement, so a strike's exposure can invert in minutes. Key "
+        "levels are the strikes carrying the largest exposure right now."
+    )
+
+
+@st.cache_data(show_spinner=False, max_entries=4)
+def _flow_figure(_zero: pd.DataFrame, span: list, snapshot_id: int):
+    """The figure and the three headline numbers drawn above it.
+
+    Returned together because they are computed together: the "key levels"
+    ARE the lines on the chart, and deriving them twice is how a strip and a
+    legend come to disagree.
+    """
+    zero = to_display_time(_zero, config.DISPLAY_TIMEZONE).copy()
+    scale = zero["underlying_price"].map(gex.dollar_scale)
+    zero["net_gex"] = (zero["call_gamma_oi"] - zero["put_gamma_oi"]) * scale
+
+    latest = zero[zero["timestamp"] == zero["timestamp"].max()]
+    levels = (latest.assign(mag=latest["net_gex"].abs())
+              .nlargest(7, "mag")["strike"].tolist())
+    if not levels:
+        return None
+
+    total_now = float(latest["net_gex"].sum())
+    first_ts = zero["timestamp"].min()
+    total_open = float(zero[zero["timestamp"] == first_ts]["net_gex"].sum())
 
     fig = go.Figure()
     for i, strike in enumerate(sorted(levels)):
@@ -702,13 +778,7 @@ def _draw_zero_dte_flow(ctx: ViewContext, span: list) -> None:
                                  zeroline=True, zerolinecolor="#3c5570",
                                  **_money_ticks(zero["net_gex"])))
     _dark(fig, 340, legend=True)
-    st.plotly_chart(fig, use_container_width=True)
-    st.caption(
-        "· **0DTE GEX flow** — one line per key strike, for contracts expiring "
-        "today. Gamma is at its most violent here: these positions are hours "
-        "from settlement, so a strike's exposure can invert in minutes. Key "
-        "levels are the strikes carrying the largest exposure right now."
-    )
+    return fig, total_now, total_open, levels
 
 
 def _draw_oi_change(ctx: ViewContext, shown: pd.DataFrame) -> None:
@@ -721,11 +791,27 @@ def _draw_oi_change(ctx: ViewContext, shown: pd.DataFrame) -> None:
         )
         return
 
-    change = gex.oi_change(shown, prior)
-    change = change[(change["call_oi_change"] != 0) | (change["put_oi_change"] != 0)]
-    if change.empty:
+    fig = _oi_change_figure(shown, prior, ctx.spx_price, ctx.snapshot_id)
+    if fig is None:
         st.info("Open interest is unchanged from the previous session.")
         return
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption(
+        "· **New positioning.** Open interest is republished once a day, "
+        "overnight, so today's figure minus yesterday's is contracts actually "
+        "opened (up) or closed (down) — the closest this data comes to a "
+        "direct reading of what was put on. Puts are drawn downward. "
+        "**No vendor sells this history; yours goes back to 23 June.**"
+    )
+
+
+@st.cache_data(show_spinner=False, max_entries=4)
+def _oi_change_figure(_shown: pd.DataFrame, _prior: pd.DataFrame, spot: float,
+                      snapshot_id: int):
+    change = gex.oi_change(_shown, _prior)
+    change = change[(change["call_oi_change"] != 0) | (change["put_oi_change"] != 0)]
+    if change.empty:
+        return None
 
     fig = go.Figure()
     fig.add_trace(go.Bar(
@@ -736,22 +822,14 @@ def _draw_oi_change(ctx: ViewContext, shown: pd.DataFrame) -> None:
         x=change["strike"], y=-change["put_oi_change"], name="Puts",
         marker=dict(color=_PUT, line=dict(width=0)),
         hovertemplate="Strike %{x:,.0f}<br>Put OI change %{y:+,.0f}<extra></extra>"))
-    fig.add_vline(x=ctx.spx_price,
-                  line=dict(color="#8fa9c4", width=1, dash="dot"))
+    fig.add_vline(x=spot, line=dict(color="#8fa9c4", width=1, dash="dot"))
     fig.add_hline(y=0, line=dict(color="#2a3f56", width=1))
     fig.update_layout(barmode="relative", bargap=0.15,
                       xaxis=dict(title="Strike", gridcolor=_GRID),
                       yaxis=dict(title="Contracts opened / closed",
                                  gridcolor=_GRID))
     _dark(fig, 300, legend=True)
-    st.plotly_chart(fig, use_container_width=True)
-    st.caption(
-        "· **New positioning.** Open interest is republished once a day, "
-        "overnight, so today's figure minus yesterday's is contracts actually "
-        "opened (up) or closed (down) — the closest this data comes to a "
-        "direct reading of what was put on. Puts are drawn downward. "
-        "**No vendor sells this history; yours goes back to 23 June.**"
-    )
+    return fig
 
 
 # ─────────────────────────────────────────────────────────────────────────────

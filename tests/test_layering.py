@@ -661,3 +661,31 @@ def test_the_refresh_poller_adopts_the_snapshot_before_it_reruns():
         "happens, and the next run reruns for the same reason — forever. "
         "That is BUG-020, and it froze the whole dashboard."
     )
+
+
+def test_the_gamma_exposure_steppers_never_ask_for_a_second_script_run():
+    """A chevron press must not cost two passes over app.py.
+
+    The obvious way to write a stepper is to record the new index and call
+    st.rerun() so the label redraws. That doubles the cost of every click —
+    measured at 3.8s a pass on this page, so ~7.6s of nothing happening — and
+    the second pass exists only to show a string the first pass could have
+    shown had it read the buttons before drawing the value.
+
+    Pinned as a static check rather than a timing test: a timing test on a
+    Streamlit page is slow, flaky, and would not say WHICH change made it
+    slow. The failure this guards is a specific line coming back.
+    """
+    source = (VIEWS_DIR / "gex.py").read_text(encoding="utf-8")
+    tree = ast.parse(source, filename="views/gex.py")
+    reruns = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute) and node.func.attr == "rerun"
+    ]
+    assert not reruns, (
+        f"views/gex.py calls st.rerun() at line(s) "
+        f"{[n.lineno for n in reruns]} — every one doubles the cost of the "
+        f"click that triggers it. Read the widget before drawing what it "
+        f"controls instead."
+    )

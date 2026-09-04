@@ -781,8 +781,23 @@ div[class*="st-key-chartcard_"]:hover {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* The stepper is a compact unit, not three columns of whatever width the
+   row happens to give it. Capping the block and centring each cell is what
+   puts the arrows either side of the value instead of stranded against the
+   far edges of their columns.                                              */
+[class*="st-key-step_gex"] {
+  max-width: 210px;
+}
 [class*="st-key-step_gex"] [data-testid="stHorizontalBlock"] {
-  gap: .3rem;
+  gap: .15rem;
+}
+[class*="st-key-step_gex"] [data-testid="stColumn"] {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+[class*="st-key-step_gex"] [data-testid="stColumn"] > div {
+  width: 100%;
 }
 /* Small and quiet: the arrows are a way to move, not a thing to look at.
    The value between them is the content, so the chevrons lose their button
@@ -803,4 +818,15 @@ div[class*="st-key-chartcard_"]:hover {
 [class*="st-key-step_gex"] button:hover {
   background: transparent;
   color: var(--accent, #4d8eff);
+}
+
+/* ── Gamma Exposure body ──────────────────────────────────────────────────
+   A cap on how wide the charts may run. Full-bleed on a wide monitor puts a
+   ~1700px panel over a ~450px height: the bars become ribbons and the shape
+   of the curve — the thing actually being read — flattens out.             */
+[class*="st-key-gexbody"],
+[class*="st-key-gexcontrols"] {
+  max-width: 1320px;
+  margin-left: auto;
+  margin-right: auto;
 }
