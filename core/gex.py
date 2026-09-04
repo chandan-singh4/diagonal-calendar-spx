@@ -55,6 +55,12 @@ SHARES_PER_CONTRACT = 100
 # A one-percent move, expressed as the fraction the spot^2 term is scaled by.
 ONE_PERCENT = 0.01
 
+# How much of each end of the collected strike range is treated as too close
+# to the edge for a gamma flip to be believed. See flip_strike: the running
+# total's baseline is set by where collection STOPPED, so a crossing near the
+# boundary says more about the record than about the market.
+EDGE_GUARD = 0.10
+
 # The dealer-positioning assumption, in one place. See the module docstring:
 # this is the convention the whole measure rests on.
 DEALER_SIGN = {"C": 1, "P": -1}
@@ -166,9 +172,23 @@ def flip_strike(gex_df: pd.DataFrame) -> float | None:
     because the true level almost never falls exactly on a listed strike and
     reporting the nearer strike would quantise it to the strike spacing.
 
-    None when the cumulative total never changes sign — a chain that is long
-    or short gamma throughout has no flip, which is a real market state and
-    not a failure.
+    **A TRUNCATED CHAIN MOVES THIS NUMBER, AND ONLY IN ONE DIRECTION.** The
+    running total starts at zero at the lowest strike COLLECTED, not at the
+    lowest strike that exists. Every put below that point is negative gamma
+    left out, so the curve starts too high and the crossing is pushed UP. On
+    the ±300 chain the effect is small; on an 0DTE selection, which the
+    collector only carries out to about ±100, it is large enough to shove the
+    crossing to the top edge of the range — where it was measured at 7821.5
+    on a 7620-7830 chain with spot at 7723.66, which is not a market fact
+    about 7821.5, it is an artefact of where collection stopped.
+    So a crossing landing in the outermost tenth at either end is reported as
+    NO FLIP. That is the honest answer: the flip, if there is one, is off the
+    edge of what was collected and this data cannot locate it. Better a blank
+    than a confident line drawn at the boundary of the record.
+
+    None also when the cumulative total never changes sign — a chain that is
+    long or short gamma throughout has no flip, which is a real market state
+    and not a failure.
     """
     if gex_df.empty or "net_gex" not in gex_df.columns:
         return None
@@ -176,17 +196,29 @@ def flip_strike(gex_df: pd.DataFrame) -> float | None:
     cum = gex_df["net_gex"].cumsum().to_numpy()
     strikes = gex_df["strike"].to_numpy()
 
+    crossing = None
     for i in range(1, len(cum)):
         lo, hi = cum[i - 1], cum[i]
         if lo == 0.0:
-            return float(strikes[i - 1])
+            crossing = float(strikes[i - 1])
+            break
         if (lo < 0) != (hi < 0):
             if hi == lo:                      # cannot happen with a sign change
-                return float(strikes[i])      # pragma: no cover
-            frac = -lo / (hi - lo)
-            return float(strikes[i - 1] + frac * (strikes[i] - strikes[i - 1]))
+                crossing = float(strikes[i])  # pragma: no cover
+            else:
+                frac = -lo / (hi - lo)
+                crossing = float(strikes[i - 1]
+                                 + frac * (strikes[i] - strikes[i - 1]))
+            break
 
-    return None
+    if crossing is None:
+        return None
+
+    low, high = float(strikes[0]), float(strikes[-1])
+    guard = EDGE_GUARD * (high - low)
+    if guard > 0 and not (low + guard <= crossing <= high - guard):
+        return None
+    return crossing
 
 
 def summary(gex_df: pd.DataFrame) -> dict:

@@ -419,3 +419,31 @@ def test_key_strikes_asks_for_more_than_exist_and_gets_what_there_is():
     assert gex.key_strikes(df, 6) == [7700.0]
     assert gex.key_strikes(df, 0) == []
     assert gex.key_strikes(gex.by_strike(_chain([]), SPOT)) == []
+
+
+def test_a_crossing_at_the_edge_of_the_collected_range_is_no_flip_at_all():
+    """The running total starts at zero at the lowest strike COLLECTED, so
+    every put below that point is negative gamma left out and the crossing is
+    pushed up. Measured on live 0DTE data — a 7620-7830 chain with spot at
+    7723.66 — that put the "flip" at 7821.5, nine points from the top of the
+    record. A number produced by where collection stopped is not a level."""
+    edge = gex.by_strike(_chain([
+        {"strike": 7600, "right": "P", "gamma": 0.0100},
+        {"strike": 7700, "right": "P", "gamma": 0.0100},
+        {"strike": 7790, "right": "P", "gamma": 0.0100},   # still short here
+        {"strike": 7800, "right": "C", "gamma": 0.9000},   # flips at the top
+    ]), SPOT)
+    assert gex.flip_strike(edge) is None
+
+
+def test_a_crossing_well_inside_the_range_is_still_reported():
+    """The guard must not swallow the real thing: same shape, crossing in the
+    middle of the collected strikes rather than against the boundary."""
+    inside = gex.by_strike(_chain([
+        {"strike": 7500, "right": "P", "gamma": 0.9000},
+        {"strike": 7700, "right": "C", "gamma": 0.9000},
+        {"strike": 7900, "right": "C", "gamma": 0.0001},
+    ]), SPOT)
+    flip = gex.flip_strike(inside)
+    assert flip is not None
+    assert 7500 < flip < 7900

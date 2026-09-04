@@ -39,7 +39,9 @@ sys.path.insert(0, str(ROOT))
 from streamlit.testing.v1 import AppTest
 
 APP = ROOT / "app.py"
-TABS = ["scanner", "entry", "edge", "strike", "hist", "gex", "research"]
+# "hist" is gone as a tab: Historical Statistics now draws underneath
+# Strike Detail, so "strike" executes both.
+TABS = ["scanner", "entry", "edge", "strike", "gex", "research"]
 TIMEOUT_SECONDS = 300
 
 

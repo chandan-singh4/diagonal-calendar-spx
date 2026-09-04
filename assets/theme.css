@@ -753,3 +753,54 @@ div[class*="st-key-chartcard_"]:hover {
 .note .note-ic { font-size: .82rem; opacity: .9; line-height: 1.3; flex-shrink: 0; }
 .note b, .note strong { color: var(--text); font-weight: 600; }
 
+
+/* ── Chevron stepper ──────────────────────────────────────────────────────
+   The ◀ label ▶ control on the Gamma Exposure tab. It replaces a dropdown
+   for short ordered sets — one click moves to the next view instead of
+   click, read a list, click again.
+
+   Everything here is about sitting on the SAME BASELINE as the selectbox
+   next to it: Streamlit's label is .875rem with a 4px gap, its input is
+   38px tall, so the label and the arrows here are given exactly those
+   numbers. Left to the defaults the arrows stretch and the row reads as
+   three unrelated widgets at three different heights.                      */
+.step-lbl {
+  font-size: .875rem;
+  line-height: 1.6;
+  color: var(--text-2, #8fa9c4);
+  margin-bottom: 4px;
+}
+.step-val {
+  text-align: center;
+  font-size: .95rem;
+  font-weight: 600;
+  color: var(--accent, #4d8eff);
+  height: 38px;
+  line-height: 38px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+[class*="st-key-step_gex"] [data-testid="stHorizontalBlock"] {
+  gap: .3rem;
+}
+/* Small and quiet: the arrows are a way to move, not a thing to look at.
+   The value between them is the content, so the chevrons lose their button
+   chrome entirely and only pick up colour under the cursor.                */
+[class*="st-key-step_gex"] button {
+  height: 38px;
+  min-height: 38px;
+  width: 22px;
+  min-width: 22px;
+  padding: 0;
+  line-height: 1;
+  font-size: .62rem;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  color: var(--text-3, #6d8fa8);
+}
+[class*="st-key-step_gex"] button:hover {
+  background: transparent;
+  color: var(--accent, #4d8eff);
+}

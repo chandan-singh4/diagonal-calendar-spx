@@ -284,12 +284,28 @@ header.render_token_banner(_token_age, sys.executable)
 # constraints live in there, and two of them fail only at runtime.
 # ═══════════════════════════════════════════════════════════════════════════════
 
-selection = controls.render(
-    chain_df=chain_df,
-    available_expiries=available_expiries,
-    dte_by_expiry=dte_by_expiry,
-    spx_price=spx_price,
-)
+# The Gamma Exposure tab uses NONE of these — it has its own expiry control
+# and reads every strike — so a front/back pair and two strike selections
+# sitting above it are four widgets that change nothing a reader can see.
+#
+# HIDDEN, NOT SKIPPED. The widgets still render and still hold their state,
+# because the values feed ViewContext for every other tab and because a
+# Streamlit widget that stops being created loses what was selected in it.
+# `active_tab` is written before the rerun that follows a nav click, so it is
+# already correct this far up the script.
+if st.session_state.get("active_tab") == "gex":
+    st.markdown(
+        "<style>[class*='st-key-ctrlbar']{display:none;}</style>",
+        unsafe_allow_html=True,
+    )
+
+with st.container(key="ctrlbar"):
+    selection = controls.render(
+        chain_df=chain_df,
+        available_expiries=available_expiries,
+        dte_by_expiry=dte_by_expiry,
+        spx_price=spx_price,
+    )
 front_expiry = selection.front_expiry
 back_expiry  = selection.back_expiry
 put_strike   = selection.put_strike
@@ -386,12 +402,29 @@ VIEW_CTX = ViewContext(
 # comments sixty lines below, so adding or renaming a tab meant editing two
 # places that could not see each other. Nothing is dispatched that is not in
 # this list, and nothing in this list goes undispatched.
+def _strike_with_history(ctx) -> None:
+    """Strike Detail with the Historical Statistics section beneath it.
+
+    They were two tabs and are now one. Both answer questions about the SAME
+    pair of expiries the controls bar has selected — one at today's strikes,
+    one over the past twenty days — and a reader comparing them was clicking
+    between two tabs to hold both in their head.
+
+    Composed HERE rather than by having one view import the other: views/ may
+    not import views/ (test_layering), and for a good reason — a view that
+    calls another is a view you cannot render or reason about alone. This
+    function is the page deciding what goes on a page, which is app.py's job.
+    """
+    view_strike.render(ctx)
+    st.divider()
+    view_historical.render(ctx)
+
+
 _TABS = [
     ("scanner",  "🔭  Scanner",          view_scanner.render),
     ("entry",    "📊  Entry Analysis",   view_entry.render),
     ("edge",     "📈  Calendar Edge",    view_edge.render),
-    ("strike",   "🎯  Strike Detail",    view_strike.render),
-    ("hist",     "📉  Historical Stats", view_historical.render),
+    ("strike",   "🎯  Strike Detail",    _strike_with_history),
     ("gex",      "🧲  Gamma Exposure",   view_gex.render),
     ("research", "🔬  Research",         view_research.render),
 ]

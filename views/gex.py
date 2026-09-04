@@ -71,8 +71,13 @@ _PUT_VOL_EDGE = "rgba(163,116,224,0.55)"
 
 _FLIP = "#e8b64c"
 
-_STRIKE_COUNTS = [20, 40, 60, 100, 0]      # 0 = every strike collected
 _VIEWS = ["Call vs Put", "Abs Gamma", "Net Gamma", "Delta Exposure"]
+
+# How the Open Interest and Volume panels lay their two sides out. Mirrored
+# (puts drawn downward) compares the two sides at a strike; stacked compares
+# the TOTAL at one strike against the total at another, which is the reading
+# for "where is the crowd" and the one a mirrored chart makes you do by eye.
+_SIDE_MODES = ["Mirrored", "Stacked"]
 
 # Distinct hues for the 0DTE flow lines. Deliberately not the call/put pair:
 # these identify STRIKES, and reusing green/red would read as sides.
@@ -80,8 +85,13 @@ _FLOW_COLOURS = ["#4d8eff", "#e8b64c", "#10d4a3", "#f05252",
                  "#a78bfa", "#c9a227", "#ec4899", "#22d3ee"]
 
 
-def _fmt_money(value: float | None, unit: str = "$") -> str:
+def _fmt_money(value: float | None, unit: str = "") -> str:
     """A large figure at a readable magnitude, or an em dash.
+
+    NO CURRENCY MARK BY DEFAULT. Exposure is derived from a notional — gamma
+    times open interest times a hundred times spot squared — so the units are
+    real but the number is not money anybody holds or pays, and a "$" invites
+    it to be read as one. The magnitude suffix is the part that matters.
 
     An em dash rather than 0: absent and zero are different states, and the
     project's rule is that a missing number shows blank.
@@ -94,6 +104,39 @@ def _fmt_money(value: float | None, unit: str = "$") -> str:
         if mag >= cutoff:
             return f"{sign}{unit}{mag / cutoff:,.1f}{suffix}"
     return f"{sign}{unit}{mag:,.0f}"
+
+
+def _money_ticks(values, unit: str = "") -> dict:
+    """Axis ticks labelled the way the headline numbers are labelled.
+
+    Plotly's SI format writes a billion as "G" — correct for engineers, wrong
+    for anyone reading a magnitude, and different from the "29.3B" in the
+    strip directly above the chart. Two notations for one number on one screen
+    is a reader's problem, not a formatting preference, so the ticks are placed
+    here and labelled with `_fmt_money`.
+
+    The step is the largest of 1/2/2.5/5 x 10^k that still leaves about six
+    ticks across the range, and the range always includes zero: on these charts
+    the sign is the message, so an axis that cropped zero out would hide it.
+    """
+    series = pd.Series(list(values), dtype="float64").dropna()
+    if series.empty:
+        return {}
+    lo, hi = min(0.0, float(series.min())), max(0.0, float(series.max()))
+    if hi == lo:
+        return {}
+
+    import math
+    rough = (hi - lo) / 6.0
+    power = 10.0 ** math.floor(math.log10(rough))
+    step = next((m * power for m in (1.0, 2.0, 2.5, 5.0) if m * power >= rough),
+                10.0 * power)
+
+    first = math.floor(lo / step)
+    ticks = [(first + i) * step for i in range(int((hi - lo) / step) + 3)]
+    ticks = [t for t in ticks if lo - step <= t <= hi + step]
+    return dict(tickmode="array", tickvals=ticks,
+                ticktext=[_fmt_money(t, unit) for t in ticks])
 
 
 def _metric(label: str, value: str, colour: str = _BRIGHT) -> str:
@@ -115,7 +158,44 @@ def _strip(items: list[str]) -> None:
     )
 
 
-def _gap(height: int = 22) -> None:
+def _stepper(label: str, options: list[str], key: str) -> str:
+    """A chevron pair around the current choice: ◀ Abs Gamma ▶.
+
+    A dropdown makes you click, read a list and click again to see the next
+    view. These options are a short ordered set a reader steps THROUGH — one
+    click per view, and the current one stays legible the whole time. The
+    index wraps, so neither arrow is ever a dead button.
+
+    State lives under `key` as an INDEX rather than a label: an option renamed
+    or reordered then moves the selection somewhere sensible instead of
+    raising on a value that is no longer in the list.
+
+    Wrapped in a keyed container so the stylesheet can size it. Left to
+    Streamlit's defaults the arrows stretch to fill their columns and the
+    control ends up twice the height of the selectbox beside it — the row has
+    to line up on one baseline or it reads as three unrelated widgets.
+    """
+    idx = int(st.session_state.get(key, 0)) % len(options)
+    with st.container(key=f"step_{key}"):
+        st.markdown(f'<div class="step-lbl">{label}</div>',
+                    unsafe_allow_html=True)
+        back, name, fwd = st.columns([1, 6, 1], gap="small",
+                                     vertical_alignment="center")
+        with back:
+            if st.button("◀", key=f"{key}_prev"):
+                st.session_state[key] = (idx - 1) % len(options)
+                st.rerun()
+        with fwd:
+            if st.button("▶", key=f"{key}_next"):
+                st.session_state[key] = (idx + 1) % len(options)
+                st.rerun()
+        with name:
+            st.markdown(f'<div class="step-val">{options[idx]}</div>',
+                        unsafe_allow_html=True)
+    return options[idx]
+
+
+def _gap(height: int = 40) -> None:
     """Breathing room between two stacked charts.
 
     Streamlit puts consecutive plotly_charts flush against each other, so a
@@ -180,7 +260,7 @@ def render(ctx: ViewContext) -> None:
     # here would be a second thing to keep in step with core/contract.py.
     dte_by_expiry = chain.groupby("expiry")["dte"].first().astype(int).to_dict()
 
-    c1, c2, c3 = st.columns([2, 1, 1])
+    c1, c3, c4 = st.columns([2, 1, 1], vertical_alignment="bottom")
     with c1:
         choice = st.selectbox(
             "Expiry", ["All expiries", *expiries], key="gex_expiry",
@@ -190,16 +270,10 @@ def render(ctx: ViewContext) -> None:
                  "refers to. The third Friday appears twice because SPX lists "
                  "two contracts for it.",
         )
-    with c2:
-        count = st.selectbox(
-            "Strikes", _STRIKE_COUNTS, index=1, key="gex_strikes",
-            format_func=lambda n: "All" if n == 0 else f"{n} strikes",
-            help="Ratio and sentiment are computed over the strikes shown, so "
-                 "narrowing this changes them. That is Option Alpha's "
-                 "definition, not an accident.",
-        )
     with c3:
-        view = st.selectbox("View", _VIEWS, key="gex_view")
+        view = _stepper("View", _VIEWS, "gex_view_idx")
+    with c4:
+        side_mode = _stepper("OI / Volume", _SIDE_MODES, "gex_side_idx")
 
     expiry = None if choice == "All expiries" else choice
     per_strike = gex.by_strike(chain, ctx.spx_price, expiry=expiry)
@@ -207,11 +281,16 @@ def render(ctx: ViewContext) -> None:
         st.info("No strike in this selection carries gamma.")
         return
 
-    shown = gex.window(per_strike, ctx.spx_price, count)
+    # EVERY strike collected, always. The window control that used to live
+    # here traded a figure that stayed put for one that changed under the
+    # reader every time they narrowed it — and Option Alpha's ratio and
+    # sentiment are defined over the displayed bars, so the numbers moved with
+    # it. Showing the whole chain makes them one answer instead of five.
+    shown = per_strike
     totals = gex.summary(shown)          # displayed bars, per the documentation
 
     _draw_headline(totals)
-    _draw_strike_panels(ctx, shown, view, expiry)
+    _draw_strike_panels(ctx, shown, view, expiry, side_mode == "Stacked")
     _gap()
     _draw_cumulative_curve(ctx, shown)
     _draw_caption(totals, expiry, per_strike, view)
@@ -259,9 +338,9 @@ def _draw_headline(totals: dict) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _draw_strike_panels(ctx: ViewContext, shown: pd.DataFrame,
-                        view: str, expiry: str | None) -> None:
+                        view: str, expiry: str | None, stack: bool) -> None:
     fig = make_subplots(
-        rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.12,
+        rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.14,
         row_heights=[0.48, 0.26, 0.26],
         specs=[[{"secondary_y": True}], [{}], [{}]],
         subplot_titles=("Gamma Exposure", "Open Interest", "Volume"),
@@ -269,7 +348,7 @@ def _draw_strike_panels(ctx: ViewContext, shown: pd.DataFrame,
 
     # ── Panel 1, background: the day's volume as translucent fills ───────────
     # Drawn FIRST so the bars sit on top of it, and on a secondary axis
-    # because contracts traded and dollars of gamma are not the same unit.
+    # because contracts traded and gamma exposure are not the same unit.
     for col, fill, edge, name in (
             ("put_volume", _PUT_VOL_FILL, _PUT_VOL_EDGE, "Put volume"),
             ("call_volume", _CALL_VOL_FILL, _CALL_VOL_EDGE, "Call volume")):
@@ -283,36 +362,45 @@ def _draw_strike_panels(ctx: ViewContext, shown: pd.DataFrame,
     # ── Panel 1, foreground: whichever gamma view is selected ────────────────
     if view == "Call vs Put":
         _add_bar(fig, shown["strike"], shown["call_gex"], _CALL, 1,
-                 "Strike %{x:,.0f}<br>Call GEX %{y:$,.0f}<extra></extra>")
+                 "Strike %{x:,.0f}<br>Call GEX %{y:,.0f}<extra></extra>")
         _add_bar(fig, shown["strike"], -shown["put_gex"], _PUT, 1,
-                 "Strike %{x:,.0f}<br>Put GEX %{y:$,.0f}<extra></extra>")
+                 "Strike %{x:,.0f}<br>Put GEX %{y:,.0f}<extra></extra>")
     elif view == "Abs Gamma":
         # Stacked, so the one positive total still shows its two halves.
         _add_bar(fig, shown["strike"], shown["call_gex"], _CALL, 1,
-                 "Strike %{x:,.0f}<br>Call %{y:$,.0f}<extra></extra>")
+                 "Strike %{x:,.0f}<br>Call %{y:,.0f}<extra></extra>")
         _add_bar(fig, shown["strike"], shown["put_gex"], _PUT, 1,
-                 "Strike %{x:,.0f}<br>Put %{y:$,.0f}<extra></extra>")
+                 "Strike %{x:,.0f}<br>Put %{y:,.0f}<extra></extra>")
     elif view == "Net Gamma":
         colours = [_CALL if v >= 0 else _PUT for v in shown["net_gex"]]
         _add_bar(fig, shown["strike"], shown["net_gex"], colours, 1,
-                 "Strike %{x:,.0f}<br>Net GEX %{y:$,.0f}<extra></extra>")
+                 "Strike %{x:,.0f}<br>Net GEX %{y:,.0f}<extra></extra>")
     else:
         dex = gex.dex_by_strike(ctx.chain_df, ctx.spx_price, expiry=expiry)
         dex = dex[dex["strike"].isin(shown["strike"])]
         _add_bar(fig, dex["strike"], dex["call_dex"], _CALL, 1,
-                 "Strike %{x:,.0f}<br>Call DEX %{y:$,.0f}<extra></extra>")
+                 "Strike %{x:,.0f}<br>Call DEX %{y:,.0f}<extra></extra>")
         _add_bar(fig, dex["strike"], dex["put_dex"], _PUT, 1,
-                 "Strike %{x:,.0f}<br>Put DEX %{y:$,.0f}<extra></extra>")
+                 "Strike %{x:,.0f}<br>Put DEX %{y:,.0f}<extra></extra>")
 
     # ── Panels 2 and 3 ───────────────────────────────────────────────────────
+    # barmode is "relative", so two positive bars stack and a positive and a
+    # negative one straddle the axis. The put side flipping sign is therefore
+    # the WHOLE difference between the two layouts — the hover still reports
+    # the put's own figure, unsigned, either way.
+    put_sign = 1.0 if stack else -1.0
     _add_bar(fig, shown["strike"], shown["call_oi"], _CALL, 2,
-             "Strike %{x:,.0f}<br>Call OI %{y:,.0f}<extra></extra>")
-    _add_bar(fig, shown["strike"], -shown["put_oi"], _PUT, 2,
-             "Strike %{x:,.0f}<br>Put OI %{y:,.0f}<extra></extra>")
+             "Strike %{x:,.0f}<br>Call OI %{customdata:,.0f}<extra></extra>",
+             custom=shown["call_oi"])
+    _add_bar(fig, shown["strike"], put_sign * shown["put_oi"], _PUT, 2,
+             "Strike %{x:,.0f}<br>Put OI %{customdata:,.0f}<extra></extra>",
+             custom=shown["put_oi"])
     _add_bar(fig, shown["strike"], shown["call_volume"], _CALL, 3,
-             "Strike %{x:,.0f}<br>Call volume %{y:,.0f}<extra></extra>")
-    _add_bar(fig, shown["strike"], -shown["put_volume"], _PUT, 3,
-             "Strike %{x:,.0f}<br>Put volume %{y:,.0f}<extra></extra>")
+             "Strike %{x:,.0f}<br>Call volume %{customdata:,.0f}<extra></extra>",
+             custom=shown["call_volume"])
+    _add_bar(fig, shown["strike"], put_sign * shown["put_volume"], _PUT, 3,
+             "Strike %{x:,.0f}<br>Put volume %{customdata:,.0f}<extra></extra>",
+             custom=shown["put_volume"])
 
     for row in (1, 2, 3):
         fig.add_vline(x=ctx.spx_price,
@@ -332,36 +420,49 @@ def _draw_strike_panels(ctx: ViewContext, shown: pd.DataFrame,
                       row=1, col=1)
 
     # ── Axes a reader can read without hovering ──────────────────────────────
-    # Every number on this chart is a magnitude in a unit nobody carries in
-    # their head — dollars per 1% move run to eleven digits. SI suffixes ("$3B")
-    # keep the tick labels short enough to render, and the explicit zero line
-    # is what makes "above the axis" and "below the axis" a reading rather than
-    # an inference: on the Call vs Put and Net views the SIGN is the message.
-    # No y-axis titles on the three panels: each already carries a subplot
-    # title saying what it is, and the unit is repeated in the caption under
-    # the chart. A rotated title on the left only eats width the bars can use.
-    fig.update_yaxes(title_text=None, row=1, col=1, secondary_y=False,
-                     showticklabels=True, tickformat="$~s", ticks="outside",
-                     ticklen=4, tickcolor=_GRID,
-                     zeroline=True, zerolinecolor="#3c5570", zerolinewidth=1)
-    fig.update_yaxes(title_text=None, row=1, col=1,
-                     secondary_y=True, showgrid=False, showticklabels=True,
-                     tickformat="~s", ticks="outside", ticklen=4,
-                     tickcolor=_GRID)
-    fig.update_yaxes(title_text=None, row=2, col=1,
-                     tickformat="~s", zeroline=True, zerolinecolor="#3c5570")
-    fig.update_yaxes(title_text=None, row=3, col=1,
-                     tickformat="~s", zeroline=True, zerolinecolor="#3c5570")
+    # Ticks are placed and labelled by _money_ticks rather than left to
+    # Plotly, so a billion reads "$1.0B" here and in the headline strip above
+    # instead of the SI "1G". The explicit zero line is what makes "above the
+    # axis" and "below the axis" a reading rather than an inference: on the
+    # Call vs Put and Net views the SIGN is the message.
+    #
+    # No y-axis titles: each panel already carries a subplot heading saying
+    # what it is, and the unit is in the caption under the chart. A rotated
+    # title on the left only eats width the bars could use.
+    if view == "Delta Exposure":
+        primary = pd.concat([dex["call_dex"], dex["put_dex"]])
+    elif view == "Call vs Put":
+        primary = pd.concat([shown["call_gex"], -shown["put_gex"]])
+    elif view == "Abs Gamma":
+        primary = pd.concat([shown["abs_gex"], shown["call_gex"]])
+    else:
+        primary = shown["net_gex"]
 
-    # Strike labels on EVERY panel, not only the bottom one. shared_xaxes
-    # hides them on the upper rows by default, which means the gamma panel —
-    # the one people actually read — has no strike scale of its own and has to
-    # be traced down two charts to a row below it.
-    # Strike labels dense enough to read a bar off directly. Plotly's default
-    # picks a round interval that lands on 50 or 100 points — three labels
-    # across a twenty-strike window — so the step is chosen here from the span
-    # actually displayed, aiming at ~18 labels and rounded to a multiple of 5
-    # so every tick falls on a real listed strike rather than between two.
+    oi_side = (shown["call_oi"] + shown["put_oi"] if stack
+               else pd.concat([shown["call_oi"], -shown["put_oi"]]))
+    vol_side = (shown["call_volume"] + shown["put_volume"] if stack
+                else pd.concat([shown["call_volume"], -shown["put_volume"]]))
+
+    fig.update_yaxes(title_text=None, row=1, col=1, secondary_y=False,
+                     showticklabels=True, ticks="outside", ticklen=4,
+                     tickcolor=_GRID, zeroline=True, zerolinecolor="#3c5570",
+                     zerolinewidth=1, **_money_ticks(primary))
+    fig.update_yaxes(title_text=None, row=1, col=1, secondary_y=True,
+                     showgrid=False, showticklabels=True, ticks="outside",
+                     ticklen=4, tickcolor=_GRID,
+                     **_money_ticks(pd.concat([shown["call_volume"],
+                                               shown["put_volume"]]), ""))
+    fig.update_yaxes(title_text=None, row=2, col=1, zeroline=True,
+                     zerolinecolor="#3c5570", **_money_ticks(oi_side, ""))
+    fig.update_yaxes(title_text=None, row=3, col=1, zeroline=True,
+                     zerolinecolor="#3c5570", **_money_ticks(vol_side, ""))
+
+    # Strike labels on EVERY panel, not only the bottom one: shared_xaxes
+    # hides them on the upper rows, which leaves the gamma panel — the one
+    # people actually read — with no scale of its own. The step is chosen from
+    # the displayed span (~18 labels) and rounded to a multiple of 5 so every
+    # tick lands on a real listed strike; Plotly's default picks 50 or 100,
+    # which is three labels across a twenty-strike window.
     span = float(shown["strike"].max() - shown["strike"].min())
     step = max(5.0, round(span / 18.0 / 5.0) * 5.0) if span > 0 else 5.0
     fig.update_xaxes(showticklabels=True, ticks="outside", ticklen=4,
@@ -369,7 +470,7 @@ def _draw_strike_panels(ctx: ViewContext, shown: pd.DataFrame,
                      tickformat=",.0f")
     fig.update_xaxes(title_text=None, row=3, col=1)
     fig.update_layout(barmode="relative", bargap=0.15)
-    _dark(fig, 900)
+    _dark(fig, 940)
 
     with st.container(key="chartcard_gex"):
         st.plotly_chart(fig, use_container_width=True)
@@ -399,7 +500,7 @@ def _draw_cumulative_curve(ctx: ViewContext, shown: pd.DataFrame) -> None:
         x=shown["strike"], y=curve, name="Cumulative net GEX", mode="lines",
         line=dict(color="#4d8eff", width=2), fill="tozeroy",
         fillcolor="rgba(77,142,255,0.12)",
-        hovertemplate="Strike %{x:,.0f}<br>Cumulative %{y:$,.0f}<extra></extra>"))
+        hovertemplate="Strike %{x:,.0f}<br>Cumulative %{y:,.0f}<extra></extra>"))
     fig.add_hline(y=0, line=dict(color="#2a3f56", width=1))
     fig.add_vline(x=ctx.spx_price,
                   line=dict(color="#8fa9c4", width=1, dash="dot"))
@@ -411,25 +512,31 @@ def _draw_cumulative_curve(ctx: ViewContext, shown: pd.DataFrame) -> None:
             bgcolor="#16283d", borderpad=3)
     fig.update_layout(
         xaxis=dict(title="Strike", gridcolor=_GRID),
-        yaxis=dict(title="Cumulative net GEX ($ per 1% move)",
-                   gridcolor=_GRID, tickformat="$~s", zeroline=True,
-                   zerolinecolor="#3c5570"),
+        yaxis=dict(title="Cumulative net GEX (per 1% move)",
+                   gridcolor=_GRID, zeroline=True,
+                   zerolinecolor="#3c5570", **_money_ticks(curve)),
     )
     _dark(fig, 300)
     st.plotly_chart(fig, use_container_width=True)
     st.caption(
         "· **Cumulative gamma curve.** Above zero is the damped, mean-reverting "
         "regime; below zero, dealer hedging amplifies the move instead. The "
-        "dashed line is where it crosses — the same flip strike marked above, "
+        "dashed line is where it crosses — the same flip strike marked above. "
+        "It is BLANK when the crossing lands within a tenth of either end of "
+        "the collected strikes: the running total starts at the lowest strike "
+        "held, so a chain that stops before the far puts do reports a flip "
+        "pushed up against its own boundary. That is common on an 0DTE "
+        "selection, where collection reaches about ±100 points. Otherwise, "
         "and the steeper the crossing, the more decisively the regime changes "
         "as SPX passes through it."
     )
 
 
-def _add_bar(fig, x, y, colour, row, hover, secondary: bool = False) -> None:
+def _add_bar(fig, x, y, colour, row, hover, secondary: bool = False,
+             custom=None) -> None:
     fig.add_trace(
         go.Bar(x=x, y=y, marker=dict(color=colour, line=dict(width=0)),
-               hovertemplate=hover, showlegend=False),
+               customdata=custom, hovertemplate=hover, showlegend=False),
         row=row, col=1, **({"secondary_y": secondary} if row == 1 else {}),
     )
 
@@ -459,8 +566,6 @@ def _draw_time_panels(ctx: ViewContext, shown: pd.DataFrame) -> None:
     intraday = to_display_time(intraday, config.DISPLAY_TIMEZONE)
 
     span = _session_x_range(ctx.session_date)
-    _draw_net_gex_series(intraday, span)
-    _gap()
     _draw_cumulative_volume(intraday, shown, span)
     _gap()
     _draw_zero_dte_flow(ctx, span)
@@ -501,66 +606,6 @@ def _time_axis(span: list) -> dict:
                 dtick=3600000, ticks="outside", ticklen=4, tickcolor=_GRID)
 
 
-def _session_totals(intraday: pd.DataFrame) -> pd.DataFrame:
-    """Net and absolute GEX for each snapshot of the session, in dollars.
-
-    The scaling uses each snapshot's OWN spot price. Using the latest one for
-    the whole day would be a subtle, plausible-looking error — spot^2 moves
-    about 1% for every 0.5% SPX move, so a trending day would show a drift in
-    GEX that was really just the scale factor changing.
-    """
-    grouped = intraday.groupby("timestamp", as_index=False).agg(
-        call_gamma_oi=("call_gamma_oi", "sum"),
-        put_gamma_oi=("put_gamma_oi", "sum"),
-        spot=("underlying_price", "first"),
-    )
-    scale = grouped["spot"].map(gex.dollar_scale)
-    grouped["net_gex"] = (grouped["call_gamma_oi"] - grouped["put_gamma_oi"]) * scale
-    grouped["abs_gex"] = (grouped["call_gamma_oi"] + grouped["put_gamma_oi"]) * scale
-    return grouped
-
-
-def _draw_net_gex_series(intraday: pd.DataFrame, span: list) -> None:
-    totals = _session_totals(intraday)
-    if totals.empty:
-        return
-
-    first, last = totals["net_gex"].iloc[0], totals["net_gex"].iloc[-1]
-    _strip([
-        _metric("Net GEX now", _fmt_money(last), _CALL if last >= 0 else _PUT),
-        _metric("At the open", _fmt_money(first)),
-        _metric("Change today", _fmt_money(last - first),
-                _CALL if last >= first else _PUT),
-        _metric("Snapshots", f"{len(totals):,}"),
-    ])
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=totals["timestamp"], y=totals["net_gex"], name="Net GEX",
-        mode="lines", line=dict(color="#4d8eff", width=1.8),
-        hovertemplate="%{x|%H:%M}<br>Net GEX %{y:$,.0f}<extra></extra>"))
-    fig.add_hline(y=0, line=dict(color="#2a3f56", width=1))
-    fig.add_trace(go.Scatter(
-        x=totals["timestamp"], y=totals["spot"], name="SPX", mode="lines",
-        line=dict(color="#8fa9c4", width=1, dash="dot"), yaxis="y2",
-        hovertemplate="%{x|%H:%M}<br>SPX %{y:,.2f}<extra></extra>"))
-    fig.update_layout(
-        xaxis=_time_axis(span),
-        yaxis=dict(title="Net GEX ($ per 1% move)", gridcolor=_GRID,
-                   tickformat="$~s", zeroline=True, zerolinecolor="#3c5570"),
-        yaxis2=dict(title="SPX", overlaying="y", side="right", showgrid=False),
-        hovermode="x unified",
-    )
-    _dark(fig, 300, legend=True)
-    st.plotly_chart(fig, use_container_width=True)
-    st.caption(
-        "· Net GEX minute by minute against SPX. **A vendor can show you the "
-        "left-hand number; only a stored record can show you the line.** "
-        "Each point is scaled by that snapshot's own spot price, so the "
-        "movement is exposure changing rather than the scale factor drifting."
-    )
-
-
 def _draw_cumulative_volume(intraday: pd.DataFrame, shown: pd.DataFrame,
                             span: list) -> None:
     """Net volume building up through the day, per strike.
@@ -595,7 +640,8 @@ def _draw_cumulative_volume(intraday: pd.DataFrame, shown: pd.DataFrame,
     fig.add_hline(y=0, line=dict(color="#2a3f56", width=1))
     fig.update_layout(xaxis=_time_axis(span),
                       yaxis=dict(title="Call volume − put volume",
-                                 gridcolor=_GRID, tickformat="~s"))
+                                 gridcolor=_GRID,
+                                 **_money_ticks(work["net_volume"])))
     _dark(fig, 320, legend=True)
     st.plotly_chart(fig, use_container_width=True)
     st.caption(
@@ -649,12 +695,12 @@ def _draw_zero_dte_flow(ctx: ViewContext, span: list) -> None:
             mode="lines", line=dict(color=_FLOW_COLOURS[i % len(_FLOW_COLOURS)],
                                     width=1.5),
             hovertemplate=f"{strike:,.0f}<br>%{{x|%H:%M}}"
-                          "<br>Net GEX %{y:$,.0f}<extra></extra>"))
+                          "<br>Net GEX %{y:,.0f}<extra></extra>"))
     fig.add_hline(y=0, line=dict(color="#8fa9c4", width=1))
     fig.update_layout(xaxis=_time_axis(span),
                       yaxis=dict(title="0DTE net GEX", gridcolor=_GRID,
-                                 tickformat="$~s", zeroline=True,
-                                 zerolinecolor="#3c5570"))
+                                 zeroline=True, zerolinecolor="#3c5570",
+                                 **_money_ticks(zero["net_gex"])))
     _dark(fig, 340, legend=True)
     st.plotly_chart(fig, use_container_width=True)
     st.caption(
