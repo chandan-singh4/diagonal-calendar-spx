@@ -28,7 +28,7 @@ answer: a ratio dominated by strikes 300 points away is not about today.
 """
 from __future__ import annotations
 
-from datetime import datetime, time as dtime
+from datetime import UTC, datetime, time as dtime
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -1145,7 +1145,23 @@ def _draw_volume_vs_oi(ctx: ViewContext, per_strike: pd.DataFrame,
         st.info("No strike within 2.5% of spot has traded yet today.")
         return
 
-    st.markdown(_positioning_table(rows, ctx.spx_price), unsafe_allow_html=True)
+    # Which DAY the row describes, chosen explicitly rather than mixed. The
+    # two are never blended: today's change in open interest does not exist
+    # yet, so the Today view says "tonight" in that column instead of
+    # borrowing yesterday's figure to fill it.
+    labels = dealer.day_labels(_market_is_open())
+    options = [labels["prior"], labels["current"]]
+    day = st.segmented_control(
+        "Day", options, default=options[0], key="gex_positioning_day",
+        selection_mode="single", label_visibility="collapsed",
+        help=f"{labels['prior']} is the finished session: volume, what stuck, "
+             f"and a verdict. {labels['current']} is this session's volume — "
+             "the exchange republishes the contract count after the close, so "
+             "today's verdict cannot exist before tonight.") or options[0]
+
+    st.markdown(
+        _positioning_table(rows, ctx.spx_price, day == labels["current"], day),
+        unsafe_allow_html=True)
     _draw_worked_example(rows, per_strike, prior, ctx.session_date)
 
     if rows["delta_oi"].isna().all():
@@ -1275,36 +1291,53 @@ def _positioning(_today: pd.DataFrame, _prior: pd.DataFrame, spot: float,
     return dealer.positioning(_today, _prior, spot)
 
 
-def _positioning_table(rows: pd.DataFrame, spot: float) -> str:
+def _market_is_open() -> bool:
+    """Read from the same pure function the collector schedules on, so the
+    label cannot start disagreeing with whether data is actually arriving."""
+    now_et = datetime.now(UTC).astimezone(ZoneInfo(config.DISPLAY_TIMEZONE))
+    return core_session.session_of(now_et, config.MARKET_HOLIDAYS) is not None
+
+
+def _positioning_table(rows: pd.DataFrame, spot: float, live: bool,
+                       day: str) -> str:
     """The strike rows as ONE HTML block.
 
     One block rather than a Streamlit element per row: forty rows would be
     forty layout containers rebuilt on every rerun, and this is a table, not
     forty widgets.
     """
-    # One volume column, and it is the one the verdict is computed from.
-    # Today's was drawn beside it for a while and was too much to read; it
-    # lives in the worked example now, where it can be explained rather than
-    # sat next to a number it must not be compared with.
-    widest_vol = float(rows["settled_volume"].max()) or 1.0
+    # ONE volume column, showing the day the reader picked. Both at once was
+    # two bars that must never be compared with each other, and it read as
+    # clutter — correctly, because that is what it was.
+    column = "total_volume" if live else "settled_volume"
+    widest_vol = float(rows[column].max()) or 1.0
     deltas = rows["delta_oi"].abs()
     widest_delta = (float(deltas.max()) if deltas.notna().any() else 1.0) or 1.0
     nearest = (rows["strike"] - spot).abs().idxmin()
 
     out = ['<div class="dealer-table">',
            '<div class="dealer-row dealer-head">'
-           '<div>Strike</div><div>Traded yesterday</div>'
-           '<div>Net &Delta;OI (yesterday)</div>'
-           '<div class="c">Position verdict</div></div>']
+           f'<div>Strike</div><div>Traded {day.lower()}</div>'
+           # The change column is NOT the same day as the volume column in
+           # the live view — it does not exist yet — so the header says when
+           # it will, rather than borrowing the word beside it.
+           + (f'<div>Net &Delta;OI (arrives tonight)</div>' if live
+              else f'<div>Net &Delta;OI ({day.lower()})</div>')
+           + '<div class="c">Position verdict</div></div>']
 
     for i, r in rows.iterrows():
         atm = i == nearest
         strike = f"{r['strike']:,.0f}" + (" ATM" if atm else "")
-        settled = float(r["settled_volume"])
-        vol_pct = 100.0 * settled / widest_vol
+        shown_volume = float(r[column])
+        vol_pct = 100.0 * shown_volume / widest_vol
 
-        delta = r["delta_oi"]
-        if pd.isna(delta):
+        # Today's change has not been published yet — it is not zero, not
+        # missing data, and not yesterday's. It is a number that does not
+        # exist until after the close, and the cell says exactly that.
+        delta = float("nan") if live else r["delta_oi"]
+        if live:
+            delta_bar, delta_text, delta_colour = 0.0, "tonight", "#41586e"
+        elif pd.isna(delta):
             delta_bar, delta_text, delta_colour = 0.0, "—", "#41586e"
         else:
             delta_bar = 100.0 * abs(float(delta)) / widest_delta
@@ -1312,9 +1345,11 @@ def _positioning_table(rows: pd.DataFrame, spot: float) -> str:
             delta_colour = ("#10b981" if delta > 0
                             else "#ef4444" if delta < 0 else "#64748b")
 
-        bg, fg, edge = _TONE_BADGE.get(r["tone"], _TONE_BADGE["quiet"])
+        tone = "quiet" if live else r["tone"]
+        verdict = "tonight" if live else r["verdict"]
+        bg, fg, edge = _TONE_BADGE.get(tone, _TONE_BADGE["quiet"])
         badge = (f'<span class="dealer-badge" style="background:{bg};'
-                 f'color:{fg};border:1px solid {edge};">{r["verdict"]}</span>')
+                 f'color:{fg};border:1px solid {edge};">{verdict}</span>')
 
         out.append(
             f'<div class="dealer-row{" atm" if atm else ""}">'
@@ -1322,7 +1357,7 @@ def _positioning_table(rows: pd.DataFrame, spot: float) -> str:
             f'<div class="dealer-bar"><div class="dealer-track">'
             f'<div class="dealer-fill" style="width:{vol_pct:.1f}%;'
             f'background:{_VOL_BAR};"></div></div>'
-            f'<div class="dealer-val">{_fmt_money(settled)}</div>'
+            f'<div class="dealer-val">{_fmt_money(shown_volume)}</div>'
             f'</div>'
             f'<div class="dealer-bar"><div class="dealer-track">'
             f'<div class="dealer-fill" style="width:{delta_bar:.1f}%;'

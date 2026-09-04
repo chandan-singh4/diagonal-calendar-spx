@@ -328,6 +328,26 @@ def _column(frame: pd.DataFrame, name: str) -> pd.Series:
     return pd.Series(0.0, index=frame.index)
 
 
+def day_labels(market_open: bool) -> dict[str, str]:
+    """What to call each side of the positioning panel right now.
+
+    The data does not change when the bell rings; what it MEANS does. The same
+    volume column is a number still being written at 11:00 and a finished
+    total at 16:30, and the reader has no way to tell which unless the label
+    says so. So the word tracks the market:
+
+        market open   →  "Live"   — today's volume, still moving
+        market shut   →  "Today"  — today's volume, final
+
+    "Yesterday" never needs qualifying: that session is over whenever anyone
+    is looking at it.
+
+    Kept here rather than in the view because it is a rule about what the data
+    means, and the view should not be the only place that knows it.
+    """
+    return {"prior": "Yesterday", "current": "Live" if market_open else "Today"}
+
+
 def high_volume_cut(total_volume: pd.Series,
                     percentile: float = HIGH_VOLUME_PERCENTILE) -> float:
     """The volume a strike must reach before it is given a verdict.

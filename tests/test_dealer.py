@@ -514,3 +514,22 @@ def test_there_is_nothing_to_explain_without_a_previous_session():
 def test_there_is_nothing_to_explain_from_an_empty_board():
     assert dealer.worked_example(dealer._blank(dealer.VERDICT_COLUMNS),
                                  pd.DataFrame(), pd.DataFrame()) is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# day_labels — the word tracks the market
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_the_current_session_is_called_live_only_while_it_is():
+    """The data does not change when the bell rings; what it MEANS does. The
+    same volume column is a number still being written at 11:00 and a finished
+    total at 16:30, and nothing else on the row tells the two apart."""
+    assert dealer.day_labels(market_open=True)["current"] == "Live"
+    assert dealer.day_labels(market_open=False)["current"] == "Today"
+
+
+def test_yesterday_is_never_qualified():
+    """That session is over whichever side of the bell the reader is on, so a
+    label that changed would be describing the clock, not the data."""
+    assert dealer.day_labels(True)["prior"] == dealer.day_labels(False)["prior"]
+    assert dealer.day_labels(True)["prior"] == "Yesterday"
