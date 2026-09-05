@@ -2029,8 +2029,7 @@ def get_prior_session_oi(db_path: str, session_date: str,
     with get_conn(db_path) as conn:
         prior = conn.execute(
             """
-            SELECT snapshot_id, DATE(snapshot_timestamp) AS session
-            FROM snapshots
+            SELECT snapshot_id FROM snapshots
             WHERE status = 'COMPLETE'
               AND DATE(snapshot_timestamp) < ?
             ORDER BY snapshot_timestamp DESC
@@ -2044,7 +2043,6 @@ def get_prior_session_oi(db_path: str, session_date: str,
         return conn.execute(
             """
             SELECT strike,
-                   ? AS prior_session,
                    SUM(CASE WHEN right = 'C'
                             THEN COALESCE(open_interest, 0) ELSE 0 END) AS call_oi,
                    SUM(CASE WHEN right = 'P'
@@ -2059,5 +2057,5 @@ def get_prior_session_oi(db_path: str, session_date: str,
             GROUP BY strike
             ORDER BY strike
             """,
-            (prior["session"], prior["snapshot_id"], expiry, expiry)
+            (prior["snapshot_id"], expiry, expiry)
         ).fetchall()
