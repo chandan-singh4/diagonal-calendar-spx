@@ -124,7 +124,8 @@ _PIPELINE_FUNCS = (
     # the persisted eligibility registry
     "_load_eligible_history", "_save_eligible_history", "_update_eligible_history",
     # the pipeline itself
-    "_compute_mc_core", "_build_non_atm_panel", "_run_mission_control",
+    "_compute_mc_core", "_build_non_atm_panel", "_build_non_atm_panel_cached",
+    "_run_mission_control",
     # the query wrappers
     "_load_atm_hist", "_load_atm_hist_fb", "_load_contract_hist", "_load_chain_df",
     "_load_spx_intraday", "_load_prior_close", "_load_transform_marks",

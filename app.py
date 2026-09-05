@@ -72,6 +72,7 @@ from services.loaders import (
     _load_spx_intraday,
     _load_transform_marks,
     compute_transform_scanner,
+    invalidate_on_new_snapshot,
 )
 from services.mission_control import _backfill_eligible_history, _run_mission_control
 from services.sidecars import (
@@ -169,6 +170,13 @@ if latest_snap is None:
 snapshot_id   = latest_snap["snapshot_id"]
 # The poller (defined above) reruns the app only when a newer snapshot appears.
 st.session_state["_active_snapshot_id"] = snapshot_id
+
+# The memoised reads are invalidated HERE and nowhere else (ENH-011). It must
+# come before the first load below: this is the one point that knows a new
+# snapshot has landed, and services/loaders.py no longer expires anything on a
+# clock. Cheap and idempotent — on the common path (same snapshot as the last
+# rerun) it compares two integers and returns.
+invalidate_on_new_snapshot(snapshot_id)
 spx_price     = latest_snap["underlying_price"]
 vix_value     = latest_snap["vix_value"]
 snap_ts_str   = latest_snap["snapshot_timestamp"]

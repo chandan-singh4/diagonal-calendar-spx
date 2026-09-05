@@ -20,6 +20,8 @@ import streamlit, and it must not decide which database to read (DEBT-027).
 """
 from __future__ import annotations
 
+import threading
+
 import pandas as pd
 import streamlit as st
 
@@ -54,45 +56,45 @@ from dataaccess import queries
 # The snapshot_id arguments never reach the query: they were always cache keys
 # alone, which is why they do not appear in dataaccess/queries.py.
 
-@st.cache_data(ttl=55, show_spinner=False, max_entries=48)
+@st.cache_data(show_spinner=False, max_entries=48)
 def _load_atm_hist(expiry: str, days: int) -> pd.DataFrame:
     return queries.load_atm_hist(config.DB_PATH, expiry, days)
 
-@st.cache_data(ttl=55, show_spinner=False, max_entries=48)
+@st.cache_data(show_spinner=False, max_entries=48)
 def _load_atm_hist_fb(expiry: str, days: int) -> pd.DataFrame:
     # load= hands the fallback the MEMOISED loader above, so its second read
     # reuses saved results instead of querying again. See dataaccess/queries.py.
     return queries.load_atm_hist_fb(config.DB_PATH, expiry, days,
                                      load=_load_atm_hist)
 
-@st.cache_data(ttl=55, show_spinner=False, max_entries=48)
+@st.cache_data(show_spinner=False, max_entries=48)
 def _load_contract_hist(expiry: str, strike: float,
                          side: str, days: int) -> pd.DataFrame:
     return queries.load_contract_hist(config.DB_PATH, expiry, strike, side, days)
 
-@st.cache_data(ttl=120, show_spinner=False, max_entries=3)
+@st.cache_data(show_spinner=False, max_entries=3)
 def _load_chain_df(snapshot_id: int) -> pd.DataFrame:
     return queries.load_chain_df(config.DB_PATH, snapshot_id)
 
-@st.cache_data(ttl=120, show_spinner=False, max_entries=3)
+@st.cache_data(show_spinner=False, max_entries=3)
 def _load_spx_intraday(session_date: str, snapshot_id: int) -> pd.DataFrame:
     return queries.load_spx_intraday(config.DB_PATH, session_date)
 
-@st.cache_data(ttl=300, show_spinner=False, max_entries=3)
+@st.cache_data(show_spinner=False, max_entries=3)
 def _load_prior_close(session_date: str) -> "float | None":
     return queries.load_prior_close(config.DB_PATH, session_date)
 
-@st.cache_data(ttl=55, show_spinner=False, max_entries=32)
+@st.cache_data(show_spinner=False, max_entries=32)
 def _load_transform_marks(front: str, back: str, call_s: float, put_s: float,
                            days: int, snapshot_id: int) -> pd.DataFrame:
     return queries.load_transform_marks(config.DB_PATH, front, back,
                                          call_s, put_s, days=days)
 
-@st.cache_data(ttl=55, show_spinner=False, max_entries=32)
+@st.cache_data(show_spinner=False, max_entries=32)
 def _load_latest_atm_iv(expiry: str, snapshot_id: int, n: int = 2) -> list:
     return queries.load_latest_atm_iv(config.DB_PATH, expiry, n)
 
-@st.cache_data(ttl=55, show_spinner=False, max_entries=32)
+@st.cache_data(show_spinner=False, max_entries=32)
 def _load_diagonal_hist(front: str, back: str, call_s: float, put_s: float,
                          days: int, snapshot_id: int) -> pd.DataFrame:
     return queries.load_diagonal_hist(config.DB_PATH, front, back,
@@ -106,7 +108,7 @@ def _load_diagonal_hist(front: str, back: str, call_s: float, put_s: float,
 # this wrapper explicitly (see _compute_mc_core); left to its default it would
 # call the uncached function and recompute all 21 offsets on every rerun.
 compute_transform_scanner = st.cache_data(
-    ttl=120, show_spinner=False, max_entries=8
+    show_spinner=False, max_entries=8
 )(_compute_transform_scanner_pure)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -131,13 +133,97 @@ def _init_db_once(_db_path: str) -> bool:
 # The Gamma Exposure tab's time-aware panels. Keyed on snapshot_id as well as
 # the date so a new snapshot invalidates the memo — the same pattern as
 # _load_spx_intraday, and the reason the argument is present but unused.
-@st.cache_data(ttl=55, show_spinner=False, max_entries=4)
+@st.cache_data(show_spinner=False, max_entries=4)
 def _load_intraday_strike_metrics(session_date: str, snapshot_id: int,
                                   dte_max: "int | None" = None) -> pd.DataFrame:
     return queries.load_intraday_strike_metrics(config.DB_PATH, session_date, dte_max)
 
 
-@st.cache_data(ttl=300, show_spinner=False, max_entries=3)
+@st.cache_data(show_spinner=False, max_entries=3)
 def _load_prior_session_oi(session_date: str,
                            expiry: str | None = None) -> pd.DataFrame:
     return queries.load_prior_session_oi(config.DB_PATH, session_date, expiry)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Invalidation — on the snapshot, never on the clock (ENH-011)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# WHAT WAS WRONG. Every wrapper above carried a TTL — 55s, 120s, 300s — while
+# being keyed on the snapshot. Those two facts disagreed, and the disagreement
+# was measured on 2026-09-05 (M5.0, docs/m5_measurement.md): the Gamma
+# Exposure tab cost 1.09s, then 0.245s on an immediate return, then 0.881s
+# again after 65 seconds idle. The market data had not changed. The clock had.
+# 0.65s went on rebuilding a byte-identical answer.
+#
+# WHAT REPLACES IT. Nothing expires. `invalidate_on_new_snapshot` is called
+# once per script run, before the first read, and drops the saved results only
+# when the collector has actually written a new snapshot. Between snapshots
+# every tab click is a cache hit, however long the gap — a quiet Tuesday
+# afternoon and a whole weekend are the same case, which is correct, because
+# the answer is the same.
+#
+# WHY A CLEAR RATHER THAN A KEY. Six of the wrappers already take snapshot_id
+# and self-invalidate; clearing those merely frees memory that can no longer
+# be reached. The other three — the ATM and contract histories — do NOT take
+# it, and never did: the TTL was their ONLY invalidation. Removing the TTL
+# without this call would cache them for the life of the process and show
+# yesterday's history tomorrow. Adding snapshot_id to their signatures would
+# have meant editing every call site in views/; this does the same job at one
+# point.
+
+# THE TWO EXCLUSIONS ARE DELIBERATE. A prior session's close and its open
+# interest are finished facts — they cannot change, whatever the collector
+# writes next, and both already carry session_date in the key so they roll
+# over on their own each day. Clearing them per snapshot would re-query
+# immutable history every time a snapshot lands, which is MORE often than the
+# 300s TTL they used to have. Leaving them out makes them strictly cheaper
+# than before, not merely differently cached.
+_SNAPSHOT_SCOPED = (
+    _load_atm_hist,
+    _load_atm_hist_fb,
+    _load_contract_hist,
+    _load_chain_df,
+    _load_spx_intraday,
+    _load_transform_marks,
+    _load_latest_atm_iv,
+    _load_diagonal_hist,
+    _load_intraday_strike_metrics,
+    compute_transform_scanner,
+)
+
+
+@st.cache_resource(show_spinner=False)
+def _generation() -> dict:
+    """The snapshot the saved results belong to, held once per PROCESS.
+
+    Not st.session_state: that is per browser tab, and two tabs open on the
+    same dashboard share one cache. Holding the marker per session would let
+    the second tab believe the cache was current when the first had already
+    cleared it, which is the stale-read this whole mechanism exists to
+    prevent. @st.cache_resource is process-wide, which matches the thing it
+    is describing.
+    """
+    return {"snapshot_id": None, "lock": threading.Lock()}
+
+
+def invalidate_on_new_snapshot(snapshot_id: int) -> bool:
+    """Drop the memoised reads if this is a snapshot we have not served yet.
+
+    Returns True when it cleared, which is what the tests assert on — a
+    function whose only effect is on a cache is otherwise untestable without
+    reaching inside Streamlit.
+
+    The lock matters even though Streamlit runs one script at a time per
+    session: the autorefresh poller and a second browser tab are genuinely
+    concurrent, and two threads both finding a new id would otherwise both
+    clear, the second wiping results the first had just recomputed.
+    """
+    state = _generation()
+    with state["lock"]:
+        if state["snapshot_id"] == snapshot_id:
+            return False
+        state["snapshot_id"] = snapshot_id
+        for memo in _SNAPSHOT_SCOPED:
+            memo.clear()
+        return True

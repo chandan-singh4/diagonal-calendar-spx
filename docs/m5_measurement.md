@@ -83,3 +83,57 @@ cheapest wins are both inside the current stack:
 Neither requires leaving Streamlit. The open question this cannot answer is
 browser-side render time, and that should be measured before any migration
 decision — not assumed in either direction.
+
+---
+
+# After the two fixes (same day, same instrument)
+
+Both fixes were made and re-measured with the harness that found the problem.
+
+**ENH-011** — every TTL removed from `services/loaders.py`; the memo is now
+dropped by `invalidate_on_new_snapshot()`, called once per script run from
+`app.py` before the first read. Two reads are deliberately excluded: a prior
+session's close and its open interest are finished facts, already keyed by
+session date, and clearing them per snapshot would re-query immutable history
+*more* often than the 300s TTL they replaced.
+
+**ENH-012** — `_build_non_atm_panel` was walking the **whole** eligibility
+registry on every click to display twenty cards. The registry holds 1,286
+entries. That was 0.46s per click, on every tab, including tabs that never
+show the panel. It is now memoised on (snapshot, lookback).
+
+Note the first measurement under-reported this at 0.09s: the registry grew
+between the two runs, and the cost scales with it. The panel build is now paid
+once per snapshot, so registry size no longer touches click latency — but it
+does still scale the once-per-snapshot compute.
+
+| click | before | after |
+|---|---|---|
+| scanner | 0.188 s | **0.102 s** |
+| entry | 0.162 s | **0.066 s** |
+| edge | 0.846 s | **0.245 s** |
+| strike | 2.662 s | **0.302 s** |
+| gex | 1.033 s | **0.939 s** |
+| research | 1.585 s | **0.207 s** |
+
+Gamma Exposure barely moved because its cost is a genuine first-visit query,
+not repeated work — and a first visit has to happen once.
+
+The idle test, which is what proved the TTL was the problem, now shows the
+opposite result:
+
+| | before | after |
+|---|---|---|
+| gex, first visit | 1.09 s | 0.94 s |
+| gex, immediate return | 0.245 s | 0.184 s |
+| **gex, return after 65s idle** | **0.881 s** | **0.133 s** |
+
+The cache now holds across the idle instead of expiring into a rebuild of the
+same answer.
+
+**Caveat on the "after" column:** the OS file cache was warm from the earlier
+runs, so first-visit figures are flattered. The idle comparison is not
+affected by this and is the one to trust.
+
+The browser-side caveat at the top of this document still stands: none of this
+measures paint time.

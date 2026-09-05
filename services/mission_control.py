@@ -467,6 +467,40 @@ def _build_non_atm_panel(non_atm_current: pd.DataFrame, registry: dict,
 
     return capped, in_window_total, fallback_used
 
+@st.cache_data(show_spinner=False, max_entries=8)
+def _build_non_atm_panel_cached(_non_atm_current: pd.DataFrame, _registry: dict,
+                                 _dte_by_expiry: dict, lookback_days: int,
+                                 snapshot_ts: str, snapshot_id: int):
+    """The panel build, memoised on the snapshot (ENH-012).
+
+    WHY THIS IS WORTH CACHING, with a number. `_build_non_atm_panel` walks the
+    WHOLE registry and builds a card for every entry, then shows the top 20.
+    The registry holds 1,286 entries as of 2026-09-05 and only grows. Measured
+    in M5.0: 0.46s, on every click, on every tab — including tabs that never
+    display the panel, because the header's Attention Strip needs the result.
+
+    Nothing in the build is time-dependent: given the same registry, the same
+    expiry map, the same lookback and the same snapshot, it returns the same
+    cards. So it is computed once per (snapshot, lookback) and read thereafter.
+
+    THE UNDERSCORES ARE LOAD-BEARING. A leading underscore tells st.cache_data
+    not to hash that argument — required for the DataFrame and dicts, which are
+    unhashable, and safe here only because all three are derived from the
+    snapshot that IS in the key. `snapshot_id` is what makes the entry stale,
+    and `lookback_days` is in the key because the reader can change it without
+    a new snapshot arriving.
+
+    NOT cached inside _compute_mc_core: this depends on lookback_days, which
+    the reader changes from the header, and folding it in would recompute the
+    whole Phase A/B sweep every time that dropdown moved.
+
+    st.cache_data returns a copy per call, so the caller may safely stamp
+    is_new onto the cards it gets back — which it does, immediately below.
+    """
+    return _build_non_atm_panel(_non_atm_current, _registry, _dte_by_expiry,
+                                 lookback_days, snapshot_ts)
+
+
 def _run_mission_control(chain_df: pd.DataFrame, spx_price: float,
                           snapshot_id: int, snapshot_ts: str,
                           dte_by_expiry: dict, lookback_days: int) -> dict:
@@ -480,9 +514,9 @@ def _run_mission_control(chain_df: pd.DataFrame, spx_price: float,
     """
     core = _compute_mc_core(chain_df, spx_price, snapshot_id, snapshot_ts)
 
-    non_atm_panel, n_non_atm_in_window, n_fallback_used = _build_non_atm_panel(
+    non_atm_panel, n_non_atm_in_window, n_fallback_used = _build_non_atm_panel_cached(
         core["non_atm_current"], core["registry"], dte_by_expiry,
-        lookback_days, snapshot_ts,
+        lookback_days, snapshot_ts, snapshot_id,
     )
 
     current_keys = {card_key(c) for c in non_atm_panel if c["is_live"]}
