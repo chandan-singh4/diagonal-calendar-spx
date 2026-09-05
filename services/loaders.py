@@ -20,6 +20,7 @@ import streamlit, and it must not decide which database to read (DEBT-027).
 """
 from __future__ import annotations
 
+import os
 import threading
 
 import pandas as pd
@@ -193,6 +194,41 @@ _SNAPSHOT_SCOPED = (
 )
 
 
+# The source files whose contents these saved results depend on. A change to
+# any of them means the answers in the cache were produced by code that no
+# longer exists.
+_SOURCE_FILES = (__file__, db.__file__, queries.__file__)
+
+
+def _code_fingerprint() -> int:
+    """The newest modification time across the code behind these reads.
+
+    WHY THIS EXISTS. Removing the TTLs (ENH-011) removed something nobody was
+    relying on deliberately: a stale answer used to correct itself within five
+    minutes. Now the only thing that clears the cache is a new snapshot — so
+    when a query is FIXED, an already-running dashboard keeps serving the old
+    answer, and if the collector is stopped it keeps serving it forever.
+
+    That is not hypothetical. On 2026-09-05 the history-window fix (BUG-033)
+    landed while the collector was idle over a weekend; the dashboard went on
+    drawing four sessions under a "5D" label from results it had memorised
+    before the fix, and no amount of waiting would have corrected it.
+
+    In production this value never changes, so this costs three stat() calls
+    per rerun and does nothing. After a deploy or an edit, it changes once and
+    the cache is dropped.
+    """
+    newest = 0
+    for path in _SOURCE_FILES:
+        try:
+            newest = max(newest, os.stat(path).st_mtime_ns)
+        except OSError:
+            # A missing or unreadable source file is not worth failing a page
+            # load over; the snapshot id below still invalidates normally.
+            continue
+    return newest
+
+
 @st.cache_resource(show_spinner=False)
 def _generation() -> dict:
     """The snapshot the saved results belong to, held once per PROCESS.
@@ -204,11 +240,12 @@ def _generation() -> dict:
     prevent. @st.cache_resource is process-wide, which matches the thing it
     is describing.
     """
-    return {"snapshot_id": None, "lock": threading.Lock()}
+    return {"key": None, "lock": threading.Lock()}
 
 
 def invalidate_on_new_snapshot(snapshot_id: int) -> bool:
-    """Drop the memoised reads if this is a snapshot we have not served yet.
+    """Drop the memoised reads if this is a snapshot we have not served yet,
+    or if the code that produced them has changed since.
 
     Returns True when it cleared, which is what the tests assert on — a
     function whose only effect is on a cache is otherwise untestable without
@@ -219,11 +256,12 @@ def invalidate_on_new_snapshot(snapshot_id: int) -> bool:
     concurrent, and two threads both finding a new id would otherwise both
     clear, the second wiping results the first had just recomputed.
     """
+    key = (snapshot_id, _code_fingerprint())
     state = _generation()
     with state["lock"]:
-        if state["snapshot_id"] == snapshot_id:
+        if state["key"] == key:
             return False
-        state["snapshot_id"] = snapshot_id
+        state["key"] = key
         for memo in _SNAPSHOT_SCOPED:
             memo.clear()
         return True
