@@ -35,6 +35,7 @@ IV SCALE NOTE
 import logging
 import sys
 from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
@@ -49,7 +50,8 @@ import schwab_client
 # leading underscores for the same reason; both are transitional — see ADR-032.
 # core.charts is gone from here entirely: every chart site moved to views/ in
 # step 2.4, which is what DEBT-030's fix has been waiting for.
-from core import market, position
+from core import contract, market, position
+from core import session as core_session
 from core.charts import to_display_time
 
 # ─── services/ — the page's data layer, extracted in M2 step 2.5 ──────────────
@@ -64,7 +66,9 @@ from services.loaders import (
     _load_contract_hist,
     _load_diagonal_hist,
     _load_latest_atm_iv,
+    _load_intraday_strike_metrics,
     _load_prior_close,
+    _load_prior_session_oi,
     _load_spx_intraday,
     _load_transform_marks,
     compute_transform_scanner,
@@ -91,6 +95,7 @@ from ui import controls, header, locks, refresh, sidebar, theme
 # for nothing else; the @st.cache_data wrappers stay here and travel on it.
 from views import edge as view_edge
 from views import entry as view_entry
+from views import gex as view_gex
 from views import historical as view_historical
 from views import research as view_research
 from views import scanner as view_scanner
@@ -174,6 +179,21 @@ snap_dt = datetime.strptime(snap_ts_str[:19], "%Y-%m-%d %H:%M:%S").replace(
 snap_age_secs = (datetime.now(UTC) - snap_dt).total_seconds()
 session_date  = snap_ts_str[:10]
 
+# How old the newest price is ALLOWED to be right now, in seconds — 60 in the
+# first and last half hour, 300 midday, None when the market is shut. This is
+# the collector's own polling interval, read from the same pure function the
+# collector uses, so the header cannot start disagreeing with the thing it is
+# reporting on (core/session.py). Not to be confused with `poll_interval` above,
+# which is how often the DASHBOARD looks for new data — a display preference.
+_expected_interval = core_session.expected_interval(
+    core_session.session_of(
+        datetime.now(UTC).astimezone(ZoneInfo(config.DISPLAY_TIMEZONE)),
+        config.MARKET_HOLIDAYS,
+    ),
+    config.POLL_INTERVAL_EVENT,
+    config.POLL_INTERVAL_NORMAL,
+)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Load option chain
 # ─────────────────────────────────────────────────────────────────────────────
@@ -186,7 +206,9 @@ if chain_df.empty:
     )
     st.stop()
 
-available_expiries = sorted(chain_df["expiry"].unique())
+# Sorted by when each contract ENDS, not as text — the third Friday's a.m.
+# contract settles at the open and so comes before the p.m. one that day.
+available_expiries = sorted(chain_df["expiry"].unique(), key=contract.sort_key)
 dte_by_expiry = chain_df.groupby("expiry")["dte"].first().astype(int).to_dict()
 
 
@@ -250,6 +272,7 @@ header.render(
     snap_age_secs=snap_age_secs,
     snap_ts_str=snap_ts_str,
     change=change,
+    expected_interval=_expected_interval,
 )
 header.render_attention_strip(MC)
 header.render_token_banner(_token_age, sys.executable)
@@ -261,12 +284,28 @@ header.render_token_banner(_token_age, sys.executable)
 # constraints live in there, and two of them fail only at runtime.
 # ═══════════════════════════════════════════════════════════════════════════════
 
-selection = controls.render(
-    chain_df=chain_df,
-    available_expiries=available_expiries,
-    dte_by_expiry=dte_by_expiry,
-    spx_price=spx_price,
-)
+# The Gamma Exposure tab uses NONE of these — it has its own expiry control
+# and reads every strike — so a front/back pair and two strike selections
+# sitting above it are four widgets that change nothing a reader can see.
+#
+# HIDDEN, NOT SKIPPED. The widgets still render and still hold their state,
+# because the values feed ViewContext for every other tab and because a
+# Streamlit widget that stops being created loses what was selected in it.
+# `active_tab` is written before the rerun that follows a nav click, so it is
+# already correct this far up the script.
+if st.session_state.get("active_tab") == "gex":
+    st.markdown(
+        "<style>[class*='st-key-ctrlbar']{display:none;}</style>",
+        unsafe_allow_html=True,
+    )
+
+with st.container(key="ctrlbar"):
+    selection = controls.render(
+        chain_df=chain_df,
+        available_expiries=available_expiries,
+        dte_by_expiry=dte_by_expiry,
+        spx_price=spx_price,
+    )
 front_expiry = selection.front_expiry
 back_expiry  = selection.back_expiry
 put_strike   = selection.put_strike
@@ -346,6 +385,8 @@ VIEW_CTX = ViewContext(
     get_entry_lock=_get_entry_lock,
     render_all_locks_popover=locks._render_all_locks_popover,
     backfill_eligible_history=_backfill_eligible_history,
+    load_intraday_strike_metrics=_load_intraday_strike_metrics,
+    load_prior_session_oi=_load_prior_session_oi,
     chart_colors=CHART_COLORS,
 )
 
@@ -361,12 +402,30 @@ VIEW_CTX = ViewContext(
 # comments sixty lines below, so adding or renaming a tab meant editing two
 # places that could not see each other. Nothing is dispatched that is not in
 # this list, and nothing in this list goes undispatched.
+def _strike_with_history(ctx) -> None:
+    """Strike Detail with the Historical Statistics section beneath it.
+
+    They were two tabs and are now one. Both answer questions about the SAME
+    pair of expiries the controls bar has selected — one at today's strikes,
+    one over the past twenty days — and a reader comparing them was clicking
+    between two tabs to hold both in their head.
+
+    Composed HERE rather than by having one view import the other: views/ may
+    not import views/ (test_layering), and for a good reason — a view that
+    calls another is a view you cannot render or reason about alone. This
+    function is the page deciding what goes on a page, which is app.py's job.
+    """
+    view_strike.render(ctx)
+    st.divider()
+    view_historical.render(ctx)
+
+
 _TABS = [
     ("scanner",  "🔭  Scanner",          view_scanner.render),
     ("entry",    "📊  Entry Analysis",   view_entry.render),
     ("edge",     "📈  Calendar Edge",    view_edge.render),
-    ("strike",   "🎯  Strike Detail",    view_strike.render),
-    ("hist",     "📉  Historical Stats", view_historical.render),
+    ("strike",   "🎯  Strike Detail",    _strike_with_history),
+    ("gex",      "🧲  Gamma Exposure",   view_gex.render),
     ("research", "🔬  Research",         view_research.render),
 ]
 

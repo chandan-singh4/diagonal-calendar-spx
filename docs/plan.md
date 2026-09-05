@@ -53,7 +53,7 @@ weeks of work, not days.
 | **M0** | Stabilize & Clean | Make the repo safe to work in. No behaviour change. **Blocks everything.** | Clean `git status`, reproducible env, linted, backed up, ~318 MB reclaimed, context files live | 14 tasks — 10 S, 4 M | — | **everything** | ✅ Done, merged |
 | **M1** | Test Foundation | Make change safe. **Keystone — everything after depends on it.** | ≥70% coverage of non-UI code, checks that run unprompted, regressions in M2 detectable | 9 tasks — 3 S, 4 M, 2 L | M0 | M2 → all | ✅ Done (80%, 462 tests) |
 | **M2** | Architecture Refactor | Decompose the monolith. Behaviour-preserving, verified by M1. | `app.py` < 400 lines (composition only); `core/` framework-agnostic and fully tested | 14 tasks — 10 M, 4 L | M1 | M3, M4, M6 (so M5, M7, M8 too) | ✅ Done 2026-07-31, merged to main 2026-08-01 |
-| **M3** | Data Layer Hardening | Put the data pipeline on a sustainable footing | Bounded DB growth, monitored collection, documented operations | 9 tasks — 3 S, 4 M, 2 L | M2 | M8; 3.2 also gates M6.3 | ← **next** |
+| **M3** | Data Layer Hardening | Put the data pipeline on a sustainable footing | Bounded DB growth, monitored collection, documented operations | 9 tasks — 3 S, 4 M, 2 L | M2 | M8; 3.2 also gates M6.3 | 🔄 **In progress** — 3.1, 3.2, 3.4 done 2026-08-09 |
 | **M4** | Backend API *(gated)* | Stable contract over `core/`; prerequisite for any UI migration | Documented API; Streamlit still running unchanged | 5 tasks — 1 S, 3 M, 1 L | M2 | M5 | Not started |
 | **M5** | Dashboard Modernization *(decision point)* | Resolve the Streamlit ceiling — **only if it still hurts after M2** | Live-updating UI without full-page reruns; charts hold zoom across updates | 7 tasks — 1 S, 1 M, 3 L, 2 XL | M2 + M4 (5.0 gate) | — *(leaf)* | Gated at 5.0 |
 | **M6** | Analytics Engine | Answer the questions the project set out to answer | Core unvalidated questions answered from data, or explicitly retired | 6 tasks — 2 M, 3 L, 1 XL | M2 (6.3 also needs 3.2) + ~20 trades | M7 | Blocked: needs ~20 trades, have 6 |
@@ -183,26 +183,97 @@ between two runs minutes apart as the collector adds snapshots.
 
 ---
 
+## M3 — Data Layer Hardening
+
+**Goal:** put the data pipeline on a sustainable footing. Bounded growth, monitored collection,
+documented operations.
+
+**Status: COMPLETE 2026-09-03 apart from 3.5, which is Chandan's call. 3.1, 3.2, 3.3, 3.4, 3.6,
+3.7, 3.8 and 3.9 are all done. 3.5 is Chandan's call** — he considers the alerting need already met by
+the 3.4 watchdog, which does email and desktop notification and is proven on a real outage; what
+3.5 would add on top is the *history* of gaps on screen, and `db.get_gaps()` is still uncalled.
+
+**The one thing to understand before reading the table.** Collection began 2026-06-23, so on the
+day the policy was written **the oldest expiry was 47 days past and a 90-day rule deleted nothing**
+(ADR-044). Growth continues at ~82 MB/trading-day until roughly November. That is not an argument
+against 3.2 — the mechanism has to exist before the data ages into it — but **3.2 landing is not
+"growth is solved."** It is "growth will be bounded, starting later." Anyone reading the ✅ and
+concluding the storage problem is behind them will be surprised in October.
+
+| # | Task | Status | Notes |
+|---|---|---|---|
+| 3.1 | Decide and document a retention policy | ✅ **Done 2026-08-09** | **ADR-044.** Chandan chose **90 days past expiry** and **manual invocation** with the alternatives in front of him. `option_rows` is the only prunable table. `atm_iv_by_expiry`, `snapshots`, `collection_gaps` kept forever — 5.3 MB for 47 days, 0.26% of the database, so keeping the history is free. **Expiries used by a trade are exempt at any age**, read from the trades rows themselves so logging a trade protects its data with no further action. Measured rather than estimated: `dbstat` shows `option_rows` 1,399.6 MB with 636.4 MB of indexes on it, so **a deleted row reclaims ~2.2× its own bytes** — the audit counted table bytes only and understated the saving. |
+| 3.1a | **Entry-IV snapshotting — the gate on all pruning** | ✅ **Done 2026-08-09** | Not in the original task list; it is ADR-016's blocker, and 3.2 could not ship without it. `get_entry_iv_context()` reconstructed a trade's entry-time term structure by reading historical `option_rows`; pruning those made the question permanently unanswerable **and silently so** — Regime Analysis would plot fewer trades each month with nothing on screen saying why. Eight `entry_*` columns now carry the answer on the trade row. Written by `insert_trade`/`update_trade`, **not by the call site**, so it cannot be forgotten; an edit to entry date/time/legs recomputes it, because a stored context describing the trade as it *used to be* is worse than none. Reconstruction survives as the fallback for pre-M3 rows. |
+| 3.2 | Implement retention/archival + a dry-run mode | ✅ **Done 2026-08-09** | `db.plan_prune` / `db.execute_prune` + `scripts/prune.py`. **Split in two on purpose:** planning is read-only and acting takes a plan it is handed, so a caller cannot delete without holding the description of what it deletes, and the report shown and the rows deleted cannot be two different answers. Three gates: reporting is the default and `--execute` is a flag; `--execute` refuses without a backup newer than the database; past that it asks for the **row count in figures** — a y/n prompt is answered by reflex, a number has to be read off the report. Closed stdin cancels, which is exactly the unattended case. **Rehearsed on the real database** with `--today 2026-12-01`: 42 expiries / 9,901,390 rows (85.8%) would go, **8 expiries / 1,589,912 rows held back for the 6 practice trades**. 31 tests across `test_retention.py` and `test_prune_script.py`. **VACUUM is deliberately not automatic** — it needs exclusive access and free disk equal to the database; the script prints the command instead. |
+| 3.3 | Proper migration framework (versioned, forward-only, tested) | ✅ **Done 2026-09-03** | **ADR-051.** `schema.py`: a numbered list of migrations and a runner. The pattern it replaces was `try: ALTER ... except Exception: pass`, ten times over, whose "# column already exists" comment was a **guess** — it could not tell that from a full disk, a locked database, a misspelled type or a missing table, and treated all four as success. It also left **no record**: ten changes had been applied to the live database and `schema_version` still said 1. **Versioned** (a row per migration with timestamp and description; `SCHEMA_VERSION` derived from the list, never written beside it). **Forward-only** — no `down()`, because reversing a change to the one irreplaceable file means restoring the backup, which is a real answer. **Loud** — `add_column` asks `PRAGMA table_info`, so the only suppressed condition is the one actually checked. **Atomic per step** — the version row is written in the same transaction as its change, since half-applied is the worst outcome and the next startup would trust the version. **Ordered and gapless, checked at import.** The journal's table now joins the version number; keeping it out was what made the version meaningless, and the test asserting the old separation was rewritten with the rule it pinned. **Deliberately does not own** the conditional unique-index creation (BUG-028) — a forward-only migration must succeed or raise, and "found duplicates, warned, carried on" is neither. Sabotage-proved five ways. |
+| 3.4 | Collector liveness monitoring + alerting on missed cycles | ✅ **Done 2026-08-09** | **ADR-045.** `scripts/watchdog.py`, every 10 minutes all day via Task Scheduler, alerting by desktop toast **and** email. The dashboard's TOKEN EXPIRED banner already worked this morning; nobody was looking at it — **an alarm reachable only through a page you open is not an alarm**, so this had to live outside Streamlit. Observes only: no restart, no re-auth, no DB write. Most of the work was **not crying wolf** — silent overnight/weekend/holiday, an opening grace period, 2.5× the interval rather than 1×, and one alert per hour per outage. **Two bugs found and pinned**: a future-dated price was reported as "collecting normally" (a lying clock poisons the reassuring answers too), and at 16:00 a dead-all-afternoon collector would have emailed **"RECOVERED"** — the blind states now return `informative=False`, so an all-clear requires positively seeing fresh data. Session logic extracted to **`core/session.py`** because the header's threshold *is* the collector's poll interval, not a second policy; delegation proved by sabotage failing both new and pre-existing tests. Header countdown replaced by a ticking clock + **Time since last data** (the countdown's worst case displayed `0s` and sat there). 48 new tests. |
+| 3.5 | Surface `collection_gaps` in the dashboard | Not started | Data collected since day one and never once shown. `db.get_gaps()` already exists and is uncalled. |
+| 3.6 | Log `INSERT OR IGNORE` rowcount mismatches | ✅ **Done 2026-09-03** | **ADR-046 explained the symptom on 2026-08-19; ADR-050 finished the task on 2026-09-03.** The discards were never duplicates: SPX lists **two** options for each third Friday — the monthly settling at the OPEN and the SPXW weekly settling at the CLOSE — and Schwab returns both under one expiry key. The parser threw away the contract symbol, the unique index had no room for the difference, and `INSERT OR IGNORE` silently dropped the second. 160 = 80 calls + 80 puts = exactly one expiry, which is why the number never varied across **2,181 identical warnings**. Both contracts are now stored with a `settlement` column. **What M3.6 itself added:** the shortfall is now **classified**, because one WARNING for both kinds is what let 2,181 of them go unread. A duplicate is harmless and says so; a row the database REFUSED is an ERROR that names SQLite's own reason and identifies the contract. Exact, not inferred — the unique key of every offered row is looked up afterwards, and an absent key is a row that was thrown away. The reason is obtained by replaying one lost row inside a rolled-back SAVEPOINT, so it is the database's message and not a guess. **Deliberately still does not raise** (ADR-022 step 2 half-adopted): aborting would discard the thousands of good rows beside the bad one. Sabotage-proved four ways — and the fourth sabotage passed at first, which is how the savepoint test came to be rewritten to prove what it claimed. |
+| 3.7 | Data-quality checks: IV outliers, stale quotes, missing legs | ✅ **Done 2026-09-03** | `scripts/audit.py`. **Not a test — a different question.** Tests run against a temporary database and prove the code behaves; this reads the REAL record and asks whether what we have is complete. Every check in the suite passed throughout ADR-046, ADR-048 and ADR-049, because they were written against what the code was believed to do and nothing asked whether the data was there. **Read-only by construction** (`mode=ro`; a write is refused by SQLite, and a test proves it). Four cheap checks over the whole history plus two `--deep` ones over the 18.7M-row `option_rows`. The daily expectation is **derived from `core.session`** rather than restated, so ADR-049's window change carried through with no edit — pinned by a test that shrinks the window and expects 126. **It found a real bug on its first run: BUG-030**, the broker's -999.0 "no value" sentinel stored as data, unknown until today — 5,127 rows with `iv = -9.99` and, once the record was read properly while fixing it, 5,081 rows in each of the four greeks too. **The parser side is fixed** (`_value_or_none`, exact equality — -9.99 is also a real theta and 38 rows hold it); the existing rows and the collector restart are still open. It also correctly filed the two known ten-week holes as history rather than faults, and reconciles short days against `collection_gaps` so the gap detector working is a note, not a finding (the ADR-045 lesson). **Deliberately does not repair anything** — several findings are expected history, telling them apart needs a human, and an audit that edited the one irreplaceable file would be a second thing that can go wrong. |
+| 3.8 | Streamline Schwab token re-auth; document the runbook | ✅ **Done 2026-09-03** | Both halves. The streamlining had in fact already shipped as `scripts/reauth.py` (moves the old token aside, runs the flow, **restores it on abort or failure**, reports the new expiry) — but it was reachable only by knowing it existed: **no file in `docs/` or `README.md` mentioned it**, which is the whole failure mode 3.8 names. `docs/RUNBOOK_REAUTH.md` is now the runbook: the three ways you find out it is due (banner from day 6, watchdog pop-up and email, `--check`), the seven steps, what to do when it goes wrong, and the `get_client()` trap written down as a thing never to do. **Not done here:** no change to the 7-day clock — Schwab sets it and the interactive login is a deliberate security boundary, so “streamline” can only ever mean *safe and documented*, not *automatic*. |
+| 3.9 | `docs/DATABASE.md`, `docs/OPERATIONS.md`, `docs/TROUBLESHOOTING.md` | ✅ **Done 2026-09-03** | Written last, by design, so they describe what M3 actually built rather than what it intended. **`OPERATIONS.md`** — almost all of it is "do nothing": one recurring chore (the 7-day Schwab re-auth), what runs by itself and how, the collection day and why it ends at 16:02, checking on it, and the housekeeping. **`TROUBLESHOOTING.md`** — organised by SYMPTOM, not by cause, because at the moment something is wrong the cause is the unknown; nine of them, each with what it means, what it does *not* mean, and what to do. **`DATABASE.md`** — the six tables, what is kept forever versus prunable (ADR-044), the two unique indexes and why `COALESCE(settlement,'?')` is in one of them (ADR-046), and the traps: IV is decimal here and a percentage at the broker, the greeks are not divided, -999.0 is the broker saying "nothing", a blank is never a zero, and a scanning UPDATE holds the write lock for ~50s against a 15s collector timeout. **Every command and flag in all three was verified against the scripts rather than recalled.** Complements `DOCUMENTATION.md` §7 (the conceptual model) rather than duplicating it. |
+
+**Exit:** bounded DB growth; monitored collection; documented operations.
+
+---
+
 ## Immediate next actions
 
-1. **M2 is done — the next milestone is M3, Data Hardening.** `app.py` finished at
+0. **First: finish the display half of BUG-023 — it is the only thing a user can see.** Both
+   third-Friday contracts are now *recorded* but the screen still shows one. Chandan's
+   decision: each becomes its own entry in the expiry lists, the p.m. one **unlabelled**
+   (`21 Aug 2026`) and the a.m. one **marked** (`21 Aug 2026 (AM)`) — that way round because
+   p.m. is the normal case and the label should mark the exception. This makes an expiry a
+   date *plus* a contract, a pair that must travel everywhere the date does (~20 files).
+   **Start with the saved-position expiry sweep**, which parses the label as a plain ISO date;
+   it already refuses to delete a lock it cannot parse, so the failure mode is a stale entry
+   rather than a lost one, but it is the piece to check hardest. Fold BUG-024 in: the legacy
+   unlabelled rows **are** attributable at read time (proved 170/170 on open interest).
+1. **M3 is done — 3.3, 3.6, 3.7, 3.8 and 3.9 all landed 2026-09-03; 3.5 is Chandan's call.** 3.1, 3.2, the entry-IV gate
+   and 3.4 all landed 2026-08-09 (ADR-044, ADR-045). **3.8, the re-auth runbook, is now the
+   highest-value item left** precisely *because* 3.4 shipped: the watchdog tells Chandan the
+   moment collection stops and says nothing about what to do next, and re-auth is a weekly
+   chore performed under time pressure on a market morning. 3.9 is last because
+   `OPERATIONS.md` has to describe `prune.py`, and documenting a procedure before it has
+   been run in anger writes fiction.
+   **The caveat on 3.4's ✅ is now mostly discharged (2026-09-03).** It used to read: no
+   *real* outage has travelled the whole path, and staging one needs the collector stopped
+   or the database altered. **That premise was wrong** — `DB_PATH` and `STATE_DIR` are both
+   environment-overridable, so an outage can be staged in complete isolation without
+   touching the collector, the real database or the real state file. Done: a throwaway
+   database holding one genuine `snapshots` row timestamped three hours back, with the
+   market open. The real `check()` returned **"🚨 No prices for 3h 0m — collection has
+   stopped"**, correctly named the MIDDAY session and its 12m 30s limit, folded in the token
+   note, and `should_alert()` decided to **send a new alert** — against a control run on the
+   live database in the same breath returning ✅ and sending nothing. **What that leaves
+   unproven is only the join** between "decided to alert" and "sent", one call away from
+   two channels `--test-alert` already verifies. It also **found BUG-029**: the headline is
+   printed *before* the alert is sent, and that print kills the process on a redirected
+   stdout. The lesson is the same one as 2026-08-19 — the rehearsal that "could not be
+   staged" was staged in ten minutes and found a real defect.
+2. **Do not read 3.2's ✅ as "database growth is handled."** It is handled *eventually*.
+   Collection began 2026-06-23; a 90-day rule reaches nothing until about November, and
+   the database grows ~82 MB per trading day until then. If disk becomes a real problem
+   before November, that is a separate conversation with separate options (audit §5.8's
+   downsampling), not a reason to reopen ADR-044.
+3. **M2 is done.** `app.py` finished at
    **392 lines** from 4,283 (ADR-041), and DEBT-002 is closed. Nothing in M2 is
-   outstanding. Before starting M3, note that step 2.5 left two P3 rows it deliberately
+   outstanding. Step 2.5 left two P3 rows it deliberately
    did not fix inside a move: **DEBT-033** (the `services/` names still carry app.py's
    leading underscores — rename in a commit whose diff shows only the rename, and update
    `tests/app_loader.py::_PIPELINE_FUNCS` in the same change) and **DEBT-034**
    (`spx_intraday["ts_et"]` computed and never read — check git history for a removed
    chart first; BUG-019 is the standing reminder that "dead" and "dropped" look identical).
-2. **The 6 practice trades can now safely be discarded.** BUG-016 was the blocker — the
+4. **The 6 practice trades can now safely be discarded.** BUG-016 was the blocker — the
    next ID after a deletion collided with a live PRIMARY KEY and the save raised. Fixed
    2026-07-26 (ADR-023 §1) and covered by a test that runs exactly that sequence. Note the
    related commitment in STATUS.md: the app must save market conditions *with each trade*
    before serious trading resumes.
-3. **Work DEBT-025 down toward zero, then gate on it.** 85 lint findings remain after the
+5. **Work DEBT-025 down toward zero, then gate on it.** 85 lint findings remain after the
    first pass. Most dissolve during the M2 decomposition. Only wire `ruff check` into the
    M1.9 pre-commit hook once it is at zero — a gate that fails on every commit teaches
    everyone to bypass it.
-4. **Still blocked on the user: BUG-001.** The duplicate-collector theory is dead (ADR-018).
+6. **Still blocked on the user: BUG-001.** The duplicate-collector theory is dead (ADR-018).
    Needs a symptom, a tab, and a screenshot.
 
 ---
@@ -211,7 +282,7 @@ between two runs minutes apart as the collector adds snapshots.
 
 | Decision | Blocks | Detail |
 |---|---|---|
-| **Entry-IV-context snapshotting** | M3.2 | ~~Blocker~~ **downgraded 2026-07-26**: the 6 existing trades are being discarded, so no backfill is needed and pruning can proceed freely. The design fix still stands for *future* trades — `get_entry_iv_context()` reads historical `option_rows`, so any trade logged from now on loses its entry context once its expiries are pruned. Implement entry-IV snapshotting into `trades` **alongside** the pruner in M3, before the journal accumulates trades that matter. See ADR-016. |
+| ~~**Entry-IV-context snapshotting**~~ | ~~M3.2~~ | ✅ **Closed 2026-08-09 (ADR-044).** Eight `entry_*` columns on `trades`, written inside `insert_trade`/`update_trade` so no call site can omit them; `get_entry_iv_context()` reconstruction remains the fallback for pre-M3 rows. The 2026-07-26 note said "implement it alongside the pruner" and that is what happened — snapshotting shipped first, pruning second, in that order deliberately. See ADR-016, ADR-044. |
 | **M5.0 re-evaluation** | M5 | Whether Streamlit still hurts enough to migrate, decided with evidence after M2. Not pre-committed. |
 | **Formatter run timing** | 0.6 | See ADR-015. |
 

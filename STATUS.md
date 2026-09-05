@@ -1,9 +1,9 @@
 # PROJECT STATUS
 
-**Updated:** 2026-08-01 · **Branch:** `main` — **stage 2 merged and saved online.**
-**State:** Two faults fixed and checked on the real screen. 693 checks pass. **Stage 3 starts
-next; nothing blocks it.** This session's last two changes are saved on this machine but **not
-yet sent to GitHub** — send them first.
+**Updated:** 2026-09-03 · **Branch:** `m3-data-hardening` — **stage 3 COMPLETE bar 3.5.**
+**State:** 942 checks pass, all pushed (`b7168c9`). **The close was captured for the first time
+ever today** — 16:00 and 16:01, and the old 15:59 "close" was wrong by 2.39 points. BUG-030 fixed,
+record repaired, collector restarted 16:35 onto the fixed code.
 > Self-contained: read this file alone to start a session. Replaced entirely by `/wrap`.
 
 ## What this project is
@@ -13,88 +13,86 @@ before a set date. His strategy: sell options expiring soon, buy similar ones ex
 the small difference. The soon-expiring ones lose value faster, and that gap is the profit; once
 it's worth enough he restructures into a safer shape that locks the gain and caps the loss. **It's
 all about timing**, and brokers discard today's prices rather than keep them. **So the historical
-record IS the product** — the screen is just a window onto it. **Honest condition:** record and
-checking are in good shape; the screen's known faults are listed below and are now fewer.
+record IS the product** — the screen is just a window onto it.
 
 | Part | What it does |
 |---|---|
-| **Collector** | Background program. Every 1–5 min while markets are open, records all option prices. Starts with Windows. |
-| **Database** | One file, ~1.8 GB since 23 June. Irreplaceable — the broker won't sell you last Tuesday's prices. |
+| **Collector** | Background program. Every 1–5 min while markets are open, records all option prices. Starts with Windows (a Startup-folder shortcut, not a scheduled task). |
+| **Database** | One file, **3.55 GB** since 23 June, growing ~82 MB a trading day. Irreplaceable — the broker won't sell you last Tuesday's prices. |
 | **Dashboard** | Web page, 6 tabs: Scanner, Entry Analysis, Calendar Edge, Strike Detail, Historical Stats, Research. Reads only. |
 | **Journal** | Diary of actual trades. 6 practice entries, to be discarded. |
 
 ## The 9-stage plan
 
 `0 clean up` **done** → `1 automatic checking` **done** → `2 break up big files` **done** →
-`3 stop database growing` **← here** → `4 data service` → `5 decide on rebuilding the screen` →
-`6 answer trading questions with real results` → `7 machine learning` → `8 run reliably unattended`
+`3 stop database growing` **← done bar 3.5** → `4 data service` → `5 decide on rebuilding
+the screen` → `6 answer trading questions with real results` → `7 machine learning` → `8 run unattended`
 Order is fixed: **you can't safely rearrange code you can't check automatically.** Stages 6 and 7
 also need ~20 and ~100 real trades; there are 6 practice ones.
 
 ## This session
 
-**Stage 2 is signed off.** Chandan looked at the charts — the one thing last session's automatic
-word-by-word comparison could not do. Everything then merged into the main line of work.
+**The closing price was never being recorded — not once since 23 June.** Chandan spotted it. The
+window ran to 16:00 with the end excluded, so the last poll of every day landed at **15:59:5x**
+and every "close" in the record is a quote up to a minute earlier. It now runs to **16:02**
+(ADR-049) — two minutes, not the one asked for, because SPX is struck from its components' closing
+auction prints, which arrive in the seconds *after* the bell. **Not 16:15** either, where the
+options stop: SPX is frozen by then. Costs ~1.3 MB a day.
 
-**A saved trade could be charted as a different trade — fixed at the cause, Chandan's idea.**
-The collector only records prices near where the index is **today**; a saved position is fixed at
-the price it was opened at. As the index drifts, that position's prices stop being recorded, so
-the screen couldn't find them, quietly substituted its nearest guess, and drew a confident chart
-of the wrong trade. The first plan was only to warn on screen. Chandan asked whether those prices
-could simply keep being recorded instead. **Checking the stored data showed he was right and it
-was nearly free — the broker was already sending them and we were throwing them away.** Both were
-done. Verified live: saved a position, restarted the collector, opened its chart — correct.
-**A claim made here was wrong and measuring took a minute:** the broker's limit was said to bind
-much sooner, making this expensive. It doesn't — the assumption was wrong in the direction that
-would have cost the most work.
+**3.3, 3.6, 3.7, 3.8 and 3.9 all landed — stage 3 is done bar 3.5.** **3.3 (ADR-051)** —
+schema changes are now a numbered, forward-only list with a runner. It replaces
+`try: ALTER ... except Exception: pass`, **ten times over**, whose "column already exists" comment
+was a *guess*: it could not tell that from a full disk, a locked database or a misspelled type, and
+called all of them success. It also left **no record** — ten changes applied to the live file and
+`schema_version` still saying 1. **3.7** — `scripts/audit.py` asks what no test can:
+not "does the code work" but **"is the record complete?"**, read-only by construction. **3.6 (ADR-050)** — a discarded
+row is now told apart as *harmless duplicate* or *prices gone for good*, with SQLite's own reason
+logged; one message for both is what let **2,181 identical warnings** go unread for eight weeks.
+**3.8** — `reauth.py` existed and **nothing in `docs/` mentioned it**. **3.9** — `OPERATIONS.md`,
+`TROUBLESHOOTING.md` (by symptom, not cause) and `DATABASE.md`.
 
-**Four summary figures at the top of the Scanner were deleted — Chandan's call.** They vanished by
-accident a month ago while the sums behind them kept running. He chose deleting over restoring,
-knowing that is the direction that can't be undone by looking at the screen; `docs/decisions.md`
-(ADR-043) records the exact commands to bring them back.
-
-**For the third time, something that looked dead was holding something up.** Ten of the eleven
-values behind those figures were unused; the eleventh feeds a badge still on screen. Removing the
-lot **was tried on a copy first and broke all six tabs** — and all 693 checks still passed.
-`python scripts/render_check.py` caught it, as twice before. **Run it after any screen change.**
+**BUG-030 fixed, record repaired** — Schwab's **-999.0** "no value" marker was stored verbatim:
+5,127 rows at -9.99 volatility **and 5,081 in each of the four greeks**. **Exact equality,
+deliberately** — -9.99 is an ordinary theta and 38 rows hold it. **BUG-029 fixed** — printing can no
+longer stop the watchdog alerting; its alarm path is proven on a real 19 Aug outage.
 
 ## What to do next
 
-1. **Send this session's work to GitHub** (`git push origin main`) — ask Chandan first.
-2. **Start stage 3 — stop the database growing.** Nothing blocks it. Build one thing alongside it:
-   the app must save market conditions *with each trade*, or trades logged from now on lose that
-   context once old prices are cleared out.
-3. **After a day of collection, read `collector.log`** for lines beginning `strike window:
-   broker supplied` — they show how much room exists beyond what's kept. Nothing depends on it yet.
+1. **At 09:30 tomorrow, run `scripts/audit.py`** — the first live morning on the fixed parser, and
+   the only real proof BUG-030 is closed.
+2. **The live database is still at schema v1.** Migrating it adds nothing and stamps v2/v3; it
+   happens on the next collector start or dashboard open. Proved a no-op by test.
+3. **Then stage 4** (the data service) — or **3.5**, which is Chandan's call: he considers the
+   alerting need met by the watchdog, and what 3.5 adds is the gap *history* on screen.
 
 ## Open problems
 
-- **ENH-011 (high)** — tab clicks are slow. Cause **not established**; measure first, and don't
-  start by tuning the cache timers. **BUG-001 (high, blocked on Chandan)** — old unexplained
-  report; nothing can be done until he gives a symptom and a screenshot. **BUG-018 (medium)** —
-  on expiry day one tile says "set strikes" when they are already set.
-- **DEBT-029** — two screen-library features are past their removal dates, used in ~36 places.
-  The screen runs only because the old versions still work; any upgrade may break it.
-- **DEBT-034** — data loaded and converted for a column nothing reads. **DEBT-036/037** — a dead
-  file and ~50 lines of unused styling, both left on purpose; deleting needs Chandan's word.
-  **DEBT-038** — problem numbers reused twice, breaking the documented way to look up a closed one.
+  **ENH-011 (high)** — tab clicks slow; cause **not established**, measure first. **BUG-001 (high,
+  blocked on Chandan)** — old unexplained report; needs a symptom and screenshot.
+  **BUG-018 (medium)** — on expiry day one tile says "set strikes" when they already are.
+  **DEBT-029** — two screen-library features are past their removal dates, used in ~36 places.
 
 ## Settled decisions
 
-- **The screen stays as it is until stage 5**; whether to move off the current screen technology
-  is **not pre-committed** — decided with evidence at stage 5, not before.
-- **Closing a problem means deleting its row**, never ticking it off — if the fix leaves a lesson,
-  write it up in `docs/decisions.md` first. **Never re-record a failing check to make it pass.**
-- **Move code first, rename second, separately** (two renames outstanding: DEBT-033, DEBT-035).
-  **The 6 practice trades are blocked** on Chandan at the keyboard with a confirmed backup.
-- **Keeping a saved position's prices is forward-only** — it cannot fill in history from before
-  the position was saved. That is why the on-screen warning stays.
+- **The morning third-Friday contract is over at the opening print, 9:30 New York** (ADR-048,
+  closing BUG-027) — not 4:15 like everything else. Chandan chose the open over the contract's
+  true last trade the evening before, because **this rule is the only one that DELETES a record**
+  and the open is the later, safer of the two accurate answers. Verified against the live locks
+  file: nothing is deleted today; it first matters on **18 September**.
+- **The two third-Friday contracts are different options and the record says which** (ADR-046,
+  ADR-047). A blank means "not recorded", never "morning".
+- **Collection runs 09:30–16:02** (ADR-049) so the settled close is captured; a trading day is
+  392 collectable minutes, not 390. **Old prices cleared 90 days past expiry, summaries kept
+  forever, traded expiries never cleared, never on a timer** (ADR-044). **The watchdog watches,
+  never acts** (ADR-045). **Screen unchanged until stage 5.**
+- **Closing a problem means deleting its row.** **Never re-record a failing check to make it pass.**
 
 ## How to work here
 
 **Ask first** before: saving online, any database write, deleting files or rows, changing Windows
-settings or installed programs, stopping/starting the collector, or sending anything off this
-machine. **No check may touch the real database. Trade numbers are never reused. Missing price →
-blank, not 0. Prove checks by breaking the code on a copy**, never the live file — the dashboard
-reloads the moment a file is saved, **and that reload rewrites the saved-opportunities file.**
-**Deeper detail:** `docs/` — `plan.md` (stages) · `backlog.md` (open problems only) · `decisions.md` (why) · `progress_log.md` (per session).
+settings or programs, starting/stopping the collector, or sending anything off this machine.
+**No check may touch the real database. Trade numbers are never reused. Missing price → blank, not
+0. Prove checks by breaking the code**, never the live file. **Verify on the real system after
+deploying.** The written record has been wrong where the data was right three times —
+**when they disagree, read the database.** And a check of one place finding nothing proves nothing.
+**Deeper detail:** `docs/` — `OPERATIONS.md` · `TROUBLESHOOTING.md` · `DATABASE.md` · `plan.md` · `backlog.md` · `decisions.md` · `progress_log.md`.

@@ -94,6 +94,57 @@ POLL_INTERVAL_EVENT = 60     # seconds (1 minute)
 DISPLAY_TIMEZONE = "America/New_York"
 
 # ---------------------------------------------------------------------------
+# Retention (ADR-044)
+# ---------------------------------------------------------------------------
+
+# Per-strike option_rows are prunable this many days after their expiry date.
+# atm_iv_by_expiry, snapshots and collection_gaps are kept forever, and any
+# expiry a trade actually used is exempt at any age.
+#
+# NOTHING READS THIS ON A SCHEDULE. Pruning happens only when scripts/prune.py
+# is run by hand, and that script defaults to reporting rather than deleting.
+RETENTION_DAYS = 90
+
+# ---------------------------------------------------------------------------
+# Watchdog (M3.4)
+# ---------------------------------------------------------------------------
+# scripts/watchdog.py answers one question from OUTSIDE the dashboard: are
+# prices still arriving? The dashboard already shouts when they are not, but it
+# can only shout at someone who is looking at it — which is exactly why the
+# expired token on 2026-08-09 went unnoticed until a check happened to run.
+
+# How late prices must be before it alarms, as a multiple of the interval the
+# collector is actually using this session (60s in the first and last half
+# hour, 300s midday — see core/session.py). One missed cycle is a hiccup; this
+# is set so a single slow poll does not raise an alarm, but two do.
+WATCHDOG_LATE_MULTIPLE = 2.5
+
+# Minimum gap between repeat alerts about the SAME ongoing outage, in minutes.
+# Without it, a five-minute schedule turns one dead collector into twelve
+# emails an hour and Chandan learns to delete them unread.
+WATCHDOG_REALERT_MINUTES = 60
+
+# Grace period after the opening bell, in minutes. At 09:31 the newest price
+# is legitimately from yesterday's close, so an age-based check alarms every
+# single morning unless it waits for the first cycle or two to land.
+WATCHDOG_OPEN_GRACE_MINUTES = 5
+
+# --- Email alerts ------------------------------------------------------------
+# NO CREDENTIAL IS STORED HERE. These read from .env, which is gitignored; the
+# password never enters the repository and is never printed. Leave
+# ALERT_EMAIL_TO empty and email is skipped entirely — the desktop pop-up still
+# works, so an unconfigured mailbox degrades to a quieter watchdog, not a
+# broken one.
+#
+# For Gmail this must be an APP PASSWORD, not the account password: Google
+# rejects plain passwords from scripts. See docs/OPERATIONS.md (M3.9).
+ALERT_EMAIL_TO       = os.environ.get("ALERT_EMAIL_TO", "")
+ALERT_EMAIL_FROM     = os.environ.get("ALERT_EMAIL_FROM", "")
+ALERT_SMTP_HOST      = os.environ.get("ALERT_SMTP_HOST", "smtp.gmail.com")
+ALERT_SMTP_PORT      = int(os.environ.get("ALERT_SMTP_PORT", "587"))
+ALERT_SMTP_PASSWORD  = os.environ.get("ALERT_SMTP_PASSWORD", "")
+
+# ---------------------------------------------------------------------------
 # Market Holidays
 # ---------------------------------------------------------------------------
 # US equity market holidays for 2026. The collector uses this list to classify

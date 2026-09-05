@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import pandas as pd
 
+from core import contract
+
 SPARK_BARS = "▁▂▃▄▅▆▇█"
 
 
@@ -59,11 +61,21 @@ def exp_label(expiry: str, dte_by_expiry: dict) -> str:
     against the parameter it had been handed. Identical objects in production,
     so it worked; the day they differed, the guard would pass and the lookup
     return nothing, dropping "(N DTE)" from the label with no error anywhere.
+
+    `expiry` is a display key, not always a date: the third Friday's morning
+    contract arrives as "2026-08-21 (AM)" (core/contract.py). It is rendered as
+    "· AM settled" rather than left in brackets, because the label already ends
+    in a bracketed "(N DTE)" and two bracketed suffixes side by side read as one
+    muddle. The ordinary contract is left unmarked, which is the whole point of
+    that naming direction: almost every expiry is the ordinary kind.
     """
     d = dte_by_expiry.get(expiry)
+    expiry_date, settlement = contract.parse(expiry)
     try:
-        dt = pd.Timestamp(expiry)
+        dt = pd.Timestamp(expiry_date)
         pretty = dt.strftime("%A, %b ") + str(dt.day) + dt.strftime(", %Y")
     except (ValueError, TypeError):
-        pretty = expiry
+        pretty = expiry_date
+    if settlement == contract.AM:
+        pretty = f"{pretty} · AM settled"
     return f"{pretty}  ({d} DTE)" if d is not None else pretty

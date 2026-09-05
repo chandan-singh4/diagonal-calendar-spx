@@ -29,6 +29,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from core import contract
+
 
 @dataclass(frozen=True)
 class Pins:
@@ -38,6 +40,20 @@ class Pins:
 
     def __bool__(self) -> bool:
         return bool(self.expiries or self.strikes)
+
+    @property
+    def expiry_dates(self) -> frozenset[str]:
+        """The pinned expiries as plain DATES.
+
+        `expiries` holds display keys, so a lock on the third Friday's a.m.
+        contract is stored as "2026-08-21 (AM)". The collector narrows a chain
+        keyed on the date alone, and matching a key against it would find
+        nothing — the pin would silently stop protecting the lock, which is
+        the exact failure BUG-022 exists to prevent. Both contracts share a
+        date, and fetching the date fetches both, so the date is the right
+        unit here.
+        """
+        return frozenset(contract.date_of(e) for e in self.expiries)
 
 
 def from_locks(locks: dict) -> Pins:

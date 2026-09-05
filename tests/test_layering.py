@@ -661,3 +661,106 @@ def test_the_refresh_poller_adopts_the_snapshot_before_it_reruns():
         "happens, and the next run reruns for the same reason — forever. "
         "That is BUG-020, and it froze the whole dashboard."
     )
+
+
+def test_the_gamma_exposure_controls_never_ask_for_a_second_script_run():
+    """A chevron press must not cost two passes over app.py.
+
+    A control that records its new value and calls st.rerun() so the page
+    catches up doubles the cost of every click —
+    measured at 3.8s a pass on this page, so ~7.6s of nothing happening — and
+    the second pass exists only to show a string the first pass could have
+    shown had it read the buttons before drawing the value.
+
+    Pinned as a static check rather than a timing test: a timing test on a
+    Streamlit page is slow, flaky, and would not say WHICH change made it
+    slow. The failure this guards is a specific line coming back.
+    """
+    source = (VIEWS_DIR / "gex.py").read_text(encoding="utf-8")
+    tree = ast.parse(source, filename="views/gex.py")
+    reruns = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute) and node.func.attr == "rerun"
+    ]
+    assert not reruns, (
+        f"views/gex.py calls st.rerun() at line(s) "
+        f"{[n.lineno for n in reruns]} — every one doubles the cost of the "
+        f"click that triggers it. Read the widget before drawing what it "
+        f"controls instead."
+    )
+
+
+def test_every_memoised_gex_figure_takes_the_expiry_in_its_cache_key():
+    """The bug this pins was invisible: the panel simply did not change.
+
+    views/gex.py passes its DataFrames to @st.cache_data with a leading
+    underscore so Streamlit skips hashing them — hashing a 3,000-row chain
+    costs more than the redraw it saves. The cost is that the frame is then
+    NOT part of the cache key, so a helper that took only (spot, snapshot_id)
+    returned the first table it ever computed no matter which expiry was
+    selected. The positioning panel showed one expiry's numbers under every
+    other expiry's label for as long as the snapshot lasted.
+
+    So: any cached helper here that receives an underscored frame must also
+    take an `expiry` argument, because expiry is what filtered that frame.
+    The exemptions are named individually below, each with the reason its
+    frame does not depend on the Expiry control — an exemption list is
+    checkable, "it looked fine" is not.
+    """
+    # Read straight from the database at a fixed scope, never from the
+    # expiry-filtered frame:
+    #   _flow_figure   — 0DTE only, by definition (dte_max=0)
+    #   _bubble_points — the whole chain, deliberately: the panel exists to
+    #   _bubble_figure   COMPARE expiries, and its caption says the control
+    #                    does not apply to it
+    EXEMPT = {"_flow_figure", "_bubble_points", "_bubble_figure"}
+    import ast
+    import inspect
+
+    from views import gex as view_gex
+
+    tree = ast.parse(inspect.getsource(view_gex))
+    offenders = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        cached = any("cache_data" in ast.dump(d) for d in node.decorator_list)
+        if not cached:
+            continue
+        args = [a.arg for a in node.args.args]
+        takes_frame = any(a.startswith("_") for a in args)
+        if node.name in EXEMPT:
+            continue
+        if takes_frame and "expiry" not in args and "scope" not in args:
+            offenders.append(f"{node.name}({', '.join(args)})")
+
+    assert not offenders, (
+        "cached on an unhashed frame without the filter that produced it: "
+        + "; ".join(offenders))
+
+
+def test_the_positioning_cache_retires_when_the_frame_changes_shape():
+    """A stale cache served the user a KeyError from correct code.
+
+    st.cache_data hashes the body of the function it decorates — not the
+    modules that function calls. core/dealer.py gained columns; views/gex.py's
+    cached wrapper did not change; a server already running kept handing the
+    old frame to the new renderer, which asked for a column that had not
+    existed when the entry was built.
+
+    Passing the column tuple makes the shape part of the key, so entries built
+    before a change cannot be served after it.
+    """
+    import inspect
+
+    from core import dealer
+    from views import gex as view_gex
+
+    assert "columns" in inspect.signature(view_gex._positioning).parameters
+
+    source = inspect.getsource(view_gex)
+    assert "dealer.VERDICT_COLUMNS)" in source, (
+        "the columns argument must be the real column tuple — a literal "
+        "copied here would stop tracking the frame it is supposed to describe")
+    assert isinstance(dealer.VERDICT_COLUMNS, tuple), "must be hashable"

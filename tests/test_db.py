@@ -35,8 +35,9 @@ database under tmp_path and assert they are not the production path.
 from __future__ import annotations
 
 import logging
+import json
 import sqlite3
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -51,7 +52,13 @@ pytestmark = pytest.mark.integration
 # ─────────────────────────────────────────────────────────────────────────────
 
 FRONT = "2026-08-07"
-BACK = "2026-08-21"
+# An ordinary weekly, deliberately NOT the third Friday. These fixtures write
+# legacy rows (no settlement recorded), and on the third Friday such a row is
+# attributed to the a.m. contract, so reading it back with a bare date would
+# correctly return nothing — see core/contract.py. The two-contract case is
+# pinned in test_contract_key.py and test_settlement.py; here it would only
+# obscure what these tests are actually about.
+BACK = "2026-08-28"
 CALL_STRIKE = 6050.0
 PUT_STRIKE = 5950.0
 
@@ -84,11 +91,15 @@ def add_snapshot(path: str, ts: str, *, status: str = "COMPLETE",
 def opt(sid: int, expiry: str, strike: float, right: str, *,
         bid: float | None = 1.0, ask: float | None = 3.0,
         mark: float | None = 2.0, iv: float | None = 0.18,
-        dte: int = 7) -> dict:
-    """One option_rows insert payload. All 18 bound parameters must be present."""
+        dte: int = 7, settlement: str | None = None) -> dict:
+    """One option_rows insert payload. All 19 bound parameters must be present.
+
+    settlement defaults to None — the legacy value — so every fixture written
+    before BUG-023 keeps describing exactly the row it always described.
+    """
     return {
         "snapshot_id": sid, "expiry_date": expiry, "dte": dte,
-        "strike": float(strike), "right": right,
+        "strike": float(strike), "right": right, "settlement": settlement,
         "bid": bid, "ask": ask, "mark": mark, "last": mark,
         "iv": iv, "delta": 0.5, "gamma": 0.01, "theta": -0.5, "vega": 1.0,
         "volume": 100, "open_interest": 1000,
@@ -114,9 +125,11 @@ def wing_legs(sid: int, **kw) -> list[dict]:
     ]
 
 
-def atm(sid: int, expiry: str, avg_iv: float, *, dte: int = 7) -> dict:
+def atm(sid: int, expiry: str, avg_iv: float, *, dte: int = 7,
+        settlement: str | None = None) -> dict:
     return {
-        "snapshot_id": sid, "expiry_date": expiry, "dte": dte,
+        "snapshot_id": sid, "expiry_date": expiry,
+        "settlement": settlement, "dte": dte,
         "atm_strike": 6000.0,
         "atm_call_iv": avg_iv, "atm_put_iv": avg_iv, "atm_avg_iv": avg_iv,
         "iv_spread_to_front": 0.0, "iv_ratio_to_front": 1.0,
@@ -153,21 +166,29 @@ def test_init_db_creates_every_expected_table(temp_db):
             "atm_iv_by_expiry", "collection_gaps"} <= table_names(temp_db)
 
 
-def test_init_db_does_not_create_the_trades_table(temp_db):
-    """Deliberate separation: init_trades_table() is called from journal.py, so
-    the collector's schema path and version number are unaffected by it."""
-    assert "trades" not in table_names(temp_db)
+def test_init_db_now_creates_the_trades_table_too(temp_db):
+    """REVERSED at M3.3 (ADR-051), deliberately — this test used to assert the
+    opposite and was rewritten with the rule it pinned.
+
+    The old separation kept the journal's schema out of the version number so
+    that "the collector's schema path is unaffected by it". The cost was that
+    no version could describe the database: ten columns had been added to the
+    live file while `schema_version` still said 1. One database, one version.
+    """
+    assert "trades" in table_names(temp_db)
 
 
-def test_init_db_is_idempotent_and_records_exactly_one_version_row(temp_db):
+def test_init_db_is_idempotent_and_records_each_version_exactly_once(temp_db):
     db.init_db(temp_db)
     db.init_db(temp_db)
     conn = sqlite3.connect(temp_db)
     try:
-        rows = conn.execute("SELECT version FROM schema_version").fetchall()
+        rows = [r[0] for r in conn.execute(
+            "SELECT version FROM schema_version ORDER BY version")]
     finally:
         conn.close()
-    assert [r[0] for r in rows] == [db.SCHEMA_VERSION]
+
+    assert rows == list(range(1, db.SCHEMA_VERSION + 1)),         "one row per migration, in order, and no repeats however often it runs"
 
 
 def test_init_db_refuses_a_database_from_newer_code(temp_db):
@@ -188,15 +209,23 @@ def test_init_db_refuses_a_database_from_newer_code(temp_db):
 
 
 def test_init_db_creates_the_uniqueness_index_on_option_rows(temp_db):
+    """The uniqueness guarantee now spans settlement (BUG-023).
+
+    uq_option_rows_contract is superseded by uq_option_rows_contract_settle and
+    dropped: the old rule could not tell the a.m. and p.m. third-Friday
+    contracts apart and silently discarded one of them. Both names are asserted
+    so a half-applied migration — new index created, old one still present, each
+    fighting the other on every insert — fails here rather than in production.
+    """
     conn = sqlite3.connect(temp_db)
     try:
-        found = conn.execute(
-            "SELECT 1 FROM sqlite_master "
-            "WHERE type = 'index' AND name = 'uq_option_rows_contract'"
-        ).fetchone()
+        names = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index'"
+        )}
     finally:
         conn.close()
-    assert found is not None
+    assert "uq_option_rows_contract_settle" in names
+    assert "uq_option_rows_contract" not in names, "superseded index must be dropped"
 
 
 def test_init_db_deduplicates_pre_existing_option_rows_once(tmp_path):
@@ -405,9 +434,11 @@ def test_insert_option_rows_still_discards_a_row_failing_the_check(temp_db, bad_
     sqlite3 — a plain INSERT of the same row raises IntegrityError (previous
     test); through insert_option_rows it vanishes.
 
-    That behaviour is DELIBERATELY still here. Deciding per-constraint
-    behaviour is M3.6 (ADR-022 step 2). What changed at M1.5 is that the loss
-    is no longer silent — see the two tests below.
+    That behaviour is DELIBERATELY still here, and M3.6 (ADR-050) did NOT
+    change it. Raising instead would abort the whole batch, discarding the
+    several thousand GOOD rows beside the bad one — a far larger loss than the
+    one being reported. What M3.6 changed is that the loss is now told apart
+    from a harmless duplicate and logged as an ERROR; see the tests below.
     """
     sid = add_snapshot(temp_db, ts_ago(minutes=5))
 
@@ -439,24 +470,106 @@ def test_insert_option_rows_reports_the_rows_actually_stored(temp_db):
     assert len(db.get_option_chain(temp_db, sid)) == 5
 
 
-def test_insert_option_rows_warns_when_the_database_discards_rows(temp_db, caplog):
-    """FIXED — DEBT-008 step 1. The warning is the whole point of the fix.
+# ─────────────────────────────────────────────────────────────────────────────
+# Telling the two kinds of discard apart — M3.6, ADR-050
+#
+# The M1.5 version logged one WARNING for any shortfall. That made a benign
+# duplicate look exactly like data gone for good, and for eight weeks it did:
+# 2,181 identical warnings, every one of them the third-Friday contract being
+# thrown away (ADR-046). A warning you see every cycle is a warning you stop
+# reading, which is precisely when the real one arrives.
+#
+# The pinning test these replace asserted the old single wording. It is
+# rewritten rather than made to pass, because the behaviour it pinned is the
+# behaviour this task exists to change — the only circumstance in which a pin
+# may be rewritten.
+# ─────────────────────────────────────────────────────────────────────────────
 
-    It converts a permanent, unrecoverable data loss into a line in
-    collector.log. The collector still records `strikes_fetched =
-    len(option_rows)` — the optimistic count — so this log line is currently
-    the ONLY signal that anything was dropped.
-    """
+def test_a_row_the_database_refuses_is_reported_as_loss_with_sqlites_reason(
+        temp_db, caplog):
+    """The case that matters. These prices are gone and cannot be re-fetched."""
     sid = add_snapshot(temp_db, ts_ago(minutes=5))
 
     with caplog.at_level(logging.WARNING, logger="db"):
-        db.insert_option_rows(temp_db, [
-            opt(sid, FRONT, 6200, "C"),
-            opt(sid, FRONT, 6300, "CALL"),
+        stored = db.insert_option_rows(temp_db, [
+            opt(sid, FRONT, 6200, "C"),          # valid
+            opt(sid, FRONT, 6300, "CALL"),       # fails the CHECK
         ])
 
-    assert "1 of 2 rows were DISCARDED" in caplog.text
-    assert "DEBT-008" in caplog.text, "the log must point at the explanation"
+    assert stored == 1
+    assert "1 of 2 rows were REFUSED" in caplog.text
+    assert "GONE" in caplog.text
+    # SQLite's own words, not this module's guess at them.
+    assert "CHECK constraint failed" in caplog.text
+    # And enough to identify the row without going back to the broker.
+    assert "strike=6300" in caplog.text
+    assert "right=CALL" in caplog.text
+    assert "ADR-050" in caplog.text
+    assert any(r.levelname == "ERROR" for r in caplog.records),         "unrecoverable loss is an ERROR, not a WARNING"
+
+
+def test_a_duplicate_is_reported_as_benign_not_as_loss(temp_db, caplog):
+    """The half that matters more. Nothing is missing — the contract that was
+    dropped is identical to the one that was kept.
+
+    This is also the test that catches the sqlite3.Row-vs-tuple trap in
+    _rows_the_database_kept: with that wrong, every duplicate reads as
+    catastrophic loss and the ERROR above fires on an ordinary cycle."""
+    sid = add_snapshot(temp_db, ts_ago(minutes=5))
+    db.insert_option_rows(temp_db, [opt(sid, FRONT, CALL_STRIKE, "C")])
+
+    with caplog.at_level(logging.WARNING, logger="db"):
+        stored = db.insert_option_rows(temp_db, [
+            opt(sid, FRONT, CALL_STRIKE, "C", mark=99.0)])
+
+    assert stored == 0
+    assert "duplicates" in caplog.text
+    assert "Nothing is missing" in caplog.text
+    assert "GONE" not in caplog.text
+    assert not any(r.levelname == "ERROR" for r in caplog.records),         "a duplicate must never be logged as data loss"
+
+
+def test_a_mixed_batch_separates_the_two(temp_db, caplog):
+    """Both in one batch, each counted as itself — the loss is not inflated by
+    the duplicates beside it, and the duplicates are not hidden by the loss."""
+    sid = add_snapshot(temp_db, ts_ago(minutes=5))
+    db.insert_option_rows(temp_db, [opt(sid, FRONT, CALL_STRIKE, "C")])
+
+    with caplog.at_level(logging.WARNING, logger="db"):
+        db.insert_option_rows(temp_db, [
+            opt(sid, FRONT, 6200, "C"),                    # stored
+            opt(sid, FRONT, CALL_STRIKE, "C", mark=1.0),   # duplicate
+            opt(sid, FRONT, 6300, "CALL"),                 # refused
+        ])
+
+    assert "1 of 3 rows were REFUSED" in caplog.text
+    assert "the other 1 discarded rows were duplicates" in caplog.text
+
+
+def test_asking_why_stores_nothing(temp_db):
+    """The diagnosis replays a refused row as a plain INSERT to learn SQLite's
+    reason. If its savepoint ever failed to roll back, the act of REPORTING a
+    problem would create one.
+
+    Aimed at the branch that can actually write: a row that raises on replay
+    leaves nothing behind whether or not the rollback runs, so going through
+    insert_option_rows proves nothing here — the first version of this test did
+    exactly that and passed with the rollback deleted. So the valid row is
+    handed straight to the diagnosis, which is the only case where the replay
+    succeeds and the savepoint is the only thing undoing it.
+    """
+    sid = add_snapshot(temp_db, ts_ago(minutes=5))
+    row = {"settlement": None, **opt(sid, FRONT, 6200, "C")}
+
+    conn = db._make_conn(temp_db)
+    try:
+        reason = db._why_the_database_refused(conn, row)
+        conn.commit()
+    finally:
+        conn.close()
+
+    assert "no error on replay" in reason
+    assert db.get_option_chain(temp_db, sid) == [],         "the replay must leave the table exactly as it found it"
 
 
 def test_insert_option_rows_stays_quiet_on_a_clean_write(temp_db, caplog):
@@ -1516,3 +1629,351 @@ def test_ic_marks_keeps_a_genuine_zero_mark(temp_db):
     assert marks is not None
     assert marks["long_call_mark"] == 0.0
     assert marks["cost_to_close"] == pytest.approx(5.5)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Entry-IV snapshotting — the gate on retention (M3, ADR-044 / ADR-016)
+#
+# get_entry_iv_context() answers "what was the term structure when I opened
+# this?" by reading historical option_rows. Retention deletes those rows, so
+# the answer is copied onto the trade while they still exist. These tests pin
+# the two properties that make pruning safe: the value IS stored at logging
+# time, and it SURVIVES the rows it was derived from disappearing.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 10:00 America/New_York in July == 14:00 UTC, the moment _seed_entry_context
+# places its snapshot.
+ENTRY_DATE, ENTRY_TIME_ET = "2026-07-15", "10:00"
+
+TRADE_LEGS = json.dumps([
+    {"expiry": FRONT, "type": "Call", "action": "Sell to Open",
+     "strike": CALL_STRIKE, "fill": 10.0},
+    {"expiry": FRONT, "type": "Put",  "action": "Sell to Open",
+     "strike": PUT_STRIKE,  "fill": 10.0},
+    {"expiry": BACK,  "type": "Call", "action": "Buy to Open",
+     "strike": CALL_STRIKE, "fill": 12.0},
+    {"expiry": BACK,  "type": "Put",  "action": "Buy to Open",
+     "strike": PUT_STRIKE,  "fill": 12.0},
+])
+
+
+def _log_trade(path, trade_id="T-100", **overrides):
+    fields = {
+        "trade_id": trade_id, "entry_date": ENTRY_DATE,
+        "entry_time": ENTRY_TIME_ET, "status": "Open", "contracts": 1,
+        "initial_legs": TRADE_LEGS, "total_debit": 4.0,
+    }
+    fields.update(overrides)
+    db.insert_trade(path, fields)
+    return db.get_trade(path, trade_id)
+
+
+def _drop_option_rows(path):
+    """What retention will eventually do to the rows behind the context."""
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute("DELETE FROM option_rows")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_init_trades_table_adds_every_entry_iv_column(trades_db):
+    with db.get_conn(trades_db) as conn:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(trades)")}
+    assert set(db.ENTRY_IV_COLUMNS) <= cols
+
+
+def test_entry_iv_columns_are_added_to_a_pre_existing_trades_table(temp_db):
+    """The migration path, not the fresh-schema path. An existing database has
+    a trades table built before these columns existed; init_trades_table() must
+    bring it forward without touching the rows already in it.
+
+    Rewound to the state a REAL old database is in, which is the state the live
+    3.5 GB file was in until M3.3: the old table, and a version of 1 because
+    nothing recorded the columns the add-if-missing code had been adding."""
+    conn = sqlite3.connect(temp_db)
+    try:
+        conn.executescript(
+            "DROP TABLE IF EXISTS trades;"
+            "DELETE FROM schema_version WHERE version > 1;"
+            "CREATE TABLE trades (trade_id TEXT PRIMARY KEY, entry_date TEXT, "
+            "entry_time TEXT, status TEXT, contracts INTEGER, initial_legs TEXT, "
+            "total_debit REAL, created_at TEXT, updated_at TEXT);"
+        )
+        conn.execute(
+            "INSERT INTO trades VALUES ('T-001','2026-07-01','10:00','Open',1,"
+            "'[]',4.0,'x','x')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    db.init_trades_table(temp_db)
+
+    with db.get_conn(temp_db) as conn:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(trades)")}
+        assert set(db.ENTRY_IV_COLUMNS) <= cols
+        row = conn.execute("SELECT * FROM trades WHERE trade_id='T-001'").fetchone()
+    assert row["entry_date"] == "2026-07-01"      # untouched
+    assert row["entry_front_iv"] is None          # nothing invented for it
+
+
+def test_insert_trade_stores_the_entry_iv_context(trades_db):
+    _seed_entry_context(trades_db)
+    t = _log_trade(trades_db)
+    assert t["entry_front_iv"] == pytest.approx(0.21)   # (0.20 + 0.22) / 2
+    assert t["entry_back_iv"] == pytest.approx(0.10)
+    assert t["entry_iv_ratio"] == pytest.approx(2.1)
+    assert t["entry_atm_front_iv"] == pytest.approx(0.24)
+    assert t["entry_iv_snapshot_ts"] == "2026-07-15 14:00:00"
+
+
+def test_stored_context_matches_what_reconstruction_would_have_returned(trades_db):
+    """The stored value is not a second, subtly different calculation. If these
+    two ever diverge, every trade logged from now on carries a number that no
+    longer means what the historical charts mean."""
+    _seed_entry_context(trades_db)
+    t = _log_trade(trades_db)
+    ctx = db.get_entry_iv_context(
+        trades_db, "2026-07-15 14:00:00", FRONT, BACK, CALL_STRIKE, PUT_STRIKE)
+    assert t["entry_front_iv"] == pytest.approx(ctx["front_iv"])
+    assert t["entry_back_iv"] == pytest.approx(ctx["back_iv"])
+    assert t["entry_iv_ratio"] == pytest.approx(ctx["ratio"])
+    assert t["entry_iv_level"] == pytest.approx(ctx["level"])
+    assert t["entry_iv_snapshot_id"] == ctx["snapshot_id"]
+
+
+def test_stored_context_survives_pruning_the_rows_it_came_from(trades_db):
+    """THE POINT OF THE WHOLE EXERCISE. After retention deletes the option_rows,
+    reconstruction can no longer answer — and the trade still can."""
+    _seed_entry_context(trades_db)
+    t = _log_trade(trades_db)
+    stored = t["entry_front_iv"]
+
+    _drop_option_rows(trades_db)
+
+    gone = db.get_entry_iv_context(
+        trades_db, "2026-07-15 14:00:00", FRONT, BACK, CALL_STRIKE, PUT_STRIKE)
+    assert gone["front_iv"] is None               # reconstruction is now blind
+    assert db.get_trade(trades_db, "T-100")["entry_front_iv"] == stored
+
+
+def test_a_trade_is_still_recordable_with_no_snapshot_anywhere(trades_db):
+    """Collector down, token expired, weekend — logging a trade must never fail
+    because the context is unavailable. Missing context stores NULL, not 0."""
+    t = _log_trade(trades_db)
+    assert t is not None
+    assert t["entry_front_iv"] is None
+    assert t["entry_iv_snapshot_id"] is None
+
+
+def test_unparseable_legs_do_not_prevent_logging_a_trade(trades_db):
+    _seed_entry_context(trades_db)
+    t = _log_trade(trades_db, initial_legs="not json at all")
+    assert t is not None
+    assert t["entry_front_iv"] is None
+
+
+def test_an_explicit_context_is_not_overwritten(trades_db):
+    """How a backfill supplies its own answer."""
+    _seed_entry_context(trades_db)
+    t = _log_trade(trades_db, entry_front_iv=0.5, entry_back_iv=0.25,
+                   entry_iv_ratio=2.0, entry_iv_level=0.35,
+                   entry_iv_snapshot_id=999, entry_iv_snapshot_ts="x",
+                   entry_atm_front_iv=0.4, entry_atm_back_iv=0.2)
+    assert t["entry_front_iv"] == pytest.approx(0.5)
+    assert t["entry_iv_snapshot_id"] == 999
+
+
+def test_editing_the_entry_time_recomputes_the_stored_context(trades_db):
+    """A stored context describing the trade as it USED to be is worse than no
+    context: it is confidently wrong, and nothing on screen would say so."""
+    _seed_entry_context(trades_db)                        # 14:00 UTC, front 0.21
+    late = add_snapshot(trades_db, "2026-07-15 18:00:00")  # 14:00 ET
+    db.insert_option_rows(trades_db, [
+        opt(late, FRONT, CALL_STRIKE, "C", iv=0.50),
+        opt(late, FRONT, PUT_STRIKE, "P", iv=0.50),
+        opt(late, BACK, CALL_STRIKE, "C", iv=0.25),
+        opt(late, BACK, PUT_STRIKE, "P", iv=0.25),
+    ])
+    _log_trade(trades_db)
+    assert db.get_trade(trades_db, "T-100")["entry_front_iv"] == pytest.approx(0.21)
+
+    db.update_trade(trades_db, "T-100", entry_time="14:00")
+
+    t = db.get_trade(trades_db, "T-100")
+    assert t["entry_iv_snapshot_id"] == late
+    assert t["entry_front_iv"] == pytest.approx(0.50)
+
+
+def test_editing_an_unrelated_column_leaves_the_context_alone(trades_db):
+    """Recomputation is not free — it reads option_rows — and an edit to the
+    notes has no business re-deriving anything."""
+    _seed_entry_context(trades_db)
+    _log_trade(trades_db)
+    _drop_option_rows(trades_db)          # recomputing now would blank it
+
+    db.update_trade(trades_db, "T-100", notes="changed my mind", status="Closed")
+
+    assert db.get_trade(trades_db, "T-100")["entry_front_iv"] == pytest.approx(0.21)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The Gamma Exposure tab's two reads
+#
+# Both aggregate in SQL, which is the whole point of them — the raw join is
+# ~400,000 rows a session — and an aggregation is exactly where a wrong answer
+# arrives silently. A dte filter applied after the GROUP BY, a status filter
+# dropped, a prior session picked from the wrong end: none of those raise, they
+# just draw a chart that is confidently wrong.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _gex_seed(temp_db) -> str:
+    """Two snapshots on one session, plus a prior session to difference with."""
+    # Fixed at midday rather than ts_ago(minutes=...): two timestamps a few
+    # minutes apart straddle midnight UTC once a day, which would split this
+    # "session" across two dates and fail on a schedule nobody would connect
+    # back to here.
+    day = (datetime.now(UTC) - timedelta(days=1)).date()
+    yesterday = f"{day - timedelta(days=1)} 20:00:00"
+    y = add_snapshot(temp_db, yesterday, spx=5990.0)
+    db.insert_option_rows(temp_db, [
+        opt(y, FRONT, CALL_STRIKE, "C", dte=8),
+        opt(y, FRONT, PUT_STRIKE, "P", dte=8),
+    ])
+
+    early, late = f"{day} 14:00:00", f"{day} 14:30:00"
+    a = add_snapshot(temp_db, early, spx=6000.0)
+    b = add_snapshot(temp_db, late, spx=6010.0)
+    for sid in (a, b):
+        db.insert_option_rows(temp_db, [
+            opt(sid, FRONT, CALL_STRIKE, "C", dte=0),
+            opt(sid, FRONT, PUT_STRIKE, "P", dte=0),
+            opt(sid, BACK, CALL_STRIKE, "C", dte=21),
+        ])
+    return early[:10]
+
+
+def test_intraday_metrics_return_one_row_per_snapshot_and_strike(temp_db):
+    session = _gex_seed(temp_db)
+    rows = db.get_intraday_strike_metrics(temp_db, session)
+
+    assert len(rows) == 4                       # 2 snapshots x 2 strikes
+    assert [r["strike"] for r in rows] == [PUT_STRIKE, CALL_STRIKE] * 2
+    first = rows[1]                             # the call strike, early snapshot
+    assert first["underlying_price"] == pytest.approx(6000.0)
+    # Both the 0DTE call and the 21DTE call sit at this strike and are summed:
+    # gamma 0.01 x oi 1000, twice.
+    assert first["call_gamma_oi"] == pytest.approx(20.0)
+    assert first["put_gamma_oi"] == pytest.approx(0.0)
+    assert first["call_oi"] == 2000
+    assert first["call_volume"] == 200
+
+
+def test_the_dte_bound_is_applied_before_the_grouping(temp_db):
+    """The 0DTE flow chart's whole claim is that its lines are 0DTE. Filter
+    after the GROUP BY and the longer-dated call at the same strike is folded
+    in first — the number changes, the label does not, and nothing errors."""
+    session = _gex_seed(temp_db)
+    rows = db.get_intraday_strike_metrics(temp_db, session, dte_max=0)
+
+    assert len(rows) == 4
+    call = next(r for r in rows if r["strike"] == CALL_STRIKE)
+    assert call["call_gamma_oi"] == pytest.approx(10.0)   # not 20 — one leg only
+    assert call["call_oi"] == 1000
+
+
+def test_intraday_metrics_ignore_a_partial_snapshot(temp_db):
+    """A PARTIAL snapshot is a half-written chain. Counted here it would draw a
+    cliff in the middle of the day that no market ever made."""
+    session = _gex_seed(temp_db)
+    torn = add_snapshot(temp_db, f"{session} 14:15:00", status="PARTIAL")
+    db.insert_option_rows(temp_db, [opt(torn, FRONT, CALL_STRIKE, "C", dte=0)])
+
+    ids = {r["snapshot_id"] for r in db.get_intraday_strike_metrics(temp_db, session)}
+    assert torn not in ids
+
+
+def test_intraday_metrics_are_empty_for_a_session_with_no_snapshots(temp_db):
+    _gex_seed(temp_db)
+    assert db.get_intraday_strike_metrics(temp_db, "1999-01-01") == []
+
+
+def test_prior_session_oi_reads_yesterdays_last_snapshot_not_todays_first(temp_db):
+    """Open interest does not move within a session, so differencing today
+    against today's own first snapshot returns zeros forever — a dead chart
+    that looks like a quiet market."""
+    session = _gex_seed(temp_db)
+    rows = db.get_prior_session_oi(temp_db, session)
+
+    assert [r["strike"] for r in rows] == [PUT_STRIKE, CALL_STRIKE]
+    call = rows[1]
+    # Yesterday held ONE call leg at this strike; today holds two. Reading
+    # today's snapshot by mistake would give 2000 here.
+    assert call["call_oi"] == 1000
+    assert call["put_oi"] == 0
+
+
+def test_prior_session_oi_can_be_scoped_to_one_expiry(temp_db):
+    """It has to be, and this is the bug that proved it.
+
+    The caller differences ONE expiry's open interest against this. Summed
+    across every expiry at a strike, the subtraction reports the rest of the
+    board as having been liquidated overnight — on the live 2026-09-04 chain
+    the 8 Sep expiry read -1,850,786 contracts when the true figure was
+    +17,870, and every verdict on the panel flipped with it."""
+    day = (datetime.now(UTC) - timedelta(days=1)).date()
+    prior = add_snapshot(temp_db, f"{day - timedelta(days=1)} 20:00:00")
+    db.insert_option_rows(temp_db, [
+        opt(prior, FRONT, CALL_STRIKE, "C", dte=8),
+        opt(prior, BACK, CALL_STRIKE, "C", dte=29),
+    ])
+    session = f"{day} 14:00:00"
+    today = add_snapshot(temp_db, session)
+    db.insert_option_rows(temp_db, [opt(today, FRONT, CALL_STRIKE, "C", dte=0)])
+
+    everything = db.get_prior_session_oi(temp_db, session[:10])
+    front_only = db.get_prior_session_oi(temp_db, session[:10], FRONT)
+
+    assert everything[0]["call_oi"] == 2000      # both expiries summed
+    assert front_only[0]["call_oi"] == 1000      # the FRONT leg alone
+
+
+def test_prior_session_oi_without_an_expiry_still_sums_the_whole_board(temp_db):
+    """The All-expiries selection depends on it: the filter is opt-in, and a
+    None must not quietly narrow the read."""
+    session = _gex_seed(temp_db)
+    rows = db.get_prior_session_oi(temp_db, session, None)
+    assert [r["strike"] for r in rows] == [PUT_STRIKE, CALL_STRIKE]
+
+
+def test_prior_session_oi_for_an_expiry_that_did_not_exist_yesterday(temp_db):
+    """Not an error — a contract listed today has no yesterday, and the caller
+    reads that as open interest built from zero."""
+    session = _gex_seed(temp_db)
+    assert db.get_prior_session_oi(temp_db, session, "2099-01-15") == []
+
+
+def test_prior_session_oi_is_empty_on_the_first_day_of_collection(temp_db):
+    """The first collection day and the caller that assumed yesterday existed."""
+    today = datetime.now(UTC).date().isoformat()
+    sid = add_snapshot(temp_db, f"{today} 14:00:00")
+    db.insert_option_rows(temp_db, [opt(sid, FRONT, CALL_STRIKE, "C")])
+    assert db.get_prior_session_oi(temp_db, today) == []
+
+
+def test_prior_session_oi_returns_that_session_s_volume_too(temp_db):
+    """Not an extra column — the half that makes the other half readable.
+
+    The overnight change in open interest is what was opened during the PRIOR
+    session, so the only volume it can honestly be divided by is that same
+    session's. Over 20,358 contract-days of this record, dividing by today's
+    volume instead produced a change larger than the entire day's trading on
+    20.0% of contracts, which cannot happen: no more positions can be opened
+    than were traded. Against the prior session's own volume, 4.9%."""
+    session = _gex_seed(temp_db)
+    rows = db.get_prior_session_oi(temp_db, session)
+    call = next(r for r in rows if r["strike"] == CALL_STRIKE)
+    assert "call_volume" in call.keys() and "put_volume" in call.keys()
+    assert call["call_volume"] > 0

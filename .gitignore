@@ -14,11 +14,20 @@
 !.env.example
 data/token.json
 *token*.json
+# Anything with "token" in the name, whatever the extension. The narrower
+# `*token*.json` above missed `token.json.bak-20260802-063131` — a real file
+# found untracked on 2026-08-09, one careless `git add .` from being published.
+# A dated suffix is exactly what a re-auth backup looks like.
+*token*
 
 # ── Databases (irreplaceable market data; backed up out-of-tree) ─────────────
 *.db
 *.db-wal
 *.db-shm
+# Dated/suffixed database backups — dashboard.db.2026-08-19, .bak, etc.
+# `*.db` alone does not match these: the suffix comes AFTER the extension,
+# and a 2.7 GB file staged by accident is not something to notice late.
+*.db.*
 *.sqlite
 *.sqlite3
 
@@ -29,12 +38,17 @@ eligible_history.json
 entry_locks.json
 chart_colors.json
 pinned_pairs.json
+# The watchdog's "have I already complained about this?" note (M3.4).
+watchdog_state.json
 
 # Single-instance lock held by the running collector (see collector.py).
 .collector.lock
 
 # ── Logs ─────────────────────────────────────────────────────────────────────
 *.log
+# Rotated logs: collector.log.1, collector.log.2026-08-09, etc. `*.log` alone
+# does not match these — the suffix comes after.
+*.log.*
 logs/
 
 # ── Python ───────────────────────────────────────────────────────────────────

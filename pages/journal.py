@@ -621,26 +621,64 @@ def derive_ic(init_json, tf_legs, credit, total_debit, contracts) -> dict | None
         return None
 
 
+def _stored_entry_iv(trade) -> dict | None:
+    """The entry-IV context recorded on the trade row, shaped like
+    get_entry_iv_context()'s return so the caller has one code path.
+
+    Returns None when this trade has no usable stored context — either it
+    predates the columns, or the collector had nothing near its entry time —
+    which is the signal to fall back to reconstruction. The two are deliberately
+    not distinguished: both mean "the row cannot answer, ask the snapshots".
+    """
+    try:
+        keys = set(trade.keys())
+    except AttributeError:
+        return None
+    if not {"entry_front_iv", "entry_back_iv"} <= keys:
+        return None
+    front, back = trade["entry_front_iv"], trade["entry_back_iv"]
+    if front is None or back is None:
+        return None
+    return {
+        "snapshot_id":        trade["entry_iv_snapshot_id"],
+        "snapshot_timestamp": trade["entry_iv_snapshot_ts"],
+        "front_iv":     front,
+        "back_iv":      back,
+        "ratio":        trade["entry_iv_ratio"],
+        "level":        trade["entry_iv_level"],
+        "atm_front_iv": trade["entry_atm_front_iv"],
+        "atm_back_iv":  trade["entry_atm_back_iv"],
+    }
+
+
 def render_regime_analysis(all_trades: list) -> None:
     st.subheader("📈 Regime Analysis — does IV Ratio add value beyond IV level?")
-    st.caption("Reconstructs IV term structure at each entry from stored snapshots.")
+    st.caption("Uses the IV term structure recorded with each trade at entry; "
+               "trades logged before that was stored are reconstructed from snapshots.")
     if not all_trades:
         st.info("No trades logged yet.")
         return
     et, utc = ZoneInfo(config.DISPLAY_TIMEZONE), ZoneInfo("UTC")
-    recs, missing = [], 0
+    recs, missing, n_stored = [], 0, 0
     for t in all_trades:
-        try:
-            legs   = json.loads(t["initial_legs"])
-            exps   = sorted({l["expiry"] for l in legs})
-            front_e, back_e = exps[0], exps[-1]
-            call_k = next(l["strike"] for l in legs if l["type"]=="Call")
-            put_k  = next(l["strike"] for l in legs if l["type"]=="Put")
-            dt_et  = datetime.strptime(f"{t['entry_date']} {t['entry_time']}", "%Y-%m-%d %H:%M").replace(tzinfo=et)
-            ts_utc = dt_et.astimezone(utc).strftime("%Y-%m-%d %H:%M:%S")
-            ctx    = db.get_entry_iv_context(config.DB_PATH, ts_utc, front_e, back_e, call_k, put_k)
-        except Exception:
-            ctx = None
+        # Stored context first (ADR-044). It is the same number reconstruction
+        # would have produced, captured while the option_rows behind it still
+        # existed — so it keeps working after retention prunes them.
+        ctx = _stored_entry_iv(t)
+        if ctx is not None:
+            n_stored += 1
+        else:
+            try:
+                legs   = json.loads(t["initial_legs"])
+                exps   = sorted({l["expiry"] for l in legs})
+                front_e, back_e = exps[0], exps[-1]
+                call_k = next(l["strike"] for l in legs if l["type"]=="Call")
+                put_k  = next(l["strike"] for l in legs if l["type"]=="Put")
+                dt_et  = datetime.strptime(f"{t['entry_date']} {t['entry_time']}", "%Y-%m-%d %H:%M").replace(tzinfo=et)
+                ts_utc = dt_et.astimezone(utc).strftime("%Y-%m-%d %H:%M:%S")
+                ctx    = db.get_entry_iv_context(config.DB_PATH, ts_utc, front_e, back_e, call_k, put_k)
+            except Exception:
+                ctx = None
         if not ctx or ctx["front_iv"] is None or ctx["back_iv"] is None:
             missing += 1; continue
         recs.append({"trade_id": t["trade_id"], "status": t["status"],
@@ -649,7 +687,14 @@ def render_regime_analysis(all_trades: list) -> None:
                      "level": (ctx["level"]*100) if ctx["level"] else None,
                      "outcome": t["profit_locked_in"]})
     n_ctx = len(recs)
-    st.markdown(f"**{n_ctx}** of **{len(all_trades)}** trades have reconstructable IV context"
+    n_rebuilt = n_ctx - n_stored
+    detail = []
+    if n_stored:
+        detail.append(f"{n_stored} recorded at entry")
+    if n_rebuilt:
+        detail.append(f"{n_rebuilt} reconstructed")
+    st.markdown(f"**{n_ctx}** of **{len(all_trades)}** trades have IV context"
+                + (f" ({', '.join(detail)})" if detail else "")
                 + (f" · {missing} not matched." if missing else "."))
     if n_ctx == 0:
         st.warning("No trades matched a stored snapshot near their entry time."); return

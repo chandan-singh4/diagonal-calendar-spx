@@ -47,9 +47,12 @@ import json
 import logging
 import sqlite3
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import config
+import schema
+from core import contract
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +62,9 @@ logger = logging.getLogger(__name__)
 # function. The init_db() version check will detect the mismatch on startup.
 # ─────────────────────────────────────────────────────────────────────────────
 
-SCHEMA_VERSION = 1
+# Owned by schema.py, which derives it from the migration list. Re-exported
+# here because callers have always imported it from db.
+SCHEMA_VERSION = schema.SCHEMA_VERSION
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DDL — Snapshot-Anchored Schema
@@ -112,6 +117,15 @@ CREATE TABLE IF NOT EXISTS option_rows (
     strike           REAL    NOT NULL,
     right            TEXT    NOT NULL
                          CHECK(right IN ('C', 'P')),
+    -- 'AM' | 'PM' | NULL. NULL means NOT RECORDED, not 'AM' (BUG-023).
+    -- Every row written before 2026-08-19 is NULL: the collector could not tell
+    -- the two apart, so it kept whichever the broker happened to list first.
+    -- That was the a.m. monthly on ordinary days and the p.m. weekly on the
+    -- expiry day itself, when the a.m. contract had already settled and dropped
+    -- out of the chain. Stamping those rows 'AM' would therefore be wrong on
+    -- precisely the day that matters most. They stay blank and honest.
+    settlement       TEXT
+                         CHECK(settlement IS NULL OR settlement IN ('AM', 'PM')),
     bid              REAL,
     ask              REAL,
     mark             REAL,
@@ -150,12 +164,21 @@ CREATE TABLE IF NOT EXISTS option_rows (
 CREATE INDEX IF NOT EXISTS idx_option_rows_contract_snap
     ON option_rows(expiry_date, strike, right, snapshot_id);
 
+-- uq_option_rows_contract_settle is deliberately NOT created here. A UNIQUE
+-- index cannot be built over a table that still holds duplicates, and _DDL runs
+-- BEFORE the deduplication migration below. Creating it here crashes init_db on
+-- exactly the legacy databases the migration exists to repair. It is created in
+-- init_db() instead, after the duplicates are gone — see the BUG-023 block.
+
 -- ── atm_iv_by_expiry ──────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS atm_iv_by_expiry (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     snapshot_id         INTEGER NOT NULL
                             REFERENCES snapshots(snapshot_id) ON DELETE CASCADE,
     expiry_date         TEXT    NOT NULL,
+    -- 'AM' | 'PM' | NULL. NULL is every row written before BUG-028 was fixed;
+    -- core.contract.match_clause attributes those by when they were taken.
+    settlement          TEXT,
     dte                 INTEGER NOT NULL,
     atm_strike          REAL    NOT NULL,
     atm_call_iv         REAL,
@@ -272,7 +295,15 @@ def init_db(db_path: str | None = None) -> None:
     conn = _make_conn(path)
     try:
         conn.executescript(_DDL)
+        # The journal's table is part of this database's schema whoever opens
+        # it, and keeping it outside the version number is what made the shape
+        # of a given file unanswerable (M3.3, ADR-051).
+        conn.executescript(_TRADES_DDL)
         conn.commit()
+
+        # Columns first, and loudly. Everything below this line may assume the
+        # settlement columns exist.
+        schema.migrate(conn)
 
         # ── Foundational integrity migration ─────────────────────────────────
         # option_rows historically had no uniqueness guarantee on
@@ -282,9 +313,18 @@ def init_db(db_path: str | None = None) -> None:
         # a sawtooth. Deduplicate ONCE (keeping the earliest row per contract),
         # then create a UNIQUE index so it can never recur. Guarded on the index
         # so the (potentially expensive) DELETE runs only the first time.
+        # The guard must name BOTH indexes (BUG-025). It originally asked only
+        # whether uq_option_rows_contract existed — but the BUG-023 migration
+        # below DROPS that index once it has been superseded. On the next call
+        # the legacy block therefore concluded "never migrated", re-ran this
+        # DELETE, and recreated the superseded index, which then rejected every
+        # p.m. row on arrival. Worse: this DELETE groups WITHOUT settlement, so
+        # a second restart would have deleted the p.m. contract outright,
+        # keeping MIN(id) — the a.m. row — and reported it as deduplication.
+        # A migration guard must survive its own migration.
         _has_uq = conn.execute(
-            "SELECT 1 FROM sqlite_master "
-            "WHERE type = 'index' AND name = 'uq_option_rows_contract'"
+            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name IN "
+            "('uq_option_rows_contract', 'uq_option_rows_contract_settle')"
         ).fetchone()
         if not _has_uq:
             _dupes = conn.execute(
@@ -303,30 +343,70 @@ def init_db(db_path: str | None = None) -> None:
                 _dupes,
             )
 
-        row = conn.execute(
-            "SELECT MAX(version) AS v FROM schema_version"
+        # ── AM/PM settlement migration (BUG-023) ─────────────────────────────
+        # Adding the column is O(1) in SQLite: it rewrites the table's header,
+        # not its 14.3M rows. The uniqueness rule is the part that matters —
+        # without swapping it the p.m. contract is still rejected on arrival and
+        # the column would sit empty forever.
+        #
+        # COALESCE(settlement, '?') rather than the bare column: SQLite treats
+        # every NULL in a UNIQUE index as distinct from every other NULL, so
+        # indexing the raw column would stop deduplicating the legacy rows and
+        # reopen the six-leg fan-out this index was created to close.
+        _has_settle_uq = conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type = 'index' AND name = 'uq_option_rows_contract_settle'"
         ).fetchone()
-        current = row["v"] if row and row["v"] is not None else 0
-
-        if current == 0:
+        if not _has_settle_uq:
             conn.execute(
-                "INSERT INTO schema_version (version, applied_at, description) "
-                "VALUES (?, ?, ?)",
-                (SCHEMA_VERSION, _utcnow(),
-                 "Snapshot-anchored schema: snapshots, option_rows, "
-                 "atm_iv_by_expiry, collection_gaps")
+                "CREATE UNIQUE INDEX uq_option_rows_contract_settle "
+                "ON option_rows(snapshot_id, expiry_date, strike, right, "
+                "COALESCE(settlement, '?'))"
             )
+            conn.execute("DROP INDEX IF EXISTS uq_option_rows_contract")
             conn.commit()
-            logger.info("Schema v%d created at %s", SCHEMA_VERSION, path)
-
-        elif current > SCHEMA_VERSION:
-            raise RuntimeError(
-                f"Database schema version {current} is newer than "
-                f"code version {SCHEMA_VERSION}. Update the codebase."
+            logger.info(
+                "option_rows: uniqueness now spans settlement; the p.m. "
+                "contract is no longer discarded (BUG-023)"
             )
 
-        else:
-            logger.info("Schema v%d verified at %s", current, path)
+        # ── atm_iv_by_expiry settlement migration (BUG-028) ──────────────────
+        # The daily summary had one row per DATE, so on the third Friday the two
+        # contracts shared a slot and whichever was written won. The column
+        # splits them; the unique index stops them ever sharing a slot again.
+        #
+        # The index is NOT created when duplicates are already present. Building
+        # it would fail and take init_db down with it, and the alternative —
+        # deleting rows to make it fit — is a data loss nobody asked for. It is
+        # logged instead, loudly, for a human to decide.
+        _has_atm_uq = conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type = 'index' AND name = 'uq_atm_iv_contract'"
+        ).fetchone()
+        if not _has_atm_uq:
+            _atm_dupes = conn.execute(
+                "SELECT COUNT(*) FROM (SELECT 1 FROM atm_iv_by_expiry "
+                "GROUP BY snapshot_id, expiry_date, COALESCE(settlement, '?') "
+                "HAVING COUNT(*) > 1)"
+            ).fetchone()[0]
+            if _atm_dupes:
+                logger.warning(
+                    "atm_iv_by_expiry holds %d duplicated contract slot(s); "
+                    "uq_atm_iv_contract NOT created (BUG-028)", _atm_dupes,
+                )
+            else:
+                conn.execute(
+                    "CREATE UNIQUE INDEX uq_atm_iv_contract ON atm_iv_by_expiry("
+                    "snapshot_id, expiry_date, COALESCE(settlement, '?'))"
+                )
+                conn.commit()
+                logger.info(
+                    "atm_iv_by_expiry: one summary row per contract enforced "
+                    "(BUG-028)"
+                )
+
+        logger.info("Schema v%d verified at %s", schema.current_version(conn),
+                    path)
 
     finally:
         conn.close()
@@ -391,6 +471,38 @@ def finalize_snapshot(db_path: str,
         )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Which contract does a history read mean?  (BUG-023)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# It used to collapse the third Friday's two contracts to one here, so that a
+# caller handing in a date got a single series back. That is what hid the p.m.
+# prices from every screen at once, and it is gone. Every history read below
+# now takes a DISPLAY KEY — a date plus, for the a.m. contract only, a label —
+# and builds its predicate with core.contract.match_clause, which also decides
+# which of the two an old unlabelled row belongs to. See core/contract.py.
+
+# The columns of an option row, written once. The OR IGNORE form is what the
+# collector uses; the plain form exists only to ask the database why it refused
+# a row (_why_the_database_refused). Building both from one list means the
+# diagnosis can never be run against a different statement from the write.
+_OPTION_COLUMNS = (
+    "snapshot_id", "expiry_date", "dte", "strike", "right", "settlement",
+    "bid", "ask", "mark", "last",
+    "iv", "delta", "gamma", "theta", "vega",
+    "volume", "open_interest", "intrinsic_value", "time_value",
+)
+_OPTION_INSERT_TEMPLATE = (
+    "INSERT {conflict}INTO option_rows ({cols}) VALUES ({binds})"
+).format(
+    conflict="{conflict}",
+    cols=", ".join(_OPTION_COLUMNS),
+    binds=", ".join(f":{c}" for c in _OPTION_COLUMNS),
+)
+_OPTION_INSERT = _OPTION_INSERT_TEMPLATE.format(conflict="OR IGNORE ")
+_PLAIN_OPTION_INSERT = _OPTION_INSERT_TEMPLATE.format(conflict="")
+
+
 def insert_option_rows(db_path: str, rows: list[dict]) -> int:
     """
     Bulk-insert option rows for a snapshot in a single transaction.
@@ -410,11 +522,26 @@ def insert_option_rows(db_path: str, rows: list[dict]) -> int:
       the log would record a healthy cycle indefinitely — while the prices, of
       course, would be gone for good.
 
-      So: compare cursor.rowcount against what was offered and log any
-      shortfall as a WARNING. This does not change what gets stored. It only
-      makes a loss that was previously silent and permanent visible in
-      collector.log. Deciding per-constraint behaviour (keep OR IGNORE for
-      genuine duplicates, raise on everything else) remains M3.6 work.
+      So: compare cursor.rowcount against what was offered, and — M3.6, ADR-050
+      — say WHICH KIND of loss it was, because the two are not remotely alike.
+      A duplicate contract is benign: the row that was kept holds the same
+      prices as the row that was dropped, and nothing is missing. A CHECK or
+      NOT NULL violation is data that is gone for good. Both used to produce
+      the same WARNING, so the one that mattered was indistinguishable from
+      the one that did not — and for eight weeks it was, in exactly that way
+      (2,181 identical warnings, ADR-046).
+
+      The classification is EXACT rather than inferred: after the statement,
+      the unique key of every offered row is looked up in the table. A key that
+      is present was stored (by this row or by the duplicate it collided with);
+      a key that is ABSENT is a row the database threw away. One of the absent
+      rows is then replayed as a plain INSERT inside a SAVEPOINT, so the reason
+      in the log is SQLite's own message rather than this module's guess, and
+      the savepoint is rolled back so the replay stores nothing.
+
+      It still does not RAISE, and that is deliberate. Aborting the cycle over
+      a handful of bad rows would discard the several thousand good ones in the
+      same batch — a much larger loss than the one being reported.
 
       UPDATED 2026-07-26 (BUG-017): the collector used to discard this return
       value and record `strikes_fetched = len(option_rows)` — the offered
@@ -426,48 +553,129 @@ def insert_option_rows(db_path: str, rows: list[dict]) -> int:
     if not rows:
         return 0
 
-    sql = """
-        INSERT OR IGNORE INTO option_rows (
-            snapshot_id, expiry_date, dte, strike, right,
-            bid, ask, mark, last,
-            iv, delta, gamma, theta, vega,
-            volume, open_interest, intrinsic_value, time_value
-        ) VALUES (
-            :snapshot_id, :expiry_date, :dte, :strike, :right,
-            :bid, :ask, :mark, :last,
-            :iv, :delta, :gamma, :theta, :vega,
-            :volume, :open_interest, :intrinsic_value, :time_value
-        )
-    """
-    with managed_conn(db_path) as conn:
-        inserted = conn.executemany(sql, rows).rowcount
+    # A caller that predates the settlement column gets an honest NULL rather
+    # than a crash. NULL is the correct value for "this code did not know" —
+    # the same thing every pre-2026-08-19 row says (BUG-023).
+    rows = [{"settlement": None, **r} for r in rows]
 
-    if inserted < len(rows):
-        logger.warning(
-            "insert_option_rows: %d of %d rows were DISCARDED by the database "
-            "(snapshot_id=%s). A duplicate contract is benign; anything else is "
-            "silent data loss — see DEBT-008 / ADR-022.",
-            len(rows) - inserted, len(rows), rows[0].get("snapshot_id"),
-        )
+    with managed_conn(db_path) as conn:
+        inserted = conn.executemany(_OPTION_INSERT, rows).rowcount
+        if inserted < len(rows):
+            _report_discards(conn, rows, inserted)
 
     return inserted
+
+
+def _unique_key(row: dict) -> tuple:
+    """The row's identity under uq_option_rows_contract_settle.
+
+    Must track that index exactly. COALESCE(settlement, '?') is part of it,
+    which is what lets the two third-Friday contracts coexist (ADR-046); an
+    unlabelled row is its own third possibility, not a match for either.
+    """
+    settlement = row.get("settlement")
+    return (row["snapshot_id"], row["expiry_date"], row["strike"], row["right"],
+            "?" if settlement is None else settlement)
+
+
+def _rows_the_database_kept(conn, snapshot_ids) -> set[tuple]:
+    """The unique keys actually in the table, as plain tuples.
+
+    `tuple(...)` is load-bearing, not tidiness. This connection sets
+    row_factory = sqlite3.Row, and a Row NEVER compares equal to a tuple, so a
+    set of Rows matches nothing: every discard would look like unrecoverable
+    loss and the ERROR below would fire on ordinary duplicates. That is the
+    crying-wolf failure this whole task exists to remove, so it is pinned by
+    test_a_duplicate_is_reported_as_benign_not_as_loss.
+    """
+    keys = set()
+    for sid in snapshot_ids:
+        keys.update(tuple(r) for r in conn.execute(
+            """select snapshot_id, expiry_date, strike, right,
+                      coalesce(settlement, '?')
+               from option_rows where snapshot_id = ?""", (sid,)))
+    return keys
+
+
+def _why_the_database_refused(conn, row: dict) -> str:
+    """SQLite's own words, not ours.
+
+    Replays one lost row as a plain INSERT inside a savepoint that is always
+    rolled back, so asking the question stores nothing and cannot itself lose
+    or duplicate data. A guessed reason would be worse than none: the whole
+    point of this path is that nobody knew what was being discarded.
+    """
+    conn.execute("savepoint diagnose_discard")
+    try:
+        conn.execute(_PLAIN_OPTION_INSERT, row)
+    except sqlite3.Error as exc:
+        return str(exc)
+    else:
+        # It inserts cleanly on its own, so the collision was with another row
+        # in the same batch — a duplicate the key check could not see because
+        # the row that won is indistinguishable from the row that lost.
+        return "no error on replay; it collided with another row in the batch"
+    finally:
+        conn.execute("rollback to diagnose_discard")
+        conn.execute("release diagnose_discard")
+
+
+def _report_discards(conn, rows: list[dict], inserted: int) -> None:
+    """Split a shortfall into 'benign' and 'gone', and log them differently.
+
+    Called only when the counts disagree, which after ADR-046 should be never.
+    """
+    discarded = len(rows) - inserted
+    kept = _rows_the_database_kept(conn, {r["snapshot_id"] for r in rows})
+    lost = [r for r in rows if _unique_key(r) not in kept]
+
+    if not lost:
+        logger.warning(
+            "insert_option_rows: %d of %d rows were duplicates and were "
+            "dropped (snapshot_id=%s). Nothing is missing — every contract "
+            "offered is in the table. Benign (ADR-022, ADR-050).",
+            discarded, len(rows), rows[0].get("snapshot_id"),
+        )
+        return
+
+    logger.error(
+        "insert_option_rows: %d of %d rows were REFUSED BY THE DATABASE and "
+        "those prices are GONE (snapshot_id=%s). This is not a duplicate — "
+        "their contracts are absent from the table. SQLite says: %s. First "
+        "one: expiry=%s strike=%s right=%s settlement=%s. See ADR-050.",
+        len(lost), len(rows), rows[0].get("snapshot_id"),
+        _why_the_database_refused(conn, lost[0]),
+        lost[0].get("expiry_date"), lost[0].get("strike"),
+        lost[0].get("right"), lost[0].get("settlement"),
+    )
+    if discarded > len(lost):
+        logger.warning(
+            "insert_option_rows: the other %d discarded rows were duplicates "
+            "and are benign.", discarded - len(lost),
+        )
 
 
 def insert_atm_iv_records(db_path: str, records: list[dict]) -> None:
     """
     Bulk-insert pre-aggregated ATM IV records.
-    One record per expiry per snapshot — call after insert_option_rows() commits.
+    One record per CONTRACT per snapshot — call after insert_option_rows()
+    commits. On the third Friday that is two rows for the one date, the a.m.
+    contract and the p.m. one (BUG-028).
+
+    A plain INSERT, not INSERT OR IGNORE: uq_atm_iv_contract exists to catch a
+    second row for the same contract, and swallowing that would leave the term
+    structure quietly wrong, which is the failure this table already had once.
     """
     if not records:
         return
 
     sql = """
         INSERT INTO atm_iv_by_expiry (
-            snapshot_id, expiry_date, dte, atm_strike,
+            snapshot_id, expiry_date, settlement, dte, atm_strike,
             atm_call_iv, atm_put_iv, atm_avg_iv,
             iv_spread_to_front, iv_ratio_to_front
         ) VALUES (
-            :snapshot_id, :expiry_date, :dte, :atm_strike,
+            :snapshot_id, :expiry_date, :settlement, :dte, :atm_strike,
             :atm_call_iv, :atm_put_iv, :atm_avg_iv,
             :iv_spread_to_front, :iv_ratio_to_front
         )
@@ -521,21 +729,27 @@ def get_latest_complete_snapshot(db_path: str) -> sqlite3.Row | None:
 
 
 def get_latest_atm_iv_snapshots(db_path: str,
-                                  expiry_date: str,
+                                  expiry: str,
                                   n: int = 2) -> list:
     """
-    Last N ATM IV records for a specific expiry, most recent first.
+    Last N ATM IV records for one CONTRACT, most recent first.
     Used for the day-change metric in the dashboard left panel.
+
+    `expiry` is a display key, so on the third Friday the a.m. and p.m.
+    contracts give two different answers rather than one shared one (BUG-028).
 
     IVs are returned in decimal form (0.18 = 18%) — multiply by 100 for display.
     """
+    expiry_date, settlement = contract.parse(expiry)
+    match = contract.match_clause(expiry_date, settlement, rows="a", snaps="s")
     with get_conn(db_path) as conn:
         return conn.execute(
-            """
+            f"""
             SELECT a.atm_avg_iv, s.snapshot_timestamp
             FROM atm_iv_by_expiry a
             JOIN snapshots s ON s.snapshot_id = a.snapshot_id
             WHERE a.expiry_date = ?
+              AND {match}
               AND s.status      = 'COMPLETE'
             ORDER BY s.snapshot_timestamp DESC
             LIMIT ?
@@ -563,32 +777,45 @@ def get_option_chain(db_path: str, snapshot_id: int) -> list:
 
     Results ordered by expiry_date, strike, right for consistent display.
     IVs are in decimal form — app.py multiplies by 100 at the load boundary.
+
+    RETURNS BOTH THIRD-FRIDAY CONTRACTS, one row each. Telling them apart is the
+    `settlement` column, and the load boundary turns the pair into one display
+    key per contract (dataaccess/queries.load_chain_df, core/contract.py). This
+    read deliberately does NOT collapse them: doing so here is what hid the p.m.
+    prices from every screen at once, and a reader that silently drops half the
+    contracts is indistinguishable from one that has no data.
     """
     with get_conn(db_path) as conn:
         return conn.execute(
             """
             SELECT * FROM option_rows
             WHERE snapshot_id = ?
-            ORDER BY expiry_date, strike, right
+            ORDER BY expiry_date, strike, right, settlement
             """,
             (snapshot_id,)
         ).fetchall()
 
 
 def get_contract_iv_history(db_path: str, expiry_date: str, strike: float,
-                              right: str, days: int = 30) -> list:
+                              right: str, days: int = 30,
+                              settlement: str | None = None) -> list:
     """
     IV time-series for a specific option contract over the last N days.
     Drives the 'Selected-Strike IV' chart in the dashboard.
 
     right: 'C' or 'P' (not 'CALL'/'PUT').
+    settlement: 'AM' for the third-Friday morning contract, None for the
+    ordinary one. None also matches rows recorded before 2026-08-19, which
+    carry no settlement at all — see core/contract.py for how those are
+    attributed, and why the rule is read off the calendar date rather than
+    guessed. Callers hand this in already parsed from the display key.
     IVs are in decimal form — app.py multiplies by 100 at the load boundary.
 
     Performance: uses idx_option_rows_contract_snap (covering index).
     """
     with get_conn(db_path) as conn:
         return conn.execute(
-            """
+            f"""
             SELECT
                 s.snapshot_timestamp,
                 s.underlying_price,
@@ -601,6 +828,7 @@ def get_contract_iv_history(db_path: str, expiry_date: str, strike: float,
             WHERE o.expiry_date = ?
               AND o.strike      = ?
               AND o.right       = ?
+              AND {contract.match_clause(expiry_date, settlement, rows="o", snaps="s")}
               AND s.status      = 'COMPLETE'
               AND s.snapshot_timestamp >= datetime('now', ?, 'utc')
             ORDER BY s.snapshot_timestamp
@@ -609,20 +837,25 @@ def get_contract_iv_history(db_path: str, expiry_date: str, strike: float,
         ).fetchall()
 
 
-def get_atm_iv_history(db_path: str, expiry_date: str,
+def get_atm_iv_history(db_path: str, expiry: str,
                         days: int = 30) -> list:
     """
-    ATM IV history for a specific expiry over the last N days.
+    ATM IV history for one CONTRACT over the last N days.
     Primary query for term structure charts and range stats.
+
+    `expiry` is a display key — the third Friday's two contracts return two
+    different series (BUG-028).
 
     IVs are in decimal form — app.py multiplies by 100 at the load boundary.
 
     Performance: uses idx_atm_iv_expiry_snap. Scans ~3,150 rows per 30 days
     rather than scanning option_rows directly (~4.8M rows).
     """
+    expiry_date, settlement = contract.parse(expiry)
+    match = contract.match_clause(expiry_date, settlement, rows="a", snaps="s")
     with get_conn(db_path) as conn:
         return conn.execute(
-            """
+            f"""
             SELECT
                 s.snapshot_timestamp,
                 s.underlying_price,
@@ -633,6 +866,7 @@ def get_atm_iv_history(db_path: str, expiry_date: str,
             FROM atm_iv_by_expiry a
             JOIN snapshots s ON s.snapshot_id = a.snapshot_id
             WHERE a.expiry_date = ?
+              AND {match}
               AND s.status      = 'COMPLETE'
               AND s.snapshot_timestamp >= datetime('now', ?, 'utc')
             ORDER BY s.snapshot_timestamp
@@ -669,6 +903,8 @@ def get_entry_iv_context(db_path: str, entry_ts_utc: str,
         return ((f * b) ** 0.5) if (f and b and f > 0 and b > 0) else None
 
     cs, ps = float(call_strike), float(put_strike)
+    front_date, front_settle = contract.parse(front_expiry)
+    back_date, back_settle = contract.parse(back_expiry)
     with get_conn(db_path) as conn:
         snap = conn.execute(
             """
@@ -686,37 +922,56 @@ def get_entry_iv_context(db_path: str, entry_ts_utc: str,
             return None
         sid = snap["snapshot_id"]
 
+        # Each leg carries its own contract, so the match clause goes INSIDE
+        # each branch rather than once around the lot — the front leg may be
+        # the a.m. contract while the back leg is an ordinary p.m. one.
+        fm = contract.match_clause(front_date, front_settle, rows="o", snaps="s")
+        bm = contract.match_clause(back_date, back_settle, rows="o", snaps="s")
         leg_rows = conn.execute(
-            """
-            SELECT expiry_date, strike, right, iv
-            FROM option_rows
-            WHERE snapshot_id = ?
-              AND ( (expiry_date = ? AND strike = ? AND right = 'C')
-                 OR (expiry_date = ? AND strike = ? AND right = 'P')
-                 OR (expiry_date = ? AND strike = ? AND right = 'C')
-                 OR (expiry_date = ? AND strike = ? AND right = 'P') )
+            f"""
+            SELECT o.expiry_date, o.strike, o.right, o.iv
+            FROM option_rows o JOIN snapshots s USING (snapshot_id)
+            WHERE o.snapshot_id = ?
+              AND ( (o.expiry_date = ? AND o.strike = ? AND o.right = 'C' AND {fm})
+                 OR (o.expiry_date = ? AND o.strike = ? AND o.right = 'P' AND {fm})
+                 OR (o.expiry_date = ? AND o.strike = ? AND o.right = 'C' AND {bm})
+                 OR (o.expiry_date = ? AND o.strike = ? AND o.right = 'P' AND {bm}) )
             """,
-            (sid, front_expiry, cs, front_expiry, ps,
-             back_expiry, cs, back_expiry, ps),
+            (sid, front_date, cs, front_date, ps,
+             back_date, cs, back_date, ps),
         ).fetchall()
 
+        # Keyed on the plain date, not the display key: the clause above has
+        # already picked the right contract, and a legacy row attributed to the
+        # a.m. side still carries no settlement of its own to rebuild a key from.
         legs = {(r["expiry_date"], float(r["strike"]), r["right"]): r["iv"]
                 for r in leg_rows}
-        front_iv = _mean([legs.get((front_expiry, cs, "C")),
-                          legs.get((front_expiry, ps, "P"))])
-        back_iv = _mean([legs.get((back_expiry, cs, "C")),
-                         legs.get((back_expiry, ps, "P"))])
+        front_iv = _mean([legs.get((front_date, cs, "C")),
+                          legs.get((front_date, ps, "P"))])
+        back_iv = _mean([legs.get((back_date, cs, "C")),
+                         legs.get((back_date, ps, "P"))])
 
-        atm_rows = conn.execute(
-            """
-            SELECT expiry_date, atm_avg_iv
-            FROM atm_iv_by_expiry
-            WHERE snapshot_id = ? AND expiry_date IN (?, ?)
-            """,
-            (sid, front_expiry, back_expiry),
-        ).fetchall()
-        atm = {r["expiry_date"]: r["atm_avg_iv"] for r in atm_rows}
-        atm_front, atm_back = atm.get(front_expiry), atm.get(back_expiry)
+        # One read per contract rather than one IN (...) read for both. The two
+        # sides need different settlement clauses, and when front and back land
+        # on the same date keying the result by date alone would collapse them
+        # back into one number — the whole of BUG-028 in miniature.
+        afm = contract.match_clause(front_date, front_settle, rows="a", snaps="s")
+        abm = contract.match_clause(back_date, back_settle, rows="a", snaps="s")
+
+        def _atm(expiry_date: str, match: str):
+            row = conn.execute(
+                f"""
+                SELECT a.atm_avg_iv
+                FROM atm_iv_by_expiry a
+                JOIN snapshots s USING (snapshot_id)
+                WHERE a.snapshot_id = ? AND a.expiry_date = ? AND {match}
+                """,
+                (sid, expiry_date),
+            ).fetchone()
+            return row["atm_avg_iv"] if row else None
+
+        atm_front = _atm(front_date, afm)
+        atm_back = _atm(back_date, abm)
 
     return {
         "snapshot_id": sid,
@@ -730,6 +985,83 @@ def get_entry_iv_context(db_path: str, entry_ts_utc: str,
         "atm_ratio": _ratio(atm_front, atm_back),
         "atm_level": _level(atm_front, atm_back),
     }
+
+
+# Column name → SQLite type, and the get_entry_iv_context() key each one stores.
+# Declared once: init_trades_table() migrates from it, insert_trade/update_trade
+# write it, and tests assert against it, so the three cannot drift apart.
+ENTRY_IV_COLUMNS: dict[str, str] = {
+    "entry_iv_snapshot_id": "INTEGER",
+    "entry_iv_snapshot_ts": "TEXT",
+    "entry_front_iv":       "REAL",
+    "entry_back_iv":        "REAL",
+    "entry_iv_ratio":       "REAL",
+    "entry_iv_level":       "REAL",
+    "entry_atm_front_iv":   "REAL",
+    "entry_atm_back_iv":    "REAL",
+}
+
+_ENTRY_IV_SOURCE_KEY = {
+    "entry_iv_snapshot_id": "snapshot_id",
+    "entry_iv_snapshot_ts": "snapshot_timestamp",
+    "entry_front_iv":       "front_iv",
+    "entry_back_iv":        "back_iv",
+    "entry_iv_ratio":       "ratio",
+    "entry_iv_level":       "level",
+    "entry_atm_front_iv":   "atm_front_iv",
+    "entry_atm_back_iv":    "atm_back_iv",
+}
+
+
+def snapshot_entry_iv_context(db_path: str, entry_date: str, entry_time: str,
+                              initial_legs: str | list) -> dict:
+    """
+    Compute the entry-IV context for a trade and return it as trades columns.
+
+    THIS IS THE GATE ON RETENTION (ADR-044, ADR-016). get_entry_iv_context()
+    answers "what did the term structure look like when I opened this?" by
+    reading historical option_rows. Retention deletes those rows 90 days past
+    expiry, at which point the question becomes permanently unanswerable — and
+    unanswerable *silently*: Regime Analysis would just plot fewer trades each
+    month with no error anywhere. So the answer is written onto the trade while
+    the rows still exist, and reconstruction becomes the fallback for rows
+    logged before these columns existed.
+
+    Derives the four legs the way render_regime_analysis() does — earliest and
+    latest expiry, one call strike and one put strike — so the stored value
+    matches what reconstruction would have returned at the same moment.
+
+    Always returns every key in ENTRY_IV_COLUMNS. Missing inputs, an unparseable
+    entry time, or no nearby snapshot all yield all-None rather than raising:
+    a trade must always be recordable, even with the collector down. All-None is
+    also what a pre-existing row looks like, so the read path needs one case,
+    not two.
+    """
+    blank = dict.fromkeys(ENTRY_IV_COLUMNS)
+    try:
+        legs = json.loads(initial_legs) if isinstance(initial_legs, str) else initial_legs
+        expiries = sorted({leg["expiry"] for leg in legs})
+        front_expiry, back_expiry = expiries[0], expiries[-1]
+        call_strike = next(leg["strike"] for leg in legs if leg["type"] == "Call")
+        put_strike  = next(leg["strike"] for leg in legs if leg["type"] == "Put")
+
+        # entry_date/entry_time are local (ET); snapshots are UTC.
+        entered = datetime.strptime(f"{entry_date} {entry_time}", "%Y-%m-%d %H:%M")
+        ts_utc = (entered.replace(tzinfo=ZoneInfo(config.DISPLAY_TIMEZONE))
+                         .astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S"))
+
+        ctx = get_entry_iv_context(db_path, ts_utc, front_expiry, back_expiry,
+                                   call_strike, put_strike)
+    except Exception:
+        logger.warning("snapshot_entry_iv_context: could not derive context for "
+                       "%s %s — storing NULLs", entry_date, entry_time, exc_info=True)
+        return blank
+
+    if ctx is None:
+        logger.info("snapshot_entry_iv_context: no snapshot near %s %s",
+                    entry_date, entry_time)
+        return blank
+    return {col: ctx.get(key) for col, key in _ENTRY_IV_SOURCE_KEY.items()}
 
 
 def get_diagonal_history(
@@ -755,9 +1087,21 @@ def get_diagonal_history(
     IVs are in decimal form (as stored in atm_iv_by_expiry) — multiply ×100
     at the caller if percentage display is needed.
     """
+    front_date, front_settle = contract.parse(front_expiry)
+    back_date, back_settle = contract.parse(back_expiry)
+    def _m(alias, front):
+        return contract.match_clause(front_date if front else back_date,
+                                     front_settle if front else back_settle,
+                                     rows=alias, snaps="s")
     with get_conn(db_path) as conn:
+        ofc_match = _m("ofc", True)
+        ofp_match = _m("ofp", True)
+        obc_match = _m("obc", False)
+        obp_match = _m("obp", False)
+        f_match   = _m("f", True)    # the daily summary names its contract
+        b_match   = _m("b", False)   # too now — BUG-028
         return conn.execute(
-            """
+            f"""
             SELECT
                 s.snapshot_timestamp,
                 s.underlying_price                              AS spx,
@@ -774,20 +1118,26 @@ def get_diagonal_history(
             FROM snapshots s
             JOIN atm_iv_by_expiry f
                 ON f.snapshot_id = s.snapshot_id AND f.expiry_date = ?
+               AND {f_match}
             JOIN atm_iv_by_expiry b
                 ON b.snapshot_id = s.snapshot_id AND b.expiry_date = ?
+               AND {b_match}
             LEFT JOIN option_rows ofc
                 ON ofc.snapshot_id = s.snapshot_id
                AND ofc.expiry_date = ? AND ofc.strike = ? AND ofc.right = 'C'
+               AND {ofc_match}
             LEFT JOIN option_rows obc
                 ON obc.snapshot_id = s.snapshot_id
                AND obc.expiry_date = ? AND obc.strike = ? AND obc.right = 'C'
+               AND {obc_match}
             LEFT JOIN option_rows ofp
                 ON ofp.snapshot_id = s.snapshot_id
                AND ofp.expiry_date = ? AND ofp.strike = ? AND ofp.right = 'P'
+               AND {ofp_match}
             LEFT JOIN option_rows obp
                 ON obp.snapshot_id = s.snapshot_id
                AND obp.expiry_date = ? AND obp.strike = ? AND obp.right = 'P'
+               AND {obp_match}
             WHERE s.status = 'COMPLETE'
               AND s.snapshot_timestamp >= datetime('now', ?, 'utc')
               AND COALESCE(ofc.mark, (ofc.bid + ofc.ask) / 2.0) IS NOT NULL
@@ -800,11 +1150,11 @@ def get_diagonal_history(
             ORDER BY s.snapshot_timestamp
             """,
             (
-                front_expiry, back_expiry,
-                front_expiry, float(call_strike),
-                back_expiry,  float(call_strike),
-                front_expiry, float(put_strike),
-                back_expiry,  float(put_strike),
+                front_date, back_date,   # f / b, each narrowed by its own clause
+                front_date, float(call_strike),
+                back_date,  float(call_strike),
+                front_date, float(put_strike),
+                back_date,  float(put_strike),
                 f"-{days} days",
             ),
         ).fetchall()
@@ -840,9 +1190,21 @@ def get_transform_mark_history(
         transform_mark = (back_call_mark + back_put_mark)
                         - (front_wing_call_mark + front_wing_put_mark)
     """
+    front_date, front_settle = contract.parse(front_expiry)
+    back_date, back_settle = contract.parse(back_expiry)
+    def _m(alias, front):
+        return contract.match_clause(front_date if front else back_date,
+                                     front_settle if front else back_settle,
+                                     rows=alias, snaps="s")
     with get_conn(db_path) as conn:
+        ofc_match = _m("ofc", True)
+        ofp_match = _m("ofp", True)
+        owc_match = _m("owc", True)
+        owp_match = _m("owp", True)
+        obc_match = _m("obc", False)
+        obp_match = _m("obp", False)
         return conn.execute(
-            """
+            f"""
             SELECT
                 s.snapshot_timestamp,
                 s.underlying_price                            AS spx,
@@ -856,21 +1218,27 @@ def get_transform_mark_history(
             LEFT JOIN option_rows ofc
                 ON ofc.snapshot_id = s.snapshot_id
                AND ofc.expiry_date = ? AND ofc.strike = ? AND ofc.right = 'C'
+               AND {ofc_match}
             LEFT JOIN option_rows obc
                 ON obc.snapshot_id = s.snapshot_id
                AND obc.expiry_date = ? AND obc.strike = ? AND obc.right = 'C'
+               AND {obc_match}
             LEFT JOIN option_rows ofp
                 ON ofp.snapshot_id = s.snapshot_id
                AND ofp.expiry_date = ? AND ofp.strike = ? AND ofp.right = 'P'
+               AND {ofp_match}
             LEFT JOIN option_rows obp
                 ON obp.snapshot_id = s.snapshot_id
                AND obp.expiry_date = ? AND obp.strike = ? AND obp.right = 'P'
+               AND {obp_match}
             LEFT JOIN option_rows owc
                 ON owc.snapshot_id = s.snapshot_id
                AND owc.expiry_date = ? AND owc.strike = ? AND owc.right = 'C'
+               AND {owc_match}
             LEFT JOIN option_rows owp
                 ON owp.snapshot_id = s.snapshot_id
                AND owp.expiry_date = ? AND owp.strike = ? AND owp.right = 'P'
+               AND {owp_match}
             WHERE s.status = 'COMPLETE'
               AND s.snapshot_timestamp >= datetime('now', ?, 'utc')
               AND COALESCE(ofc.mark, (ofc.bid + ofc.ask) / 2.0) IS NOT NULL
@@ -888,12 +1256,12 @@ def get_transform_mark_history(
             ORDER BY s.snapshot_timestamp
             """,
             (
-                front_expiry, float(call_strike),
-                back_expiry,  float(call_strike),
-                front_expiry, float(put_strike),
-                back_expiry,  float(put_strike),
-                front_expiry, float(call_strike) + 5,
-                front_expiry, float(put_strike)  - 5,
+                front_date, float(call_strike),
+                back_date,  float(call_strike),
+                front_date, float(put_strike),
+                back_date,  float(put_strike),
+                front_date, float(call_strike) + 5,
+                front_date, float(put_strike)  - 5,
                 f"-{days} days",
             ),
         ).fetchall()
@@ -1044,6 +1412,18 @@ CREATE TABLE IF NOT EXISTS trades (
     expired_inside_wings   INTEGER,               -- 1 if ic_long_put < SPX < ic_long_call
     expired_between_shorts INTEGER,               -- 1 if ic_short_put <= SPX <= ic_short_call
     outcome                TEXT,
+    -- Entry IV context, snapshotted at logging time (ADR-044 / ADR-016).
+    -- These duplicate what get_entry_iv_context() can reconstruct from
+    -- option_rows TODAY, and are the only copy once retention prunes those
+    -- rows. IVs in DECIMAL form, matching the rest of the schema.
+    entry_iv_snapshot_id   INTEGER,               -- snapshot the context came from
+    entry_iv_snapshot_ts   TEXT,                  -- its timestamp, UTC
+    entry_front_iv         REAL,                  -- at-strike, front expiry
+    entry_back_iv          REAL,                  -- at-strike, back expiry
+    entry_iv_ratio         REAL,                  -- front / back
+    entry_iv_level         REAL,                  -- sqrt(front * back)
+    entry_atm_front_iv     REAL,                  -- ATM macro context
+    entry_atm_back_iv      REAL,
     -- Metadata
     notes                  TEXT,
     created_at             TEXT    NOT NULL,
@@ -1061,24 +1441,27 @@ CREATE INDEX IF NOT EXISTS idx_trades_entry_date ON trades(entry_date);
 
 def init_trades_table(db_path: str) -> None:
     """
-    Create the trades table and indexes if they don't exist.
-    Safe to call on every journal.py startup — all DDL uses IF NOT EXISTS.
-    Intentionally separate from init_db() so the main dashboard schema path
-    and version number are unaffected.
+    Create the trades table and indexes if they don't exist, then bring the
+    schema up to date. Safe to call on every journal.py startup.
+
+    The ten columns this used to add itself, each inside its own
+    `try: ALTER ... except Exception: pass`, are now migrations 2 and 3
+    (M3.3, ADR-051). That pattern could not tell "the column is already there"
+    from a full disk, a locked database or a misspelled type — all four were
+    silently successful — and it left `schema_version` saying 1 after ten
+    changes had been applied.
+
+    It is no longer separate from init_db()'s version number, deliberately.
+    Keeping the journal's schema outside the version was what made "what shape
+    is this database in?" unanswerable.
     """
-    with managed_conn(db_path) as conn:
+    conn = _make_conn(db_path)
+    try:
         conn.executescript(_TRADES_DDL)
-
-        # v3.1 column migrations — safe to run on existing databases
-        try:
-            conn.execute("ALTER TABLE trades ADD COLUMN transform_commissions REAL")
-        except Exception:
-            pass  # column already exists
-
-        try:
-            conn.execute("ALTER TABLE trades ADD COLUMN close_type TEXT")
-        except Exception:
-            pass  # column already exists
+        conn.commit()
+        schema.migrate(conn)
+    finally:
+        conn.close()
 
     logger.info("Trades table verified at %s", db_path)
 
@@ -1131,23 +1514,69 @@ def insert_trade(db_path: str, trade: dict) -> None:
         'ic_call_wing','ic_put_wing','ic_max_profit','ic_worst_case','ic_risk_free',
         'result_date','spx_at_expiry','final_pl',
         'expired_inside_wings','expired_between_shorts','outcome','notes',
+        *ENTRY_IV_COLUMNS,
     ]
+    # Snapshotted here, not by the caller, so it cannot be forgotten at a call
+    # site (ADR-044). An explicit value in `trade` still wins — that is how a
+    # backfill or a test supplies its own.
+    entry_iv = _entry_iv_for(db_path, trade)
+
     col_str = ", ".join(columns + ['created_at', 'updated_at'])
     val_str = ", ".join(f":{c}" for c in columns) + ", :created_at, :updated_at"
     with managed_conn(db_path) as conn:
         conn.execute(
             f"INSERT INTO trades ({col_str}) VALUES ({val_str})",
-            {**{c: trade.get(c) for c in columns}, 'created_at': now, 'updated_at': now}
+            {**{c: trade.get(c) for c in columns}, **entry_iv,
+             'created_at': now, 'updated_at': now}
         )
+
+
+def _entry_iv_for(db_path: str, fields: dict) -> dict:
+    """Entry-IV columns for a trade, honouring any the caller supplied itself.
+
+    Shared by insert_trade and update_trade so an edit cannot leave a stored
+    context describing the trade as it used to be — moving the entry time or a
+    strike changes which snapshot and which legs the context should come from.
+    """
+    supplied = {c: fields[c] for c in ENTRY_IV_COLUMNS if c in fields}
+    if len(supplied) == len(ENTRY_IV_COLUMNS):
+        return supplied
+    computed = snapshot_entry_iv_context(
+        db_path, fields.get('entry_date'), fields.get('entry_time'),
+        fields.get('initial_legs'),
+    )
+    return {**computed, **supplied}
+
+
+# An edit that touches any of these invalidates the stored entry context.
+_ENTRY_IV_INPUTS = ('entry_date', 'entry_time', 'initial_legs')
 
 
 def update_trade(db_path: str, trade_id: str, **fields) -> None:
     """
     Update specific columns on a trade. Pass column=value keyword args.
     'updated_at' is always set to UTC now automatically.
+
+    If the edit changes an input to the entry-IV context, the context is
+    recomputed from the trade's *post-edit* values (ADR-044) — the row after an
+    edit must describe the trade it now is. Recomputation reads the same
+    historical option_rows, so it is only as available as retention has left it;
+    once those rows are pruned an edit will store NULLs rather than a wrong
+    answer, and the row falls back to reconstruction like any pre-M3 trade.
     """
     if not fields:
         return
+    if any(k in fields for k in _ENTRY_IV_INPUTS):
+        current = get_trade(db_path, trade_id)
+        # `k in current.keys()`, NOT `k in current`. Ruff's SIM118 wants the
+        # shorter form and it is wrong here: `in` on a sqlite3.Row tests its
+        # VALUES, not its column names, so `'entry_date' in row` is False on a
+        # row that has an entry_date. Taking the suggestion blanks the stored
+        # context on every edit, silently. Verified in a REPL, not assumed.
+        merged = {k: (current[k] if current is not None and k in current.keys() else None)  # noqa: SIM118
+                  for k in _ENTRY_IV_INPUTS}
+        merged.update(fields)  # the edit wins, including any explicit entry_* values
+        fields.update(_entry_iv_for(db_path, merged))
     fields['updated_at'] = _utcnow()
     set_clause = ", ".join(f"{k} = :{k}" for k in fields)
     with managed_conn(db_path) as conn:
@@ -1155,6 +1584,122 @@ def update_trade(db_path: str, trade_id: str, **fields) -> None:
             f"UPDATE trades SET {set_clause} WHERE trade_id = :trade_id",
             {**fields, 'trade_id': trade_id}
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Retention (M3.2 — ADR-044)
+#
+# The only code in this project that deletes irreplaceable data. It is split in
+# two on purpose: plan_prune() answers "what would go" and touches nothing,
+# execute_prune() acts on a plan it is handed. A caller cannot delete without
+# first holding the description of what it is deleting, and scripts/prune.py
+# prints that description before it will act on it.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_protected_expiries(db_path: str) -> set[str]:
+    """Every expiry_date any trade used. Never prunable, at any age (ADR-044).
+
+    Read from the trades rows themselves rather than from a list maintained by
+    hand, so logging a trade protects its data with no further action. Covers
+    both the diagonal's legs and the iron condor's expiry — a transformed trade
+    has two structures and the record of it is worth nothing without both.
+
+    Fails CLOSED. A trades table that is absent, or a legs blob that will not
+    parse, yields nothing to protect — so any exception here must never be
+    swallowed into an empty set, or the answer "protect nothing" arrives looking
+    exactly like the truth. Only genuinely-absent trades gives an empty set.
+    """
+    expiries: set[str] = set()
+    with get_conn(db_path) as conn:
+        tables = {r["name"] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        if "trades" not in tables:
+            return expiries          # journal never opened; nothing to protect
+        rows = conn.execute(
+            "SELECT initial_legs, transform_legs, ic_expiry_date FROM trades"
+        ).fetchall()
+
+    for row in rows:
+        if row["ic_expiry_date"]:
+            expiries.add(row["ic_expiry_date"])
+        for blob in (row["initial_legs"], row["transform_legs"]):
+            if not blob:
+                continue
+            # Deliberately unguarded: a leg blob that will not parse means a
+            # trade whose expiries cannot be determined, and pruning around an
+            # unknown is exactly the mistake this function exists to prevent.
+            for leg in json.loads(blob):
+                if leg.get("expiry"):
+                    expiries.add(leg["expiry"])
+    return expiries
+
+
+def plan_prune(db_path: str, retention_days: int | None = None,
+               today: str | None = None) -> dict:
+    """Describe what a prune WOULD delete. Read-only — opens query_only.
+
+    Returns the cutoff, the expiries that would go with their row counts, the
+    expiries held back and why, and the totals. `today` is injectable so the
+    boundary can be tested without waiting for the calendar.
+    """
+    days = config.RETENTION_DAYS if retention_days is None else retention_days
+    if days < 0:
+        raise ValueError(f"retention_days must not be negative, got {days}")
+    ref = date.fromisoformat(today) if today else date.today()
+    cutoff = (ref - timedelta(days=days)).isoformat()
+
+    protected = get_protected_expiries(db_path)
+    with get_conn(db_path) as conn:
+        aged = conn.execute(
+            "SELECT expiry_date, COUNT(*) AS rows FROM option_rows "
+            "WHERE expiry_date < ? GROUP BY expiry_date ORDER BY expiry_date",
+            (cutoff,),
+        ).fetchall()
+        total_rows = conn.execute(
+            "SELECT COUNT(*) AS c FROM option_rows").fetchone()["c"]
+
+    prunable = [{"expiry_date": r["expiry_date"], "rows": r["rows"]}
+                for r in aged if r["expiry_date"] not in protected]
+    held = [{"expiry_date": r["expiry_date"], "rows": r["rows"]}
+            for r in aged if r["expiry_date"] in protected]
+
+    return {
+        "cutoff": cutoff,
+        "retention_days": days,
+        "as_of": ref.isoformat(),
+        "prunable": prunable,
+        "held_for_trades": held,
+        "rows_to_delete": sum(e["rows"] for e in prunable),
+        "rows_held": sum(e["rows"] for e in held),
+        "option_rows_total": total_rows,
+    }
+
+
+def execute_prune(db_path: str, plan: dict) -> int:
+    """Delete the option_rows a plan named. Returns rows actually deleted.
+
+    Takes the plan rather than re-deriving the cutoff so that what was shown to
+    the user and what is deleted cannot be two different answers — re-running
+    the query here would silently re-widen the set if a trade were deleted, or
+    if midnight passed, between the report and the confirmation.
+
+    Deletes by the exact expiry list, one statement per expiry, inside one
+    transaction: all of it lands or none of it does. Only option_rows is
+    touched. atm_iv_by_expiry, snapshots and collection_gaps are never deleted.
+    """
+    expiries = [e["expiry_date"] for e in plan["prunable"]]
+    if not expiries:
+        return 0
+
+    deleted = 0
+    with managed_conn(db_path) as conn:
+        for expiry in expiries:
+            deleted += conn.execute(
+                "DELETE FROM option_rows WHERE expiry_date = ?", (expiry,)
+            ).rowcount
+    logger.warning("retention: deleted %d option_rows across %d expiries "
+                   "older than %s", deleted, len(expiries), plan["cutoff"])
+    return deleted
 
 
 def delete_trade(db_path: str, trade_id: str) -> None:  # write path
@@ -1382,3 +1927,135 @@ def seed_t001(db_path: str) -> None:
             )
         """, (initial, transform, notes, now, now))
         logger.info("T-001 seeded into trades table.")
+
+
+def get_intraday_strike_metrics(db_path: str, session_date: str,
+                                dte_max: int | None = None) -> list:
+    """Gamma, open interest and volume per STRIKE per SNAPSHOT for one session.
+
+    The read behind every time-aware panel on the Gamma Exposure tab: net GEX
+    through the day, the 0DTE flow lines, and the cumulative net-volume
+    build-up. All three ask the same question — how did this strike change as
+    the session ran — and one read answers it for all of them.
+
+    **AGGREGATED IN SQL, NOT IN PANDAS.** A session holds ~126 snapshots of
+    ~3,200 option rows, so the raw join is ~400,000 rows; grouped here it is
+    ~13,000. Pulling the raw rows across the boundary and grouping them in the
+    view would move a third of a million rows through a memo on every rerun to
+    display a few hundred points.
+
+    `dte_max` bounds days-to-expiry — 0 for the 0DTE flow chart, None for
+    everything. The filter has to happen BEFORE the grouping or strikes from
+    different expiries merge and the "0DTE" line silently includes contracts
+    that are not 0DTE.
+
+    Gamma x open interest is summed here and left UNSCALED. The dollar scaling
+    needs each snapshot's own spot price (core/gex.py), which is returned
+    alongside, and doing that multiplication in SQL would bake one leg of the
+    formula into the database while the other lives in core/ — exactly the
+    two-copies-of-a-formula split that core/gex.py was extracted to end.
+
+    Ordered by time then strike so a caller can pivot without re-sorting.
+    """
+    with get_conn(db_path) as conn:
+        return conn.execute(
+            """
+            SELECT s.snapshot_id,
+                   s.snapshot_timestamp,
+                   s.underlying_price,
+                   o.strike,
+                   SUM(CASE WHEN o.right = 'C'
+                            THEN o.gamma * COALESCE(o.open_interest, 0)
+                            ELSE 0 END)                      AS call_gamma_oi,
+                   SUM(CASE WHEN o.right = 'P'
+                            THEN o.gamma * COALESCE(o.open_interest, 0)
+                            ELSE 0 END)                      AS put_gamma_oi,
+                   SUM(CASE WHEN o.right = 'C'
+                            THEN COALESCE(o.volume, 0) ELSE 0 END) AS call_volume,
+                   SUM(CASE WHEN o.right = 'P'
+                            THEN COALESCE(o.volume, 0) ELSE 0 END) AS put_volume,
+                   SUM(CASE WHEN o.right = 'C'
+                            THEN COALESCE(o.open_interest, 0) ELSE 0 END) AS call_oi,
+                   SUM(CASE WHEN o.right = 'P'
+                            THEN COALESCE(o.open_interest, 0) ELSE 0 END) AS put_oi
+            FROM option_rows o
+            JOIN snapshots  s USING (snapshot_id)
+            WHERE s.status = 'COMPLETE'
+              AND DATE(s.snapshot_timestamp) = ?
+              AND o.gamma IS NOT NULL
+              AND (? IS NULL OR o.dte <= ?)
+            GROUP BY s.snapshot_id, o.strike
+            ORDER BY s.snapshot_timestamp, o.strike
+            """,
+            (session_date, dte_max, dte_max)
+        ).fetchall()
+
+
+def get_prior_session_oi(db_path: str, session_date: str,
+                         expiry: str | None = None) -> list:
+    """Open interest AND VOLUME per strike at the close of the prior session.
+
+    **THE VOLUME IS NOT AN EXTRA. It is the half that makes the open-interest
+    change readable at all.** Open interest is republished once, overnight, so
+    today's figure minus yesterday's is what was opened during YESTERDAY's
+    session. Dividing that by TODAY's volume compares two different days:
+    measured over 20,358 contract-days of this record, 20.0% of contracts had
+    an open-interest change larger than the whole of today's volume at that
+    contract — arithmetically impossible, since no more contracts can be
+    opened than were traded. Against the prior session's own volume the same
+    figure is 4.9%. The volume returned here is the one the change belongs to.
+
+    Open interest is republished once a day, overnight, so today's figure minus
+    yesterday's is the number of positions actually OPENED or CLOSED — as close
+    to a direct reading of new positioning as this data gets. Within a session
+    it does not move at all, which is why comparing two snapshots from the same
+    day would always return zero and mean nothing.
+
+    Takes the LAST COMPLETE snapshot of the prior session rather than the first
+    of today, deliberately: today's first snapshot already carries today's
+    republished figure, so differencing against it would compare a number with
+    itself.
+
+    `expiry` MUST match whatever the caller is differencing against. Summing
+    every expiry at a strike and subtracting that from one expiry's open
+    interest returns the rest of the board as if it had been liquidated
+    overnight — a caller comparing a single expiry saw six-figure negative
+    deltas at strikes that had barely traded. The filter belongs here, in the
+    same query as the sum, and not in the caller.
+
+    Returns [] when there is no prior session — the first collection day, and a
+    long weekend for a caller that assumed yesterday existed.
+    """
+    with get_conn(db_path) as conn:
+        prior = conn.execute(
+            """
+            SELECT snapshot_id FROM snapshots
+            WHERE status = 'COMPLETE'
+              AND DATE(snapshot_timestamp) < ?
+            ORDER BY snapshot_timestamp DESC
+            LIMIT 1
+            """,
+            (session_date,)
+        ).fetchone()
+        if prior is None:
+            return []
+
+        return conn.execute(
+            """
+            SELECT strike,
+                   SUM(CASE WHEN right = 'C'
+                            THEN COALESCE(open_interest, 0) ELSE 0 END) AS call_oi,
+                   SUM(CASE WHEN right = 'P'
+                            THEN COALESCE(open_interest, 0) ELSE 0 END) AS put_oi,
+                   SUM(CASE WHEN right = 'C'
+                            THEN COALESCE(volume, 0) ELSE 0 END) AS call_volume,
+                   SUM(CASE WHEN right = 'P'
+                            THEN COALESCE(volume, 0) ELSE 0 END) AS put_volume
+            FROM option_rows
+            WHERE snapshot_id = ?
+              AND (? IS NULL OR expiry_date = ?)
+            GROUP BY strike
+            ORDER BY strike
+            """,
+            (prior["snapshot_id"], expiry, expiry)
+        ).fetchall()

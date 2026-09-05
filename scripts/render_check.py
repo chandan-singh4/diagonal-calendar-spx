@@ -39,7 +39,9 @@ sys.path.insert(0, str(ROOT))
 from streamlit.testing.v1 import AppTest
 
 APP = ROOT / "app.py"
-TABS = ["scanner", "entry", "edge", "strike", "hist", "research"]
+# "hist" is gone as a tab: Historical Statistics now draws underneath
+# Strike Detail, so "strike" executes both.
+TABS = ["scanner", "entry", "edge", "strike", "gex", "research"]
 TIMEOUT_SECONDS = 300
 
 
@@ -75,7 +77,7 @@ def main() -> int:
             print(f"  {tab} ({when}): {exc}")
         return 1
 
-    print("All six tabs executed with no exception.")
+    print(f"All {len(TABS)} tabs executed with no exception.")
     return 0
 
 

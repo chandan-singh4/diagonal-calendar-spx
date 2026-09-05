@@ -275,6 +275,106 @@ class TestChainToDataFrame:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# The broker's "no value" marker (BUG-030)
+#
+# Schwab answers -999.0 when it has nothing to give for a volatility or a greek.
+# It was stored verbatim for ten weeks: 5,127 rows carry an IV of -9.99 (the
+# marker after the collector's /100) and 5,081 rows carry each poisoned greek.
+# Nothing raised, because -999.0 is a perfectly valid float.
+#
+# The trap these tests exist to hold shut is the OTHER direction. -9.99 is an
+# entirely ordinary theta, and 38 rows in the real record legitimately hold it.
+# A tolerance band, or a "anything below -100 is junk" rule, would quietly
+# delete real prices while tidying up. Only the exact marker is a marker.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _poison(raw, field, value=schwab_client.SCHWAB_NO_VALUE):
+    """Set `field` to the marker on every contract in a raw chain."""
+    for side_key in ("callExpDateMap", "putExpDateMap"):
+        for strikes in raw.get(side_key, {}).values():
+            for contracts in strikes.values():
+                for c in contracts:
+                    c[field] = value
+    return raw
+
+
+class TestSchwabNoValueMarker:
+
+    @pytest.mark.parametrize("field, column", [
+        ("volatility", "iv"),
+        ("delta",      "delta"),
+        ("gamma",      "gamma"),
+        ("theta",      "theta"),
+        ("vega",       "vega"),
+    ])
+    def test_the_marker_becomes_a_blank_not_a_number(self, field, column):
+        """Missing price -> blank, not 0 — and emphatically not -999."""
+        raw = _poison(make_raw_chain(expiries=[("2026-08-07", 7)],
+                                     strikes=[6000.0]), field)
+
+        df = schwab_client.chain_to_dataframe(raw)
+
+        assert df[column].isna().all()
+
+    def test_a_theta_of_minus_nine_ninety_nine_is_real_data_and_survives(self):
+        """The whole reason the comparison is exact. An option losing $9.99 a
+        day is unremarkable, and -9.99 is only special AFTER the collector's
+        /100 turns the marker into it — which happens to the IV alone."""
+        raw = _poison(make_raw_chain(expiries=[("2026-08-07", 7)],
+                                     strikes=[6000.0]), "theta", -9.99)
+
+        df = schwab_client.chain_to_dataframe(raw)
+
+        assert set(df["theta"]) == {-9.99}
+
+    def test_quotes_are_left_alone(self):
+        """bid/ask/last do not go through the filter. Schwab sends a real
+        number or nothing at all for those, and a legitimate -999 quote is
+        impossible only because prices cannot be negative — not a reason to
+        add a filter that could one day misfire on a spread field."""
+        raw = make_raw_chain(expiries=[("2026-08-07", 7)], strikes=[6000.0])
+
+        df = schwab_client.chain_to_dataframe(raw)
+
+        assert set(df["bid"]) == {9.0}
+        assert set(df["ask"]) == {11.0}
+
+    def test_ordinary_values_pass_through_untouched(self):
+        """The half that matters: a filter that eats real greeks would show up
+        as an empty column, and every other test here would still pass."""
+        df = schwab_client.chain_to_dataframe(
+            make_raw_chain(expiries=[("2026-08-07", 7)], strikes=[6000.0]))
+
+        assert set(df["iv"]) == {18.4}
+        assert set(df["delta"]) == {0.5}
+        assert set(df["theta"]) == {-0.5}
+
+
+class TestValueOrNone:
+    """The filter itself, at the boundaries."""
+
+    def test_the_marker_is_blanked(self):
+        assert schwab_client._value_or_none(-999.0) is None
+
+    def test_a_neighbouring_value_is_not(self):
+        assert schwab_client._value_or_none(-998.9) == -998.9
+        assert schwab_client._value_or_none(-999.1) == -999.1
+
+    def test_missing_and_unparseable_are_blank(self):
+        assert schwab_client._value_or_none(None) is None
+        assert schwab_client._value_or_none("") is None
+        assert schwab_client._value_or_none("n/a") is None
+
+    def test_nan_is_blank(self):
+        assert schwab_client._value_or_none(float("nan")) is None
+
+    def test_zero_is_a_value(self):
+        """Unlike _safe_float, which treats 0 as missing. A delta of 0.0 on a
+        far out-of-the-money option is a fact, not an absence."""
+        assert schwab_client._value_or_none(0.0) == 0.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Strike window
 # ─────────────────────────────────────────────────────────────────────────────
 

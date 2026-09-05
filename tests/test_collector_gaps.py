@@ -66,7 +66,7 @@ PRE_HOLIDAY_THU = 2      # 2026-07-02
 
 def test_market_window_constants_are_what_the_rest_of_this_file_assumes():
     assert (collector._OPEN_START.hour, collector._OPEN_START.minute) == (9, 30)
-    assert (collector._CLOSE_END.hour, collector._CLOSE_END.minute) == (16, 0)
+    assert (collector._CLOSE_END.hour, collector._CLOSE_END.minute) == (16, 2)
 
 
 def test_the_2026_holiday_table_contains_the_dates_used_below():
@@ -125,18 +125,21 @@ def test_a_weekend_restart_is_routine():
 def test_restart_a_minute_after_the_open_is_still_routine():
     """FIXED — BUG-005. The collector restarts at 09:30–09:31, so up to a
     minute of session time is unavoidably inside the gap. That is cadence, not
-    data loss, and the tolerance absorbs it."""
-    assert classify(et(2026, 7, TUE, 15, 59), et(2026, 7, WED, 9, 31)) == "MARKET_CLOSED"
+    data loss, and the tolerance absorbs it.
+
+    The last write moved from 15:59 to 16:01 with ADR-049; the end-of-day cost
+    is 1.0 minute either way, so the budget is unchanged."""
+    assert classify(et(2026, 7, TUE, 16, 1), et(2026, 7, WED, 9, 31)) == "MARKET_CLOSED"
 
 
 def test_every_overnight_gap_the_collector_produces_is_now_routine():
     """FIXED — BUG-005, the property that actually matters. Was: all four
     COLLECTOR_OFFLINE, "not one is recognised as routine"."""
     overnight_gaps = [
-        (et(2026, 7, MON, 15, 59), et(2026, 7, TUE, 9, 30)),
-        (et(2026, 7, TUE, 15, 59), et(2026, 7, WED, 9, 30)),
-        (et(2026, 7, WED, 15, 59), et(2026, 7, THU, 9, 31)),
-        (et(2026, 7, THU, 15, 59), et(2026, 7, FRI, 9, 30)),
+        (et(2026, 7, MON, 16, 1), et(2026, 7, TUE, 9, 30)),
+        (et(2026, 7, TUE, 16, 1), et(2026, 7, WED, 9, 30)),
+        (et(2026, 7, WED, 16, 1), et(2026, 7, THU, 9, 31)),
+        (et(2026, 7, THU, 16, 1), et(2026, 7, FRI, 9, 30)),
     ]
     verdicts = {classify(s, e) for s, e in overnight_gaps}
     assert verdicts == {"MARKET_CLOSED"}, "every routine night is recognised"
@@ -159,14 +162,18 @@ def test_the_tolerance_boundary_is_where_it_is_documented_to_be(
         minutes_late, missed, expected):
     """3.0 market minutes, inclusive — pinned so the constant cannot drift.
 
-    Note the budget is spent at BOTH ends: a 15:59 last write already consumes
+    Note the budget is spent at BOTH ends: a 16:01 last write already consumes
     1.0 minute before the morning is considered, so the collector can be at
     most 2 minutes late on the open, not 3. My first version of this test got
     that wrong and the code caught it, which is the right way round.
+
+    ADR-049 widened the window to 16:02 and moved the last write from 15:59 to
+    16:01. Both numbers moved by two minutes, so the 1.0-minute end-of-day cost
+    and this whole budget are exactly as they were.
     """
     end = et(2026, 7, WED, 9, 30) + timedelta(minutes=minutes_late)
-    assert mm(et(2026, 7, TUE, 15, 59), end) == missed
-    assert classify(et(2026, 7, TUE, 15, 59), end) == expected
+    assert mm(et(2026, 7, TUE, 16, 1), end) == missed
+    assert classify(et(2026, 7, TUE, 16, 1), end) == expected
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -344,45 +351,60 @@ def mm(start_et, end_et) -> float:
     )
 
 
-def test_a_full_trading_day_is_390_minutes():
+def test_a_full_trading_day_is_392_minutes():
     """09:30 to 16:00 — six and a half hours."""
-    assert mm(et(2026, 7, TUE, 9, 30), et(2026, 7, TUE, 16, 0)) == 390.0
+    assert mm(et(2026, 7, TUE, 9, 30), et(2026, 7, TUE, 16, 2)) == 392.0
 
 
 def test_a_window_wider_than_the_session_still_counts_only_the_session():
-    """Midnight to midnight on a trading day is still 390 collectable minutes."""
-    assert mm(et(2026, 7, TUE, 0, 0), et(2026, 7, WED, 0, 0)) == 390.0
+    """Midnight to midnight on a trading day is still 392 collectable minutes."""
+    assert mm(et(2026, 7, TUE, 0, 0), et(2026, 7, WED, 0, 0)) == 392.0
 
 
 def test_an_overnight_window_costs_nothing():
-    assert mm(et(2026, 7, TUE, 16, 0), et(2026, 7, WED, 9, 30)) == 0.0
+    assert mm(et(2026, 7, TUE, 16, 2), et(2026, 7, WED, 9, 30)) == 0.0
 
 
 def test_a_weekend_costs_nothing_however_long():
-    assert mm(et(2026, 7, FRI, 16, 0), et(2026, 7, MON + 7, 9, 30)) == 0.0
+    assert mm(et(2026, 7, FRI, 16, 2), et(2026, 7, MON + 7, 9, 30)) == 0.0
 
 
 def test_a_holiday_costs_nothing():
     """3 July 2026 is a weekday, but the market is shut."""
-    assert mm(et(2026, 7, HOLIDAY_FRI, 9, 30), et(2026, 7, HOLIDAY_FRI, 16, 0)) == 0.0
+    assert mm(et(2026, 7, HOLIDAY_FRI, 9, 30), et(2026, 7, HOLIDAY_FRI, 16, 2)) == 0.0
 
 
 def test_a_multi_day_outage_sums_each_trading_day():
     """Monday noon to Thursday noon: half of Monday, all of Tue and Wed, half
-    of Thursday. 240 + 390 + 390 + 150 = 1,170."""
-    assert mm(et(2026, 7, MON, 12, 0), et(2026, 7, THU, 12, 0)) == 1170.0
+    of Thursday. 242 + 392 + 392 + 150 = 1,176."""
+    assert mm(et(2026, 7, MON, 12, 0), et(2026, 7, THU, 12, 0)) == 1176.0
 
 
 def test_a_week_long_outage_skips_the_holiday_and_the_weekend():
     """30 June (Tue) noon to 8 July (Wed) noon. Trading days inside: Tue 30
-    (240), Wed 1 (390), Thu 2 (390), Mon 6 (390), Tue 7 (390), Wed 8 (150).
-    Friday 3 is the holiday, 4-5 the weekend. Total 1,950."""
-    assert mm(et(2026, 6, 30, 12, 0), et(2026, 7, 8, 12, 0)) == 1950.0
+    (242), Wed 1 (392), Thu 2 (392), Mon 6 (392), Tue 7 (392), Wed 8 (150).
+    Friday 3 is the holiday, 4-5 the weekend. Total 1,960."""
+    assert mm(et(2026, 6, 30, 12, 0), et(2026, 7, 8, 12, 0)) == 1960.0
 
 
 def test_the_boundary_minute_at_the_close_is_counted():
-    """15:59 to 16:00 is the one minute the old off-by-one tripped over."""
-    assert mm(et(2026, 7, TUE, 15, 59), et(2026, 7, TUE, 16, 0)) == 1.0
+    """16:01 to 16:02 is the one minute the old off-by-one tripped over — the
+    last collectable minute of the day, wherever the window happens to end."""
+    assert mm(et(2026, 7, TUE, 16, 1), et(2026, 7, TUE, 16, 2)) == 1.0
+
+
+def test_the_two_minutes_after_the_bell_are_collectable_now():
+    """ADR-049: the whole point. 16:00-16:02 used to cost zero because it was
+    outside the window; it is now the stretch that holds the closing print."""
+    assert mm(et(2026, 7, TUE, 16, 0), et(2026, 7, TUE, 16, 2)) == 2.0
+
+
+def test_a_night_that_starts_at_the_new_last_write_is_still_routine():
+    """The crying-wolf guard. Widening the window without moving the expected
+    last write with it would make every ordinary night look like a fault —
+    exactly the BUG-005 failure, reintroduced from the other direction."""
+    assert classify(et(2026, 7, TUE, 16, 1), et(2026, 7, WED, 9, 30)) == "MARKET_CLOSED"
+    assert classify(et(2026, 7, FRI, 16, 1), et(2026, 7, MON + 7, 9, 30)) == "MARKET_CLOSED"
 
 
 def test_a_backwards_or_empty_window_is_zero_not_negative():

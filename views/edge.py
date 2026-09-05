@@ -657,9 +657,11 @@ def render(ctx: ViewContext) -> None:
                             )
 
             st.caption(
-                "Green shading marks every window where Transform Gap "
-                "(Transform Order Mark − Diagonal Mark) was ≥ 5 — the position "
-                "was eligible for transformation during that span. "
+                "**Green shading marks every stretch of time when the "
+                "position could have been transformed** — that is, when the "
+                "iron condor was worth at least 5 points more than the "
+                "diagonal you are holding, which is the threshold this "
+                "dashboard treats as worth acting on. "
                 + ("Hover the chart for Live Diagonal Mark, Transform Order Mark, and Live Difference vs. entry."
                    if _lock is not None else
                    "Hover the chart for Diagonal Mark, Transform Order Mark, and their Difference at any point in time.")
@@ -726,9 +728,14 @@ def render(ctx: ViewContext) -> None:
         with st.container(key="chartcard_stack"):
             st.plotly_chart(fig_stack, use_container_width=True)
         st.caption(
-            "Top: front and back ATM IV share one axis — the vertical gap IS the spread. "
-            "Bottom: ratio colored by regime at 0.70 / 1.00 / 1.30. "
-            "Green (≥1) = backwardation (front rich). Amber (<0.70) = usually 0DTE decay artifact."
+            "**Implied volatility** is how much movement the market is "
+            "pricing in. **Top chart:** the near-dated and far-dated options "
+            "are drawn on one scale, so the vertical distance between the "
+            "lines IS the difference between them. **Bottom chart:** the same "
+            "thing as a ratio. **Above 1.0 (green)** means the near-dated "
+            "options are the expensive ones — unusual, and the condition this "
+            "strategy looks for. **Below 0.70 (amber)** is nearly always an "
+            "artefact of same-day options decaying, not a real signal."
         )
 
         # ── Chart 3: Primary dual-axis chart (moved from top) ─────────────────
@@ -813,9 +820,13 @@ def render(ctx: ViewContext) -> None:
         with st.container(key="chartcard_intra"):
             st.plotly_chart(fig_intra, use_container_width=True)
         st.caption(
-            "Each dot is one snapshot. Above the dashed line = backwardation (R>1); below = contango. "
-            "Color = time of day. A cloud hugging one ray → ratio ≈ constant; "
-            "fanning across angles → ratio varies independently of vol level."
+            "**Each dot is one reading, taken every few minutes.** Dots "
+            "**above the dashed line** are times when near-dated options were "
+            "pricing in more movement than far-dated ones; below it is the "
+            "normal state. Colour shows the time of day. If the dots hug one "
+            "straight line, the relationship between the two held steady; if "
+            "they fan out, it moved around independently of how volatile the "
+            "market was overall."
         )
 
     else:

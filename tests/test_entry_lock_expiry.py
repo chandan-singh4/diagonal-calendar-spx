@@ -9,7 +9,10 @@ WHY THIS IS A DELETE AND NOT A HIDE
 
 WHAT IS PINNED
   1. The rule itself, against a fixed clock, with no files involved
-  2. 4:15 PM New York on expiry day is the moment — 4:14 keeps, 4:15 deletes
+  2. The moment, to the minute, from both sides — and it differs by contract:
+     the p.m. contract at 4:15 PM New York on expiry day (4:14 keeps, 4:15
+     deletes), the a.m. third-Friday contract at 9:30 AM the same morning,
+     because it settles on the opening print (ADR-048, closing BUG-027)
   3. The purge writes the survivors back and leaves them otherwise untouched
   4. Every read of the locks file goes through the purge, not just the popover
 
@@ -197,3 +200,81 @@ def test_the_app_purges_before_it_reads_locks():
         "_load_entry_locks no longer purges; expired locks will reappear "
         "everywhere the file is read"
     )
+
+
+# ---------------------------------------------------------------------------
+# The a.m. contract's labelled key (BUG-023 display half)
+#
+# `is_expired` is the only rule whose answer causes records to be DELETED
+# (ADR-039). A display key for the a.m. contract is "2026-08-21 (AM)", which is
+# not a date — and the failure would be silent rather than loud, because
+# entry_locks catches ValueError and KEEPS the lock. So a labelled position
+# would never expire and the locks file would grow forever: exactly the leak
+# that rule was written to stop.
+# ---------------------------------------------------------------------------
+
+AM_KEY = "2026-08-21 (AM)"
+BARE_KEY = "2026-08-21"
+
+
+def _et(y, m, d, hh, mm):
+    return datetime(y, m, d, hh, mm, tzinfo=NY)
+
+
+def test_a_labelled_position_expires_rather_than_lingering_forever():
+    assert expiry_rule.is_expired(AM_KEY, _et(2026, 8, 22, 10, 0)) is True
+
+
+def test_a_labelled_position_is_not_expired_the_day_before():
+    assert expiry_rule.is_expired(AM_KEY, _et(2026, 8, 20, 10, 0)) is False
+
+
+def test_the_two_contracts_no_longer_expire_at_the_same_moment():
+    """REPLACES the pin that said they did. That pin recorded BUG-027 as a
+    deliberate inaccuracy awaiting a decision; Chandan made the decision on
+    2026-09-03 (ADR-048), so the rule and its pin change together — the old
+    test is not failing, it is describing behaviour that is no longer wanted.
+
+    Mid-morning on expiry day is the whole difference: the a.m. contract has
+    already settled on the opening print, the p.m. one has a full session left.
+    """
+    mid_morning = _et(2026, 8, 21, 11, 0)
+    assert expiry_rule.is_expired(AM_KEY, mid_morning) is True
+    assert expiry_rule.is_expired(BARE_KEY, mid_morning) is False
+
+
+def test_the_am_contract_expires_at_the_opening_print_to_the_minute():
+    """9:29 keeps the marker, 9:30 deletes it. Both sides of the minute,
+    because this answer deletes a record (ADR-039)."""
+    assert expiry_rule.is_expired(AM_KEY, _et(2026, 8, 21, 9, 29)) is False
+    assert expiry_rule.is_expired(AM_KEY, _et(2026, 8, 21, 9, 30)) is True
+
+
+def test_the_am_contract_survives_the_evening_before_its_expiry_date():
+    """The contract's true last trade is the previous evening, and Chandan
+    chose NOT to model that — the open is the later, safer cutoff. A marker
+    deleted here would be deleted while the position is still live."""
+    assert expiry_rule.is_expired(AM_KEY, _et(2026, 8, 20, 16, 15)) is False
+    assert expiry_rule.is_expired(AM_KEY, _et(2026, 8, 20, 23, 59)) is False
+
+
+def test_the_pm_contract_is_untouched_by_the_am_change():
+    """The regression that would matter most: p.m. is ~94% of all expiries, so
+    an a.m. cutoff leaking into the normal case would delete nearly every
+    marker at 9:30 in the morning."""
+    assert expiry_rule.is_expired(BARE_KEY, _et(2026, 8, 21, 9, 30)) is False
+    assert expiry_rule.is_expired(BARE_KEY, _et(2026, 8, 21, 16, 14)) is False
+    assert expiry_rule.is_expired(BARE_KEY, _et(2026, 8, 21, 16, 15)) is True
+
+
+def test_a_labelled_key_still_refuses_a_naive_clock():
+    """The label must not become a way round the timezone guard."""
+    with pytest.raises(ValueError):
+        expiry_rule.is_expired(AM_KEY, datetime(2026, 8, 22, 10, 0))
+
+
+def test_a_key_that_is_neither_a_date_nor_a_label_still_raises():
+    """Anything unrecognised must stay loud, so the caller keeps the lock for a
+    human rather than quietly treating it as expired."""
+    with pytest.raises(ValueError):
+        expiry_rule.is_expired("not a date at all", _et(2026, 8, 22, 10, 0))

@@ -89,8 +89,8 @@ def _load_transform_marks(front: str, back: str, call_s: float, put_s: float,
                                          call_s, put_s, days=days)
 
 @st.cache_data(ttl=55, show_spinner=False, max_entries=32)
-def _load_latest_atm_iv(exp_date: str, snapshot_id: int, n: int = 2) -> list:
-    return queries.load_latest_atm_iv(config.DB_PATH, exp_date, n)
+def _load_latest_atm_iv(expiry: str, snapshot_id: int, n: int = 2) -> list:
+    return queries.load_latest_atm_iv(config.DB_PATH, expiry, n)
 
 @st.cache_data(ttl=55, show_spinner=False, max_entries=32)
 def _load_diagonal_hist(front: str, back: str, call_s: float, put_s: float,
@@ -126,3 +126,18 @@ def _init_db_once(_db_path: str) -> bool:
     """
     db.init_db(_db_path)
     return True
+
+
+# The Gamma Exposure tab's time-aware panels. Keyed on snapshot_id as well as
+# the date so a new snapshot invalidates the memo — the same pattern as
+# _load_spx_intraday, and the reason the argument is present but unused.
+@st.cache_data(ttl=55, show_spinner=False, max_entries=4)
+def _load_intraday_strike_metrics(session_date: str, snapshot_id: int,
+                                  dte_max: "int | None" = None) -> pd.DataFrame:
+    return queries.load_intraday_strike_metrics(config.DB_PATH, session_date, dte_max)
+
+
+@st.cache_data(ttl=300, show_spinner=False, max_entries=3)
+def _load_prior_session_oi(session_date: str,
+                           expiry: str | None = None) -> pd.DataFrame:
+    return queries.load_prior_session_oi(config.DB_PATH, session_date, expiry)

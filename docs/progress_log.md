@@ -5,6 +5,568 @@ what broke, and what remains.
 
 ----
 
+## 2026-09-03 (session 14) — three items closed by reading, the closing price was never recorded, and an audit that found a bug on its first run
+
+**The session's task list was the four items session 13 left behind. Three of them turned out
+not to need the work they were written for**, and finding that out took less time than the work
+would have.
+
+**1. The collector did not need restarting.** STATUS said the running copy predated the 19 August
+fix, so the p.m. contract's daily volatility line had stopped growing. Before stopping a process
+that was collecting live prices, the claim was checked against the database: `atm_iv_by_expiry`
+grouped by capture day and settlement shows **both AM and PM rows every single day from 20
+August** — 126 and 2,520 yesterday — and unlabelled `None` rows only on 19 August and earlier.
+The process itself started 26 August. It had already been restarted, twice over. Restarting
+mid-session would have cost a real ~2-minute hole in today's prices to achieve nothing, so it
+was left running. **This is the second consecutive session in which the written record was wrong
+and the database was right**, which is now recorded in STATUS's working rules.
+
+**2. M3.8 done — but the half that was missing was not the half the task named.** 3.8 reads
+"streamline Schwab token re-auth; document the runbook". The streamlining already existed:
+`scripts/reauth.py` moves the old token aside, runs the flow, and **restores it on abort or
+failure** — the safety net that makes the chore safe to start. What did not exist was any
+mention of it: **`docs/` and `README.md` between them contained zero references to the script**,
+so the only way to know it was there was to have written it. That is exactly the failure 3.8
+exists to prevent, and it makes the point that a tool nobody can find has not shipped.
+`docs/RUNBOOK_REAUTH.md` is the runbook: the three independent ways you learn it is due (banner
+from day 6, watchdog pop-up and email, `--check`), the seven steps, the failure modes, and the
+`get_client()` trap recorded as a thing never to do. **Nothing was streamlined further** — the
+7-day clock is Schwab's and the browser login is a deliberate security boundary, so "streamline"
+can only mean *safe and documented*, never *automatic*.
+
+**3. The watchdog's alarm path had already been proven — by a real outage nobody wrote down.**
+Chandan remembered getting the pop-up and the email on both a stop and a recovery, and the
+record confirms it: `collector.log` has four consecutive cycle failures from 12:30 ET on 19
+August (a pandas logical-ops error), `watchdog_state.json` has `last_alert_utc` 8 minutes later
+— one watchdog cycle — and `alarming: false` for the recovery. **The M3.4 caveat had been
+discharged on the day it was written and the fact never reached a file.**
+
+Detection was staged anyway, because the caveat's *premise* was wrong. It said staging an outage
+needs the collector stopped or the database altered. **Both `DB_PATH` and `STATE_DIR` are
+environment-overridable**, so a throwaway database holding one genuine `snapshots` row
+timestamped three hours back reproduced it in complete isolation — nothing real touched. The
+real `check()` returned "🚨 No prices for 3h 0m — collection has stopped", named the MIDDAY
+session and its 12m 30s limit, and `should_alert()` decided to send; a control run against the
+live database in the same breath returned ✅ and would have sent nothing. **The thing that
+"could not be staged" took ten minutes and found a bug.**
+
+**BUG-029, found by that rehearsal.** `watchdog.py` prints its headline — which starts with an
+emoji — *before* it reaches the alerting block. On Windows a redirected stdout defaults to
+cp1252, so that print raises `UnicodeEncodeError` and the process dies at exit 1: **detection
+succeeded, no alert sent, and the wreckage looks like the watchdog itself being broken.** The
+live alarm is unaffected and always has been (`register_watchdog_task.ps1` redirects nothing,
+and the state file shows healthy checks throughout), so this is logged rather than rushed. But
+an alarm that dies on its own console output is the one failure mode a watchdog cannot have.
+
+**4. BUG-027 closed — the one item that was real work (ADR-048).** The a.m. third-Friday
+contract settles on the opening print but was being carried until 4:15 PM like everything else,
+about a session too long. It was left open in session 13 on purpose: `is_expired` is the only
+rule in the program whose answer **deletes** a record (ADR-039), and every accurate alternative
+deletes *earlier*. **Chandan chose the opening print, 9:30 New York**, over the contract's true
+last trade the evening before — the later of the two correct answers, because being late costs a
+stale row in a popover and being early destroys the entry price a live position is measured
+against.
+
+`MARKET_OPEN` joins `MARKET_CLOSE` in `core/expiry.py` and `contract.is_am` picks between them.
+**The pinning test was replaced, not made to pass**: it recorded BUG-027 as a deliberate
+inaccuracy awaiting exactly this decision, so rule and pin moved together — the only circumstance
+in which a pin may be rewritten. **Proved by sabotage twice:** reverting to a single 4:15 cutoff
+fails 2 tests; applying 9:30 to *every* contract fails 6, which is the mistake that matters,
+since p.m. is ~94% of expiries and that slip would delete nearly every marker at half past nine.
+**Verified on the live system as well as in tests** — `entry_locks.json` holds one lock, on a
+bare p.m. key already expired under both rules, so **nothing is deleted today**; the change first
+bites on 18 September.
+
+**5. The closing price was never being recorded, on any day, since 23 June (ADR-049).** Chandan
+raised it: "we only collect until 3:59 pm, why not add one more minute and get the final close
+price." He was exactly right, and the query said so before anything changed — the last snapshot
+of each of the last ten trading days is 15:59:50, 15:59:52, 15:59:53, 15:59:14. The window ran
+09:30–16:00 with the end excluded, so **every "close" in the record is a quote from up to a
+minute earlier.**
+
+**Two minutes, not the one he asked for.** SPX is a cash index struck from its components'
+closing auction prints, and those arrive over the seconds *after* the bell. A poll at 16:00
+would very likely still carry the 15:59:59 level and record a close that is not the close —
+worse than recording nothing, because it looks right. Sabotaging the constant to 16:01 fails 15
+tests, one of which exists to say precisely this.
+
+**Still not 16:15**, where the options actually stop trading: SPX freezes at 16:00, so IVs
+computed later use a stale underlying while option marks keep moving. That original reasoning
+was untouched — only its boundary was wrong. Sabotage to 16:15 fails 24 tests; back to 16:00,
+19.
+
+**No schema change was needed and that was the point.** `snapshots.market_session` carries a
+CHECK constraint over three values, so a fourth would have meant rebuilding a table inside the
+live 3.55 GB database — to buy a fact the timestamp already carries. The two polls past the bell
+are the only ones taken against a frozen underlying and "at or after 16:00" identifies them.
+
+**The subtle part was the gap classifier.** A collectable day is now 392 minutes, not 390. The
+3.0-minute routine-gap tolerance is unchanged and still correct, because it budgets ~1.0 minute
+at each end and the last write simply moved from 15:59:xx to 16:01:xx — both numbers moved with
+the window. **Widening the window without moving the expected last write with it would have made
+every ordinary night look like a fault**, which is BUG-005's crying wolf reintroduced from the
+opposite direction. That property now has its own test.
+
+**Cost:** two extra polls a day, 126 snapshots becoming 128, ~1.3 MB against ~82 MB.
+
+**Restarted 12:12 ET, at Chandan's word, and it cost nothing.** He asked for it to be slipped
+into the five-minute MIDDAY gap. Timed off the cycle: a poll had landed 59 seconds earlier, so
+the process was idle in `sleep` rather than mid-write, and there were ~240 seconds of headroom.
+The new snapshot landed at 12:12:18, **83 seconds after the previous one** — the restart gained
+a poll rather than losing one, `collection_gaps` correctly recorded nothing, and the watchdog
+reported healthy on the next check. **ADR-049 is still unproven in the wild** until the 16:00
+and 16:01 polls are seen landing today.
+
+**6. BUG-029 fixed.** The watchdog now reconfigures both its streams to UTF-8 at the top of
+`main()`, and every print goes through a `_say()` that falls back to ASCII-with-replacements if
+even that fails. A silent watchdog beats a dead one: the alert matters, the emoji does not. Proved
+by driving it through a cp1252 stream and a stream that raises on every write. The same UTF-8
+shim now exists in two places, logged as DEBT-039.
+
+**7. M3.7 done — `scripts/audit.py`, and it found a bug on its first run.** The audit asks a
+question no unit test can: not "does the code work" but **"is the record actually complete?"**
+Every test in the suite passed throughout ADR-046, ADR-048 and ADR-049 — three separate cases of
+data never being captured — because tests check what the code is *believed* to do. **Read-only by
+construction**: the connection is opened `?mode=ro`, and a test asserts that a `delete` against it
+raises. The daily expectation is **derived** by walking `core.session` rather than written down,
+which is why ADR-049's window change carried through with no edit; a test shrinks the window and
+watches the expectation follow. Every check is proved in both directions, and the negative half is
+the half that matters — a short day the collector already recorded a gap for is reported as a
+*note*, not an alarm, because an audit that cries wolf gets skimmed within a week (ADR-045's
+lesson, arriving from a new direction).
+
+**8. BUG-030 — the broker's "no value" marker, stored as data for ten weeks.** The audit's IV
+sanity check found it immediately: **5,127 rows in `option_rows` hold `iv = -9.99`**, and every
+single non-positive IV in the entire 18.7M-row table is exactly that value. Not noise — a
+sentinel. Schwab sends **-999.0** when it has nothing to give, and the collector's ÷100 turned it
+into a volatility of -999%.
+
+**The first backlog entry under-reported it, and reading the record for the fix is what corrected
+that.** The audit only inspects IV, so IV is all the entry named. **Each of `delta`, `gamma`,
+`theta` and `vega` also has 5,081 rows at raw -999.0** — the greeks are not divided, so they kept
+the marker's original shape and no derived column made them conspicuous. They arrive almost
+entirely at 09:30:xx on the longer-dated expiries: at the bell those contracts have not traded, so
+the broker has quotes but nothing to compute from.
+
+**The trap is the other direction, and it is why the comparison is exact equality.** `-9.99` is a
+perfectly ordinary theta — an option losing $9.99 a day — and **38 rows in the real record
+legitimately hold it**. A tolerance band, or a plausible-looking `< -100` rule, would have deleted
+real prices while tidying up a sentinel. `SCHWAB_NO_VALUE` and `_value_or_none()` now blank the
+marker on exactly the five fields Schwab sends it for; `bid`/`ask`/`last` are deliberately left
+alone, being quotes the broker either answers or omits. **Sabotaged three ways** — neutered to a
+passthrough (6 failures), widened to a `< -100` band (1, and it is the -998.9 boundary test that
+catches it), and blanking everything (5).
+
+**Two halves remain, both Chandan's call.** The collector is **still running the old parser**, so
+this resumes at 09:30 tomorrow until it is restarted; and repairing the ~5,100 existing rows is a
+write to the live 3.55 GB record. The rows are identifiable exactly and the value was never
+information, but neither happens without his word.
+
+**9. The 5,127 poisoned rows were repaired, at Chandan's word.** He asked for it directly, so the
+only questions left were *how carefully* and *how much of the record it could disturb*.
+
+**Backed up first** — `dashboard.db.2026-09-03-pre-bug030`, 3.50 GB via `VACUUM INTO`, and the
+backup was opened and `quick_check`ed rather than merely being a file of about the right size.
+
+**The repair was split in two, and that split is the interesting part.** The obvious form is one
+`UPDATE ... WHERE iv = -9.99 OR ...`, and it would have been wrong: that statement holds the write
+lock for its entire 18.7M-row scan, ~50 seconds, and **`db.py:227` gives the collector a 15-second
+timeout**. A live poll landing in that window would have failed, and the repair would have punched
+a hole in the very record it was tidying. Instead the scan ran on a **read-only** connection, which
+under WAL takes no write lock at all, and only the ids came back; the write was then `where id in
+(...)` against the primary key. **It committed in 0.1 seconds**, with 70 seconds still to spare
+before the next poll.
+
+`iv_spread_to_front` and `iv_ratio_to_front` went to NULL with the values they were derived from —
+they read -10.18 and a ratio of **-52**, which is not a number anyone should ever see, and keeping
+them would have left the corruption in its most misleading form.
+
+**Verified against the live record afterwards, in both directions:** zero marked rows in either
+table, **the 38 legitimate `theta = -9.99` rows untouched**, no non-positive IV anywhere, no gap
+row, the next poll COMPLETE, and the audit that found the bug this morning now reports **3 findings,
+0 needing attention** — the other three are the known ADR-046/049 history it correctly files as
+history.
+
+**BUG-030 is closed.** The collector was restarted at **16:35 ET, after the close**, so it cost
+nothing at all — and there was no reason to do it earlier: every poisoned value in ten weeks arrived
+at the 09:30 poll, so the fix could not have mattered before tomorrow's open, while restarting
+during the session would have put today's first-ever closing price at risk for no gain. The new
+process (PID 26320, 16:35:56) started well after `schwab_client.py` was last written (14:16), which
+is what makes it the fixed parser. **The proof proper arrives at 09:30 tomorrow**, when the audit's
+IV check should stay silent on a live morning for the first time.
+
+**10. ADR-049 is proven in the wild — the close was captured.** Today's record ends
+**16:00:18 and 16:01:18 ET**, both COMPLETE, where the previous five sessions ended 15:59:12,
+15:59:14, 15:59:50, 15:59:52 and 15:59:53. And the two minutes were not free: SPX read **7745.20**
+at the 15:59 poll and **7747.59** at 16:01. **The old "close" was wrong by 2.39 points**, every day,
+for 51 trading days — small, consistent, and exactly the kind of error that never announces itself.
+The 16:00 and 16:01 readings agree to a hundredth (7747.60, 7747.59), which is what a settled print
+looks like.
+
+Today recorded 127 snapshots rather than 128, and that is the 12:12 restart, not a fault: the
+cadence shifted from :x0:55 to :x2:17, losing one five-minute slot across the afternoon. No gap row,
+no incomplete snapshot, and 127/128 is nowhere near the audit's short-day threshold.
+
+**11. BUG-031 was raised and withdrawn the same day, and the mistake is worth more than the bug.**
+Needing a way to restart the collector, I checked Task Scheduler, found `SPX Collector Watchdog` and
+no `SPX Diagonal Collector`, and concluded the collector does not start with Windows — contradicting
+`STATUS.md`, which I then "corrected". **Chandan said he had watched it start after a reboot, and he
+was right.** It starts from a **Startup-folder shortcut** created 22 June, the day before collection
+began, enabled in Task Manager, targeting `.venv\Scripts\python.exe collector.py` — **the exact
+command line of the process that was running this morning**, which I had already seen and did not
+follow up.
+
+**The error is the same shape as the one M3.7 exists to prevent: a check that looked in one place,
+found nothing, and was read as proof of absence.** Task Scheduler is one of at least four ways
+Windows starts a program. Worse, the written record was right and the reasoning that overruled it
+was "the record has been wrong three times before" — a prior turned into a conclusion. The rule in
+STATUS is *read the database when the two disagree*, not *assume the file is wrong*.
+
+What survives is small and is logged as **DEBT-040**, not a bug: `scripts/register_collector_task.ps1`
+registers a scheduled task that does not exist and is not used, so the repo documents a mechanism the
+machine does not run — which is what made the wrong conclusion so easy to reach. Startup works today
+and nothing needs doing urgently.
+
+**12. M3.6 finished — a discarded row is now told apart from a harmless one (ADR-050).** The
+generic rowcount warning had already shipped at M1.5; what remained was ADR-022 step 2, and the
+argument for it is eight weeks of evidence. That one warning fired **2,181 times** with an
+identical message and an identical count of 160, every one the third-Friday contract being dropped,
+and nobody investigated. Not a personal failing — **a warning that appears every cycle is
+background noise**, and the one that matters then arrives in a log the reader has been trained to
+skim. The two things share nothing: a duplicate contract is harmless, because the row kept holds
+the same prices as the row dropped; a CHECK violation is prices gone for good.
+
+**The classification is exact, not inferred.** After the statement, the unique key of every offered
+row is looked up in the table; a present key was stored, an absent key was thrown away. One absent
+row is then replayed as a plain INSERT inside a rolled-back SAVEPOINT, so the logged reason is
+**SQLite's own message rather than a guess** — a plausible invented reason would have reproduced
+the original failure in a more confident voice.
+
+**It deliberately still does not raise**, which is only half of what ADR-022 asked for. Raising
+aborts the batch and discards the several thousand good rows beside the bad one — a larger and
+equally permanent loss than the one being reported.
+
+**Two things went wrong while building it, and both are instructive.** The existing pinned test
+caught a real bug of mine: `sqlite3.Row` never compares equal to a tuple, so the key set matched
+nothing and **every benign duplicate would have been reported as catastrophic loss** — precisely
+the crying-wolf failure the task exists to remove. And the fourth sabotage **passed**: deleting the
+savepoint's rollback changed nothing, because the test drove it through `insert_option_rows`, where
+a replayed row raises and leaves nothing behind either way. The test proved nothing it claimed. It
+now calls the diagnosis directly with a *valid* row, the only case where the replay succeeds and
+the rollback is load-bearing. **The test was wrong, not the claim** — and a sabotage that passes is
+the only way to find that out.
+
+**13. M3.9 done — `OPERATIONS.md`, `TROUBLESHOOTING.md`, `DATABASE.md`.** Written last on purpose,
+so they describe what M3 built rather than what it planned. `TROUBLESHOOTING.md` is organised by
+**symptom**, not by cause, because at the moment something is wrong the cause is exactly the
+unknown; nine entries, each saying what it means, what it does *not* mean, and what to do.
+`OPERATIONS.md` opens by saying that almost all of operating this is doing nothing — one recurring
+chore, the 7-day re-auth — because a runbook that implies constant vigilance gets abandoned.
+`DATABASE.md` is the physical record and its traps, complementing `DOCUMENTATION.md` §7 rather than
+repeating it. **Every command and flag in all three was checked against the scripts rather than
+recalled**, which is the same discipline that the BUG-031 mistake earlier today came from skipping.
+
+**14. M3.3 done — schema changes are versioned, forward-only and loud (ADR-051).** The thing being
+replaced was this, ten times over:
+
+```python
+try:
+    conn.execute("ALTER TABLE trades ADD COLUMN close_type TEXT")
+except Exception:
+    pass  # column already exists
+```
+
+**The comment is a guess.** `except Exception: pass` cannot tell "already there" from a full disk,
+a locked database, a misspelled type, or a missing table — all four were silently successful. It is
+this project's signature failure aimed at the container rather than the contents. And it left **no
+record**: ten changes had been applied to the live 3.5 GB file while `schema_version` still said 1,
+so the only way to answer "what shape is this database in?" was to open it and look.
+
+`schema.py` is a numbered list of migrations and a runner. Every step has a description and a row
+recording when it was applied. `SCHEMA_VERSION` is **derived** from the list, because a constant
+maintained beside a list is one edit from disagreeing with it, silently. `add_column` asks
+`PRAGMA table_info`, so the only condition suppressed is the one actually checked for.
+
+**No `down()`, deliberately.** A down-migration is a promise to reverse a change to the one
+irreplaceable file here — written when nobody is looking at it, and run when something is already
+going wrong. Restoring the backup taken beforehand is a real answer; an undo script is an
+aspirational one.
+
+**The version row is written in the same transaction as its change.** Half-applied is the worst
+available outcome: the version would say one thing, the shape another, and the next startup would
+trust the version. Each migration commits separately, so a failure stops where it failed and
+everything before it stays applied.
+
+**The journal's table joined the version number, and the test asserting it should not was
+rewritten.** `init_trades_table` was kept separate "so the collector's schema path and version
+number are unaffected by it" — and that separation is exactly what made the version meaningless.
+One database, one version. Rule and pin moved together.
+
+**What it deliberately does NOT own:** the conditional unique-index creation in `init_db`, which
+inspects for duplicate contract slots and declines to build the index if it finds any (BUG-028).
+A forward-only migration must succeed or raise, and "found duplicates, warned, carried on" is
+neither. Folding it in would have produced either a migration that lies about succeeding or one
+that takes startup down over old data.
+
+**Migrations 2 and 3 check before they act, which a clean framework would not need to.** That is a
+one-time debt with a named cause: every existing database already had those columns, added by the
+old code, while still stamped v1 — the two states are indistinguishable from the version alone.
+From 4 onward, migrations may assume what their predecessors left.
+
+**Sabotage-proved five ways:** restoring the swallow-everything `except` fails 1 test; recording
+the version before applying the change fails 2; dropping the newer-database guard fails 2; skipping
+the order and gap check fails 3; re-applying every migration on every startup fails 3.
+
+**The live database is still at v1 and migrating it will add nothing** — every column is already
+there. That is not an assumption: a test rewinds a database into exactly that state, migrates it,
+and asserts the column sets are unchanged while the version advances. It will happen on the next
+collector start or dashboard open.
+
+**Stage 3 is complete apart from 3.5**, which is Chandan's call — he considers the alerting need
+met by the 3.4 watchdog, which is fair; what 3.5 would add on top is the gap *history* on screen.
+
+**876 → 942 checks pass.**
+
+----
+
+## 2026-08-19 (session 13) — the third-Friday p.m. option was being thrown away, every cycle, since day one
+
+**Chandan noticed the dashboard only showed one of the two third-Friday expirations.** He had
+it slightly the other way round — the screen shows the **a.m.** contract and the **p.m.** one
+was never stored — but the substance was exactly right, and it turned out to be the explanation
+for a puzzle that had been sitting in "What to do next" for two weeks.
+
+**What was happening.** SPX lists two options for each third Friday: the traditional monthly,
+settling at the OPENING price and closing for trading the evening before, and the weekly SPXW,
+trading all day and settling at the CLOSE. Schwab returns both under a single expiry key.
+`chain_to_dataframe` threw away the contract symbol — the only field that tells them apart —
+and the uniqueness rule had no room for the difference, so `INSERT OR IGNORE` silently dropped
+the second one.
+
+**The "160 of 3,156 discarded" mystery is solved, and it was the same thing.** 2,181 warnings
+in `collector.log`, and **every single one reads exactly 160** — never any other number.
+160 = 80 calls + 80 puts = precisely one expiry. A number that steady was never chance.
+
+**The worse half, which nobody was looking for.** On ordinary days the stored row was the a.m.
+contract. On the expiry day *itself* the a.m. option had already settled and dropped out of the
+broker's chain — so the p.m. contract quietly took the slot, under the same date, with no
+marker. Measured on the 17 July monthly: total call open interest climbed 148,989 → 266,366
+through the month, then read **99,194** on expiry day. Open interest cannot fall by two-thirds
+overnight. That is not the same option. Logged as BUG-024; those rows are not back-fillable.
+
+**What was built.** A `settlement` column (`AM` / `PM` / NULL), read from Schwab's own
+`settlementType` with the `SPXW` root as fallback; uniqueness widened to span it; and — the
+part that mattered most — **every existing read pinned to one contract per strike: the a.m.
+one where an a.m. one exists, otherwise the p.m. one.** ADR-046 has the reasoning.
+
+**Why pinning the readers was not optional.** `atm_iv_by_expiry` holds one row per expiry per
+snapshot and has **no uniqueness constraint**. Storing the p.m. contract without pinning would
+have written two conflicting rows for every third Friday and silently corrupted the term
+structure the entire analytics layer sits on. Shipping the storage fix alone would have been a
+worse bug than the one being fixed.
+
+**Two bugs of my own reached the live system, and only checking after deployment caught them.**
+The first: the migration drops the old uniqueness index, but the legacy clean-up block still
+tested for that index by name to decide whether it had already run. On the collector restart it
+therefore ran again and **rebuilt the superseded index**, which rejected every p.m. row — and
+its DELETE groups rows without regard to settlement, so one more restart would have deleted p.m.
+data already collected (BUG-025). The second: the reader guard was written as
+`settlement IS NOT 'PM'`, on the assumption that p.m. was the extra contract. It is the reverse
+— nearly every SPX expiry is p.m.-settled, and a.m. exists only on the monthly — so the guard
+hid ~94% of the chain. The collector logged `ATM IV computed for 1/20 expiries` for three
+cycles (BUG-026). Both are fixed, both now have checks that were **proved by breaking a copy of
+the code and watching them fail**, and the total is 819 passing.
+
+**What both had in common: the checks were written against what I believed, not against what the
+data says.** Every check passed while the live system was wrong. The one that found the truth
+was the boring one — read the database back after deploying and count the rows. That is now the
+habit worth keeping, not a better test.
+
+**NULL means "not recorded", not "a.m."** Stamping the old rows `AM` was considered and
+rejected: it is wrong on precisely the day that matters most, for the reason above.
+
+**Two real faults found while building, both from the checks rather than from reading.**
+`_DDL` created the new UNIQUE index *before* the deduplication migration ran, which would have
+crashed `init_db` on exactly the legacy databases the migration exists to repair — the index is
+now created in `init_db()` afterwards. And indexing the bare column would have stopped
+deduplicating the legacy rows, because SQLite treats every NULL in a UNIQUE index as distinct;
+`COALESCE(settlement, '?')` is what prevents that.
+
+**Rehearsed on a copy, per the project rule.** A consistent read-only copy of the real 2.7 GB
+file via SQLite's backup API — not a file copy, since the collector is writing. Migration:
+**36.2 s, 14,305,769 rows before and after, `PRAGMA integrity_check` ok.** 806 checks pass
+(788 + 18 new). **The live database has not been touched.**
+
+**Deployment order is load-bearing.** Only `collector.py` calls `init_db()`, so the collector
+must restart — running the migration — before the dashboard serves the new code. Dashboard
+first against an unmigrated file gives `OperationalError: no such column: settlement`.
+
+**Left deliberately undone:** the p.m. prices are now recorded but still cannot be *seen*.
+How to show them — toggle, second row, separate expiry entry — is a design decision for
+Chandan, not one to make silently while fixing collection (BUG-023).
+
+---
+
+## 2026-08-09 (session 12) — M3 begun: retention policy decided, entry-IV gate built, pruner shipped, watchdog live
+
+### Completed
+
+**M3.1 — the retention policy is decided and written down (ADR-044).** Chandan chose **90 days
+past expiry** and **manual invocation** from the alternatives, with the measured tradeoffs in
+front of him. `option_rows` is the only prunable table; `atm_iv_by_expiry`, `snapshots` and
+`collection_gaps` are kept forever. Expiries used by a trade are exempt at any age.
+
+**The entry-IV gate is built — this was the precondition on all pruning (ADR-016).**
+`get_entry_iv_context()` answered "what was the term structure when I opened this?" by reading
+historical `option_rows`. Pruning those made the question permanently unanswerable, and
+*silently*: Regime Analysis would simply plot fewer trades each month with nothing on screen
+saying why. Eight `entry_*` columns now carry the answer on the trade row, written by
+`insert_trade`/`update_trade` rather than by the call site, so it cannot be forgotten. The old
+reconstruction survives as the fallback for pre-M3 rows.
+
+**M3.2 — `scripts/prune.py`, with three gates in front of the delete.** Reporting is the default;
+`--execute` is a flag. `--execute` still refuses without a backup newer than the database. Past
+that it asks for the row count *in figures* — a y/n prompt gets answered by reflex, a number has
+to be read off the report. Closed stdin cancels, which is exactly the unattended case.
+
+**41 new checks (693 → 740), and `render_check.py` clean on all six tabs.**
+
+### Discovered
+
+**The 90-day policy reclaims nothing until roughly November, and this was worth measuring.**
+Collection began 2026-06-23, so on the day the policy was written the oldest expiry was 47 days
+past. **A 90-day rule deletes zero rows today.** The policy is still right — it has to exist
+before data ages into it — but M3.2 merging does not mean growth is solved. It arms a mechanism
+that fires later. Near-term relief is a separate decision (downsampling, audit §5.8c),
+deliberately not bundled into ADR-044.
+
+**Pruning is worth more than the audit estimated.** `dbstat` on the live database: `option_rows`
+1,399.6 MB, its two indexes another 636.4 MB. A deleted row reclaims **~2.2× its own bytes**
+because both indexes carry every row. `atm_iv_by_expiry` is 5.3 MB for 47 days — 0.26% of the
+database — so keeping the summaries forever is genuinely free.
+
+**Rehearsed against the real data with `--today 2026-12-01`:** 42 expiries / 9,901,390 rows
+(85.8%) would go, and **8 expiries / 1,589,912 rows were held back for the 6 practice trades** —
+the protection rule working on real inputs, not just in a fixture.
+
+**A lint rule wanted a change that would have broken the edit path.** Ruff's SIM118 flagged
+`k in current.keys()` and suggested `k in current`. On a `sqlite3.Row`, `in` tests the row's
+**values**, not its column names — verified in a REPL, not assumed. Taking the suggestion makes
+`'entry_date' in row` False on a row that has one, blanking the stored context on every edit,
+silently. Kept with a `noqa` and the reasoning inline;
+`test_editing_the_entry_time_recomputes_the_stored_context` fails if anyone takes it later.
+
+**The collector was blind and STATUS did not know.** The Schwab token had expired ~10 hours before
+the session started; `render_check.py` reported it on every tab. No data was lost — markets were
+shut all weekend — but Monday's open would have recorded nothing. Chandan re-authed. STATUS was
+also stale on its first instruction: last session's two commits were already on `origin/main`.
+
+### What broke
+
+**Two tests passed vacuously on first writing and were rewritten.** `test_execute_is_all_or_nothing`
+exercised `managed_conn` and never called `execute_prune` — replaced with a `BEFORE DELETE` trigger
+that aborts on the second expiry, so the rollback is genuinely tested. `test_a_comma_formatted_count`
+typed `"5"`, which contains no comma — it now seeds 1,500 rows and types `"1,500"`.
+
+**`git checkout -- db.py` destroyed an hour of uncommitted work.** Used to undo a deliberate
+sabotage that was proving a test could fail; it reverted the real changes in the same file too.
+The sabotage had already done its job. Later verification used a file copy in a scratch directory
+instead, and that is the pattern to use: **the project rule says rehearse on a copy, and `git
+checkout` is not a copy — it is the opposite.**
+
+### Also completed — M3.4: the collector watchdog (ADR-045)
+
+**Why it could not be a better banner.** The dashboard's red TOKEN EXPIRED banner
+(`ui/header.py::render_token_banner`, M1) was working perfectly this morning. Nobody had the
+dashboard open. **An alarm that can only reach you through a page you have to open is not an
+alarm** — so the monitoring had to leave Streamlit entirely.
+
+`scripts/watchdog.py`, run every 10 minutes all day every day by Task Scheduler
+(`scripts/register_watchdog_task.ps1`), alerting by desktop toast **and** email. It observes only:
+no restart, no re-auth, no database write. Chandan chose the pop-up-plus-email combination
+knowing it means storing an email password locally and sending a message off the machine.
+
+**Most of the work was in not crying wolf.** Four ways a naive version fires when nothing is
+wrong: overnight/weekends/holidays; at 09:31 before the first cycle has landed; in the moment
+before every scheduled poll, when the age legitimately *reaches* the interval; and six times an
+hour during a single outage. Handled by `core.session` returning None for a shut market,
+`WATCHDOG_OPEN_GRACE_MINUTES`, `WATCHDOG_LATE_MULTIPLE = 2.5` and `WATCHDOG_REALERT_MINUTES = 60`.
+A muted alarm is worse than none, because you believe you are covered.
+
+**`core/session.py` extracted.** Chandan's stated dashboard thresholds are not a second policy
+that happens to agree with the collector's poll intervals — **they are those intervals.** Two
+copies of a number that must agree eventually disagree. `is_trading_day`, `session_of` and
+`expected_interval` now live in pure `core/`, handed a holiday set because `core/` may not import
+`config`; `collector.py` delegates. Proved by sabotaging a boundary on a copy and watching **both**
+`tests/test_session.py` and the pre-existing collector test fail — that is the evidence the
+collector really delegates rather than keeping its own copy.
+
+**Header: countdown → clock + age.** `⏱ Next update in: 42s` is gone. In its place a browser-side
+ticking wall clock (proving the tab is not frozen — and explicitly *not* proving the data is
+fresh, since it would tick on happily if the Python behind it died) plus **Time since last data**
+counting upward. The countdown had a resting state that read as healthy: collector dead, no price
+for an hour, display `0s`. Counting upward has none. One deliberate departure from what Chandan
+asked, reported rather than done quietly: amber at his threshold, red at 1.5×, because at the
+300-second cadence the age hits 300s immediately before every poll and would flash red once per
+cycle all day.
+
+### What broke — M3.4
+
+**A false all-clear, and it is the worst kind.** Found not by a test but by answering Chandan's
+question *"does every ten minutes mean an email every ten minutes?"*. At 16:00 the market shuts
+and `check()` starts returning "ok — market closed". A collector dead all afternoon would
+therefore have flipped alarming → ok and sent **"RECOVERED: prices are arriving again."** They
+were not; the market had closed and the watchdog had gone blind. A false all-clear is precisely
+the message that stops you looking. The two blind states now carry `informative=False` — *"no
+news"*, not *"all is well"* — and both the alert decision and the saved state leave the alarm
+untouched. **An all-clear now requires positively observing fresh data.** Reverting the fix on a
+copy confirmed exactly two tests fail without it, so they are not passing by construction.
+
+**A negative age reported as healthy.** Probing `check()` by hand — before any test existed for it
+— produced *"Collecting normally — newest price -2001584s old"*. A price newer than now means the
+clock is lying, and **every judgement this script makes is a comparison against a clock**, so a
+wrong clock invalidates the reassuring verdicts as much as the alarming ones. Now an alarm in its
+own right.
+
+**`[TimeSpan]::MaxValue` is rejected by this Windows 11 build.** The documented idiom for a
+"forever" repetition serialises to `P99999999DT23H59M59S` and the task XML validator calls it out
+of range. Replaced with 3,650 days, with the resulting August-2036 horizon written into the script
+so it is known rather than a surprise.
+
+**A sloppy assertion of my own, caught and fixed:** `assert session_of(...) is expected or
+session_of(...) == expected` — the `or` gave it two ways to pass. Reduced to one `==`.
+
+**Latent bug noted, deliberately not fixed:** `scripts/register_collector_task.ps1` sets
+`$ProjectDir = $PSScriptRoot` and then looks for `start_collector.bat` beside itself, but it lives
+in `scripts/` and the batch file is at the project root. Harmless — that script is documented as
+not the active mechanism — and fixing it inside an unrelated commit is how unrelated things break.
+Recorded in a comment in the new script instead.
+
+**Two untracked files were one careless `git add .` from being published:**
+`data/token.json.bak-20260802-063131` (a live Schwab credential backup) and `collector.log.1`.
+Neither was matched by `.gitignore` — `*token*.json` misses a `.bak-…` suffix and `*.log` misses
+`.log.1`. Both patterns widened with comments naming the actual near-miss, and the backup deleted
+with Chandan's authorisation after confirming the live `data/token.json` was intact.
+
+**Verified live, and what is not.** Desktop pop-up seen twice, email delivered to Chandan's phone
+after he configured `.env`, and the schedule confirmed firing (`LastTaskResult 0`, state file
+written). **Unproven: a real outage travelling the whole path.** That cannot be manufactured
+without stopping the collector or tampering with the database, both of which need his word. The
+first genuine outage is the test.
+
+788 tests pass; `render_check.py` clean on all six tabs; ruff clean on every file authored here.
+
+### Remaining
+
+M3.3 migrations, 3.5 surface `collection_gaps`, 3.6 log the `INSERT OR IGNORE` mismatch, 3.7
+data-quality checks, 3.8 token re-auth runbook, 3.9 the three operations documents. **3.8 is next**
+— the watchdog now announces that collection has stopped and says nothing about what to do, and
+re-auth is a weekly chore performed under time pressure on a market morning. 3.6 has a standing
+symptom to explain: the collector logs **"160 of 3,156 rows DISCARDED"** on nearly every cycle, and
+a figure that constant is a pattern, not random duplicates.
+
+----
+
 ## 2026-08-01 (session 11) — BUG-022 and BUG-019 closed; M2 merged to main
 
 ### Completed
@@ -1729,3 +2291,11 @@ BUG-005, but it was an unintended write.
   end-to-end smoke test against real data exercises `atm_iv`, `term_structure`,
   `interpret_curve`, `strike_contract`, `atm_straddle_price`, `normalized_debit`,
   `theta_differential`, `liquidity_score`, and four `db` readers; collector starts clean.
+
+**15. Session wrap — where the dashboard's reads actually go.** Chandan asked whether opening the
+dashboard reads everything back to June. It does not, and the answer is now in `DATABASE.md` rather
+than only in a conversation. Most of the screen reads **one snapshot** — ~3,000 rows of 18.9
+million — and the history charts are bounded by a `-N days` clause against `atm_iv_by_expiry`, not
+`option_rows`. Every `option_rows` reader in `db.py` was checked: each is filtered by `snapshot_id`
+or by a days window; there is no unbounded read. **Old data costs disk, not speed** — which is the
+distinction that decides whether `prune.py` is a performance tool (it is not) or a storage one.

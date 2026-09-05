@@ -56,6 +56,7 @@ _WANTED = (
     "resolved_pl",
     "derive_ic",
     "compute_stats",
+    "_stored_entry_iv",
 )
 
 

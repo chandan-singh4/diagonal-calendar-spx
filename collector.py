@@ -41,7 +41,6 @@ import os
 import sys
 import time
 from datetime import UTC, date, datetime, timedelta
-from datetime import time as dtime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -51,7 +50,10 @@ import pandas as pd
 import config
 import db
 import schwab_client
+from core import contract
+from core import expiry as core_expiry
 from core import pins as core_pins
+from core import session as core_session
 from state import entry_locks
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -60,11 +62,16 @@ from state import entry_locks
 
 _ET = ZoneInfo("America/New_York")
 
-# Market session time boundaries (Eastern Time, no seconds/microseconds)
-_OPEN_START = dtime(9, 30)    # OPEN session begins
-_OPEN_END   = dtime(10, 0)    # OPEN ends / MIDDAY begins
-_MIDDAY_END = dtime(15, 30)   # MIDDAY ends / CLOSE begins
-_CLOSE_END  = dtime(16, 0)    # CLOSE ends — SPX underlying freezes at this point
+# Market session time boundaries (Eastern Time, no seconds/microseconds).
+# THE DEFINITIONS NOW LIVE IN core/session.py and are aliased here so the rest
+# of this file reads unchanged. They moved in M3.4 because the dashboard header
+# and the watchdog need the same boundaries, and the header's "prices are late"
+# threshold must BE the collector's polling interval rather than a second copy
+# of it that agrees today.
+_OPEN_START = core_session.OPEN_START
+_OPEN_END   = core_session.OPEN_END
+_MIDDAY_END = core_session.MIDDAY_END
+_CLOSE_END  = core_session.CLOSE_END
 
 # Collector reliability settings
 _BACKOFF_SECONDS          = 30    # Sleep between retries after a cycle failure
@@ -131,8 +138,12 @@ def _is_holiday(d: date) -> bool:
 
 
 def _is_trading_day(d: date) -> bool:
-    """True if d is a weekday and not a market holiday."""
-    return d.weekday() < 5 and not _is_holiday(d)
+    """True if d is a weekday and not a market holiday.
+
+    Delegates to core/session.py (M3.4); this wrapper supplies the holiday set
+    that a pure function is not allowed to reach for itself.
+    """
+    return core_session.is_trading_day(d, config.MARKET_HOLIDAYS)
 
 
 def get_session(now_et: datetime) -> str | None:
@@ -148,27 +159,18 @@ def get_session(now_et: datetime) -> str | None:
     Collection stops at 16:00 ET — not 16:15 — because SPX (a cash-settled index)
     stops updating at equity-market close. IVs computed after 16:00 use a frozen
     underlying price, making them analytically unreliable.
+
+    Delegates to core/session.py (M3.4). Kept as a named function here because
+    the collector calls it in several places and the tests name it.
     """
-    if not _is_trading_day(now_et.date()):
-        return None
-
-    # Strip seconds/microseconds for clean boundary comparison
-    t = now_et.time().replace(second=0, microsecond=0)
-
-    if _OPEN_START <= t < _OPEN_END:
-        return "OPEN"
-    if _OPEN_END <= t < _MIDDAY_END:
-        return "MIDDAY"
-    if _MIDDAY_END <= t < _CLOSE_END:
-        return "CLOSE"
-    return None
+    return core_session.session_of(now_et, config.MARKET_HOLIDAYS)
 
 
 def _poll_interval(session: str) -> int:
     """Return the configured poll interval (seconds) for a market session."""
-    if session in ("OPEN", "CLOSE"):
-        return config.POLL_INTERVAL_EVENT
-    return config.POLL_INTERVAL_NORMAL
+    return core_session.expected_interval(
+        session, config.POLL_INTERVAL_EVENT, config.POLL_INTERVAL_NORMAL
+    )
 
 
 def market_minutes_between(start_utc: datetime, end_utc: datetime) -> float:
@@ -177,9 +179,10 @@ def market_minutes_between(start_utc: datetime, end_utc: datetime) -> float:
 
     This is the single measurement the gap classifier needs, and it replaces
     three separate heuristics that each guessed at it (BUG-005). Sums the
-    overlap of the window with the 09:30–16:00 ET session of every trading day
+    overlap of the window with the 09:30–16:02 ET session of every trading day
     it touches; weekends and holidays contribute nothing because they are not
-    trading days.
+    trading days. The window runs two minutes past the equity close on purpose
+    (ADR-049), so a full trading day is 392 collectable minutes, not 390.
 
     Returns 0.0 for a window that is entirely outside market hours, however
     long it is — an overnight break and a three-day weekend both cost zero
@@ -214,6 +217,11 @@ def market_minutes_between(start_utc: datetime, end_utc: datetime) -> float:
 # collected. 3.0 gives margin without masking anything meaningful: a genuine
 # outage costing under 3 minutes of market time is under one MIDDAY poll cycle.
 _ROUTINE_GAP_TOLERANCE_MINUTES = 3.0
+
+
+# How long the loop idles when the market is shut. Named because it is now an
+# upper bound rather than the sleep itself: near the open the loop sleeps less.
+_CLOSED_IDLE_SECONDS = 60.0
 
 
 def _classify_gap(gap_start_utc: datetime, gap_end_utc: datetime) -> str:
@@ -325,6 +333,26 @@ def _safe_int(val) -> int | None:
         return None
 
 
+def _shown_contract_only(df):
+    """The single contract per (expiry, strike, side) the dashboard displays.
+
+    Almost every SPX expiry is an SPXW weekly and therefore P.M.-settled; only
+    the third-Friday monthly also lists an A.M. contract. Filtering on
+    settlement != 'PM' would discard nearly the whole chain (BUG-026). The rule
+    is "prefer the a.m. contract where one exists", read off the data rather
+    than from calendar arithmetic.
+    """
+    if df.empty or "settlement" not in df.columns:
+        return df
+    is_am = df["settlement"].eq("AM")
+    if not is_am.any():
+        return df
+    keys = pd.MultiIndex.from_frame(df[["expiry", "strike", "side"]])
+    has_am_twin = keys.isin(keys[is_am.to_numpy()])
+    shadowed = df["settlement"].eq("PM").to_numpy() & has_am_twin
+    return df[~shadowed]
+
+
 def _get_approx_atm_iv_pct(chain_df: pd.DataFrame, underlying_price: float) -> float | None:
     """
     Quick ATM IV estimate (as a percentage) used for the 2SD informational
@@ -332,7 +360,9 @@ def _get_approx_atm_iv_pct(chain_df: pd.DataFrame, underlying_price: float) -> f
     """
     if chain_df.empty:
         return None
-    calls = chain_df[chain_df["side"] == "CALL"].copy()
+    # One contract only — see _shown_contract_only (BUG-023 / BUG-026).
+    calls = _shown_contract_only(chain_df)
+    calls = calls[calls["side"] == "CALL"].copy()
     if calls.empty:
         return None
     calls["_dist"] = (calls["strike"] - underlying_price).abs()
@@ -349,6 +379,7 @@ def _build_option_rows(filtered_df: pd.DataFrame,
 
     Transformations:
       side 'CALL'/'PUT' → right 'C'/'P'
+      settlement carried through unchanged ('AM'/'PM'/None — see BUG-023)
       iv (Schwab %) ÷ 100 → iv (decimal, e.g. 0.184)
       bid + ask → mark = (bid + ask) / 2
       underlying_price + strike + right → intrinsic_value, time_value
@@ -380,6 +411,7 @@ def _build_option_rows(filtered_df: pd.DataFrame,
             "dte":             _safe_int(row.get("dte")),
             "strike":          strike,
             "right":           right,
+            "settlement":      row.get("settlement"),   # 'AM' | 'PM' | None (BUG-023)
             "bid":             bid,
             "ask":             ask,
             "mark":            mark,
@@ -402,8 +434,8 @@ def _compute_atm_iv_records(filtered_df: pd.DataFrame,
                               underlying_price: float,
                               snapshot_id: int) -> list[dict]:
     """
-    For each expiry in the filtered DataFrame, compute pre-aggregated ATM IV metrics
-    and return a list of dicts for db.insert_atm_iv_records().
+    For each CONTRACT in the filtered DataFrame, compute pre-aggregated ATM IV
+    metrics and return a list of dicts for db.insert_atm_iv_records().
 
     ATM strike = strike closest to underlying_price at collection time.
     All IVs stored as decimals (÷ 100).
@@ -418,7 +450,21 @@ def _compute_atm_iv_records(filtered_df: pd.DataFrame,
     """
     records = []
 
-    for expiry_date, group in filtered_df.groupby("expiry"):
+    # BUG-028: on the third Friday the frame holds BOTH the a.m. and p.m.
+    # contracts, so the grouping is by contract and not by date. It used to drop
+    # the p.m. one here to keep atm_iv_by_expiry's one-row-per-date shape, which
+    # meant the whole analytics layer could not see the p.m. contract at all.
+    # The table now carries a settlement column and both rows are written.
+    #
+    # dropna=False because settlement is None on any chain that arrives without
+    # it; groupby would otherwise discard those rows entirely and write nothing.
+    frame = filtered_df
+    if not frame.empty and "settlement" not in frame.columns:
+        frame = frame.assign(settlement=None)
+    grouped = ([] if frame.empty
+               else frame.groupby(["expiry", "settlement"], dropna=False))
+
+    for (expiry_date, settlement), group in grouped:
         dte_val = _safe_int(group["dte"].dropna().iloc[0]) if not group["dte"].dropna().empty else None
         if dte_val is None:
             continue
@@ -449,6 +495,7 @@ def _compute_atm_iv_records(filtered_df: pd.DataFrame,
         records.append({
             "snapshot_id":        snapshot_id,
             "expiry_date":        str(expiry_date),
+            "settlement":         settlement if settlement in (contract.AM, contract.PM) else None,
             "dte":                dte_val,
             "atm_strike":         atm_strike,
             "atm_call_iv":        atm_call_iv,
@@ -458,8 +505,16 @@ def _compute_atm_iv_records(filtered_df: pd.DataFrame,
             "iv_ratio_to_front":  None,   # Computed below after sort
         })
 
-    # Sort ascending by DTE so records[0] is always the front expiry
-    records.sort(key=lambda r: r["dte"])
+    # Sort ascending by DTE so records[0] is always the front expiry. The third
+    # Friday's two contracts share a DTE, so the tie is broken the same way the
+    # dropdown breaks it — a.m. first, because it settles at the open and really
+    # does end first.
+    #
+    # Honest note: groupby already emits "AM" before "PM" because it sorts its
+    # keys, so removing this line does not change today's answer and no test
+    # catches it. It is here to STATE which contract the term structure is
+    # measured from, rather than leave that resting on pandas' key order.
+    records.sort(key=lambda r: (r["dte"], 0 if r["settlement"] == contract.AM else 1))
 
     # Compute spreads and ratios relative to the front expiry
     if records:
@@ -637,7 +692,7 @@ def _run_cycle(client, db_path: str, session: str, poll_interval: int) -> int:
         # A locked expiry the broker returned is kept even if it falls outside
         # the nearest N. Intersected with what actually arrived, so a lock on an
         # expiry beyond the fetch window widens nothing and invents nothing.
-        pinned_expiries = pinned.expiries & (set(all_expiries) - keep_expiries)
+        pinned_expiries = pinned.expiry_dates & (set(all_expiries) - keep_expiries)
         if pinned_expiries:
             logger.info(
                 "keeping %d expiry(ies) beyond the nearest %d because a lock "
@@ -647,12 +702,39 @@ def _run_cycle(client, db_path: str, session: str, poll_interval: int) -> int:
             )
             keep_expiries |= pinned_expiries
 
-        missing = pinned.expiries - set(all_expiries)
-        if missing:
+        # An expiry the broker did not return because it ALREADY EXPIRED is not
+        # news: no broker lists a contract that is over, and the lock holding it
+        # is finished. Warning about it anyway printed this line every minute of
+        # every session for as long as the stale lock sat in the file -- and the
+        # only thing that clears such a lock is `entry_locks.purge_expired`,
+        # whose sole caller is the DASHBOARD. A collector running for a fortnight
+        # with nobody opening the app therefore warned ~5,500 times about a
+        # position that finished in August.
+        #
+        # That is precisely how BUG-030 hid for eight weeks behind 2,181
+        # identical warnings. This line has to stay rare to stay readable: it is
+        # the one that says a LIVE position has stopped being recorded.
+        #
+        # Only the message is filtered, never the pin. core/pins.py deliberately
+        # does not judge expiry, and a stale lock pinning a few extra strikes
+        # costs a handful of rows -- the safe direction, unchanged here.
+        missing = pinned.expiry_dates - set(all_expiries)
+        unexpected = {
+            e for e in missing
+            if not core_expiry.is_expired(e, datetime.now(UTC))
+        }
+        if unexpected:
             logger.warning(
                 "a lock depends on expiry(ies) the broker did not return: %s — "
                 "the dashboard will show defaults for that lock (BUG-022)",
-                ", ".join(sorted(missing)),
+                ", ".join(sorted(unexpected)),
+            )
+        if missing - unexpected:
+            # Said once, at DEBUG, so the record still explains the silence.
+            logger.debug(
+                "ignoring %d expired pinned expiry(ies) the broker did not "
+                "return: %s — the lock is over and awaits purge_expired",
+                len(missing - unexpected), ", ".join(sorted(missing - unexpected)),
             )
 
         chain_df = chain_df[chain_df["expiry"].isin(keep_expiries)]
@@ -676,7 +758,10 @@ def _run_cycle(client, db_path: str, session: str, poll_interval: int) -> int:
 
         # ── 7. Compute ATM IV records ────────────────────────────────────────
         atm_iv_records      = _compute_atm_iv_records(filtered_df, underlying_price, snapshot_id)
-        actual_expiry_count = len(atm_iv_records)
+        # Distinct DATES, not records. There is one record per CONTRACT now
+        # (BUG-028), so counting records would report 21 of 20 expiries on the
+        # third Friday and make the coverage check below meaningless.
+        actual_expiry_count = len({r["expiry_date"] for r in atm_iv_records})
 
         # ── 8. Determine snapshot status ─────────────────────────────────────
         status    = "COMPLETE"
@@ -1048,8 +1133,26 @@ def main() -> None:
             if args.once:
                 logger.info("Market is closed. --once mode: exiting.")
                 sys.exit(0)
-            logger.debug("Market closed (%s ET). Sleeping 60s.", now_et.strftime("%H:%M"))
-            time.sleep(60)
+            # Sleep the usual minute -- UNLESS the open is nearer than that,
+            # in which case sleep exactly up to it. Without this the 60s phase
+            # is arbitrary and the day's first poll landed anywhere in
+            # 09:30:00-09:30:59 (measured: 09:30:11 to 09:30:55). See
+            # core.session.seconds_until_open for why the answer is not to
+            # start before 09:30.
+            until_open = core_session.seconds_until_open(
+                now_et, config.MARKET_HOLIDAYS
+            )
+            idle = _CLOSED_IDLE_SECONDS
+            if until_open is not None and until_open < idle:
+                idle = max(until_open, 0.0)
+                logger.info(
+                    "Market opens in %.1fs. Sleeping exactly that so the first "
+                    "poll lands on the open.", idle
+                )
+            else:
+                logger.debug("Market closed (%s ET). Sleeping %.0fs.",
+                             now_et.strftime("%H:%M"), idle)
+            time.sleep(idle)
             continue
 
         poll_interval    = _poll_interval(session)
