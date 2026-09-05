@@ -19,6 +19,7 @@ surface is a session_state dict, which is all these two functions touch.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -241,20 +242,29 @@ def test_controls_do_not_share_a_memory(st_state):
     """One key per control. A shared slot would have the View setting follow
     the Scope control around."""
     gex._record_choice("gex_view", "Net Gamma")
-    gex._record_choice("gex_flow_scope", "All expiries")
+    gex._record_choice("gex_side_mode", "Stacked")
 
     assert st_state[gex._memory_key("gex_view")] == "Net Gamma"
-    assert st_state[gex._memory_key("gex_flow_scope")] == "All expiries"
+    assert st_state[gex._memory_key("gex_side_mode")] == "Stacked"
 
 
 def test_every_sticky_control_on_the_tab_goes_through_the_mechanism():
     """A control added later that skips this will lose its setting on the
     next tab change, and the loss is silent - the tab still works, it just
-    forgets. Checked at the source because there is no running page here."""
+    forgets. Checked at the source because there is no running page here.
+
+    THE LIST IS READ OUT OF THE SOURCE, not written here. A hardcoded list has
+    to be edited whenever a control is added or removed, and an edit that
+    forgets one is exactly the omission this test exists to catch — it was
+    hardcoded when the Scope control was removed in ENH-014, and it named a
+    control that no longer existed while claiming to cover the tab.
+    """
     source = Path(gex.__file__).read_text(encoding="utf-8")
 
-    for key in ("gex_expiry", "gex_view", "gex_side_mode", "gex_flow_scope",
-                "gex_positioning_day"):
+    keys = sorted(set(re.findall(r'key="(gex_[a-z_]+)"', source)))
+    assert len(keys) >= 4, f"found too few controls to be plausible: {keys}"
+
+    for key in keys:
         assert f'_remember_choice("{key}"' in source, (
             f"{key} is drawn but never restored"
         )
@@ -270,9 +280,10 @@ def test_no_sticky_control_also_passes_a_default():
     harmless but it fires on every rerun, which buries real ones."""
     source = Path(gex.__file__).read_text(encoding="utf-8")
 
-    for key in ("gex_view", "gex_side_mode", "gex_flow_scope",
-                "gex_positioning_day"):
+    for key in sorted(set(re.findall(r'key="(gex_[a-z_]+)"', source))):
         anchor = source.index(f'key="{key}"')
+        if "st.segmented_control(" not in source[max(0, anchor - 400):anchor]:
+            continue          # selectbox; the default= warning is segmented-only
         before = source[max(0, anchor - 400):anchor]
         widget_call = before[before.rindex("st.segmented_control("):]
         assert "default=" not in widget_call, (

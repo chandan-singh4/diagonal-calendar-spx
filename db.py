@@ -2023,7 +2023,8 @@ def seed_t001(db_path: str) -> None:
 
 
 def get_intraday_strike_metrics(db_path: str, session_date: str,
-                                dte_max: int | None = None) -> list:
+                                dte_max: int | None = None,
+                                expiry: str | None = None) -> list:
     """Gamma, open interest and volume per STRIKE per SNAPSHOT for one session.
 
     The read behind every time-aware panel on the Gamma Exposure tab: net GEX
@@ -2042,6 +2043,17 @@ def get_intraday_strike_metrics(db_path: str, session_date: str,
     different expiries merge and the "0DTE" line silently includes contracts
     that are not 0DTE.
 
+    `expiry` selects ONE contract by its display key, and takes precedence
+    over `dte_max` when both are given. The two are different questions:
+    `dte_max` is a cumulative bound ("everything expiring within N days"),
+    so it can never express "the 2026-09-18 board and nothing else". The
+    added/removed chart was limited to 0DTE and the whole board for exactly
+    that reason until Chandan asked for every expiry (ENH-014).
+
+    It is a DISPLAY KEY, not a date, so the third Friday's a.m. and p.m.
+    contracts stay apart (ADR-046/047) — hence contract.match_clause rather
+    than an equality test on expiry_date alone.
+
     Gamma x open interest is summed here and left UNSCALED. The dollar scaling
     needs each snapshot's own spot price (core/gex.py), which is returned
     alongside, and doing that multiplication in SQL would bake one leg of the
@@ -2050,9 +2062,17 @@ def get_intraday_strike_metrics(db_path: str, session_date: str,
 
     Ordered by time then strike so a caller can pivot without re-sorting.
     """
+    scope, params = "(? IS NULL OR o.dte <= ?)", [dte_max, dte_max]
+    if expiry is not None:
+        expiry_date, settlement = contract.parse(expiry)
+        scope = ("o.expiry_date = ? AND "
+                 + contract.match_clause(expiry_date, settlement,
+                                         rows="o", snaps="s"))
+        params = [expiry_date]
+
     with get_conn(db_path) as conn:
         return conn.execute(
-            """
+            f"""
             SELECT s.snapshot_id,
                    s.snapshot_timestamp,
                    s.underlying_price,
@@ -2076,11 +2096,11 @@ def get_intraday_strike_metrics(db_path: str, session_date: str,
             WHERE s.status = 'COMPLETE'
               AND DATE(s.snapshot_timestamp) = ?
               AND o.gamma IS NOT NULL
-              AND (? IS NULL OR o.dte <= ?)
+              AND {scope}
             GROUP BY s.snapshot_id, o.strike
             ORDER BY s.snapshot_timestamp, o.strike
             """,
-            (session_date, dte_max, dte_max)
+            [session_date, *params]
         ).fetchall()
 
 

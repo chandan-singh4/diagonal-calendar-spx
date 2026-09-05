@@ -411,7 +411,7 @@ def render(ctx: ViewContext) -> None:
         # by the far strikes where the running total starts. Net flow answers
         # the question the bars cannot: not where the gamma is, but what
         # today put there.
-        _draw_net_flow(ctx)
+        _draw_net_flow(ctx, expiry, dte_by_expiry)
         _draw_caption(totals, expiry, per_strike, view)
 
         st.divider()
@@ -966,10 +966,8 @@ def _draw_dealer_structure(ctx: ViewContext, per_strike: pd.DataFrame,
     _draw_volume_vs_oi(ctx, per_strike, expiry)
 
 
-_FLOW_SCOPES = {"0DTE": 0, "All expiries": None}
-
-
-def _draw_net_flow(ctx: ViewContext) -> None:
+def _draw_net_flow(ctx: ViewContext, expiry: str | None,
+                   dte_by_expiry: dict) -> None:
     """Net gamma exposure gained or lost at each strike since the open.
 
     A price ladder, not a time series: strike up the side, the change along
@@ -978,19 +976,21 @@ def _draw_net_flow(ctx: ViewContext) -> None:
     the day's change at that strike, which the level charts above cannot show
     because they are dominated by positions that were already there.
     """
-    _remember_choice("gex_flow_scope", list(_FLOW_SCOPES), "0DTE")
-    scope = st.segmented_control(
-        "Scope", list(_FLOW_SCOPES), key="gex_flow_scope",
-        selection_mode="single", label_visibility="collapsed",
-        help="0DTE is where the day's flow actually moves the market — those "
-             "positions settle in hours. All expiries is the whole board.",
-    ) or "0DTE"
-    _record_choice("gex_flow_scope", scope)
+    # FOLLOWS THE EXPIRY DROPDOWN AT THE TOP OF THE TAB (ENH-014). This chart
+    # used to carry its own two-option Scope control — 0DTE or the whole board
+    # — because the read behind it could only bound days-to-expiry, and a
+    # cumulative bound cannot express "the 2026-09-18 board and nothing else".
+    # With the read able to scope to one contract, that control offered a
+    # strict subset of the dropdown already on the tab: its "All expiries" is
+    # the dropdown's, and its "0DTE" is the nearest expiry, which is what the
+    # dropdown opens on. Keeping both would have put two expiry pickers on one
+    # tab that could disagree with each other.
+    scope = expiry or _ALL_EXPIRIES
 
     intraday = ctx.load_intraday_strike_metrics(
-        ctx.session_date, ctx.snapshot_id, _FLOW_SCOPES[scope])
+        ctx.session_date, ctx.snapshot_id, None, expiry)
     if intraday is None or intraday.empty:
-        st.info("No snapshots for this scope yet today.")
+        st.info("No snapshots for this expiry yet today.")
         return
 
     rows = _net_flow(intraday, ctx.snapshot_id, scope)

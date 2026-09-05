@@ -170,15 +170,19 @@ def load_diagonal_hist(db_path, front: str, back: str, call_s: float,
 
 
 def load_intraday_strike_metrics(db_path, session_date: str,
-                                 dte_max: int | None = None) -> pd.DataFrame:
+                                 dte_max: int | None = None,
+                                 expiry: str | None = None) -> pd.DataFrame:
     """Per-strike, per-snapshot gamma/OI/volume for one session.
+
+    `expiry` scopes to one contract by display key; `dte_max` bounds
+    days-to-expiry. See get_intraday_strike_metrics for why they are separate.
 
     Timestamps come back as ZONED UTC, not stripped. Turning them into local
     wall-clock is a DISPLAY decision and belongs in core.charts.to_display_time
     at the last moment before drawing — the read layer handing out a bare
     "14:30" with nothing saying where is precisely DEBT-030.
     """
-    rows = db.get_intraday_strike_metrics(db_path, session_date, dte_max)
+    rows = db.get_intraday_strike_metrics(db_path, session_date, dte_max, expiry)
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame([dict(r) for r in rows])

@@ -136,8 +136,10 @@ def _init_db_once(_db_path: str) -> bool:
 # _load_spx_intraday, and the reason the argument is present but unused.
 @st.cache_data(show_spinner=False, max_entries=4)
 def _load_intraday_strike_metrics(session_date: str, snapshot_id: int,
-                                  dte_max: "int | None" = None) -> pd.DataFrame:
-    return queries.load_intraday_strike_metrics(config.DB_PATH, session_date, dte_max)
+                                  dte_max: "int | None" = None,
+                                  expiry: "str | None" = None) -> pd.DataFrame:
+    return queries.load_intraday_strike_metrics(config.DB_PATH, session_date,
+                                                dte_max, expiry)
 
 
 @st.cache_data(show_spinner=False, max_entries=3)

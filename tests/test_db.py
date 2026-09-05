@@ -1916,6 +1916,54 @@ def test_the_dte_bound_is_applied_before_the_grouping(temp_db):
     assert call["call_oi"] == 1000
 
 
+def test_the_expiry_scope_selects_one_contract(temp_db):
+    """ENH-014. The added/removed chart offered 0DTE or the whole board and
+    nothing between, because `dte_max` is a CUMULATIVE bound — "everything
+    expiring within N days" cannot express "the 21-day board and nothing
+    else". Chandan asked for every expiry collected, so the read now scopes
+    to one contract.
+
+    The seed puts a 0DTE call and a 21DTE call at the SAME strike, which is
+    the case that makes this a real filter rather than a relabelling: both
+    legs group into one row unless the scope removes one first.
+    """
+    session = _gex_seed(temp_db)
+    rows = db.get_intraday_strike_metrics(temp_db, session, expiry=BACK)
+
+    call = next(r for r in rows if r["strike"] == CALL_STRIKE)
+    assert call["call_gamma_oi"] == pytest.approx(10.0), (
+        "20.0 means both expiries were summed and the scope did nothing"
+    )
+    assert call["call_oi"] == 1000
+
+
+def test_the_expiry_scope_wins_over_the_dte_bound(temp_db):
+    """The two answer different questions and both arrive as arguments. If
+    dte_max were allowed to narrow the result as well, asking for the 21-day
+    board while a 0 bound sat in the call would return an empty chart with no
+    indication why."""
+    session = _gex_seed(temp_db)
+    rows = db.get_intraday_strike_metrics(temp_db, session, dte_max=0,
+                                          expiry=BACK)
+
+    call = next(r for r in rows if r["strike"] == CALL_STRIKE)
+    assert call["call_gamma_oi"] == pytest.approx(10.0)
+
+
+def test_the_zero_dte_scope_agrees_with_the_dte_bound(temp_db):
+    """The Scope control this replaced had exactly two settings, and its 0DTE
+    one came from `dte_max=0`. Reaching the same rows by naming the front
+    expiry is what makes removing that control safe rather than a change of
+    figures the reader was not told about. Checked on the live record too:
+    both routes returned 4,845 rows for 2026-09-04."""
+    session = _gex_seed(temp_db)
+
+    by_bound = db.get_intraday_strike_metrics(temp_db, session, dte_max=0)
+    by_expiry = db.get_intraday_strike_metrics(temp_db, session, expiry=FRONT)
+
+    assert [dict(r) for r in by_bound] == [dict(r) for r in by_expiry]
+
+
 def test_intraday_metrics_ignore_a_partial_snapshot(temp_db):
     """A PARTIAL snapshot is a half-written chain. Counted here it would draw a
     cliff in the middle of the day that no market ever made."""
