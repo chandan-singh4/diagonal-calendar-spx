@@ -486,6 +486,19 @@ with st.container(key="topnav"):
 
 # Exactly one tab body runs per script execution — the custom nav means the
 # others are not merely hidden, they are never executed.
+#
+# EACH TAB BODY GETS ITS OWN KEYED CONTAINER, and the key is the reason this
+# is not just tidiness. Streamlit patches the page by POSITION: without a key
+# every tab draws into the same slot, so on a switch the outgoing tab's
+# elements are overwritten one at a time as the new ones are produced, and
+# anything the new tab has not reached yet stays on screen. Chandan saw it as
+# Scanner's opportunity cards sitting inside Gamma Exposure for the first two
+# seconds (BUG-037) — not a stale cache, just the old page still being
+# replaced.
+#
+# A container whose key changes with the tab is a different element, so the
+# previous one is torn down in a single step rather than repainted in place.
 for _tkey, _, _render_tab in _TABS:
     if st.session_state["active_tab"] == _tkey:
-        _render_tab(VIEW_CTX)
+        with st.container(key=f"tabbody_{_tkey}"):
+            _render_tab(VIEW_CTX)

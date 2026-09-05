@@ -22,6 +22,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from views import gex
@@ -288,4 +289,54 @@ def test_no_sticky_control_also_passes_a_default():
         widget_call = before[before.rindex("st.segmented_control("):]
         assert "default=" not in widget_call, (
             f"{key} passes both default= and a session_state value"
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BUG-036 — the headline counts every strike, the ladder draws the movers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_truncating_the_ladder_changes_the_totals():
+    """Why the two cannot share one call.
+
+    The chart draws 28 rungs so the bars stay readable. Summing those 28 and
+    labelling the answer "Gamma added today" reported 4.81B against a true
+    6.76B on the live record — understated by 29%, and understated by MORE
+    the more strikes traded, which is exactly when the figure matters.
+    """
+    from core import gex as core_gex
+
+    rows = pd.DataFrame({
+        "strike": [7700.0 + 5 * i for i in range(40)],
+        "timestamp": [pd.Timestamp("2026-09-04 13:30", tz="UTC")] * 40,
+        "call_gamma_oi": [100.0] * 40,
+        "put_gamma_oi": [0.0] * 40,
+        "underlying_price": [7700.0] * 40,
+    })
+    later = rows.assign(timestamp=pd.Timestamp("2026-09-04 20:00", tz="UTC"),
+                        call_gamma_oi=[100.0 + i for i in range(40)])
+    intraday = pd.concat([rows, later], ignore_index=True)
+
+    drawn = core_gex.net_flow_by_strike(intraday, top=10)
+    every = core_gex.net_flow_by_strike(intraday, top=None)
+
+    assert len(drawn) == 10 and len(every) == 40
+    assert every["flow"].sum() > drawn["flow"].sum(), (
+        "the truncated ladder cannot be the source of a whole-day total"
+    )
+
+
+def test_the_flow_headline_is_computed_from_every_strike():
+    """Checked at the source: the metric strip and the chart take different
+    frames, and the strip's must be the untruncated one. Reading the totals
+    off `rows` again would restore the understatement without changing a
+    label, which is how it went unnoticed in the first place."""
+    source = Path(gex.__file__).read_text(encoding="utf-8")
+    body = source[source.index("def _draw_net_flow("):
+                  source.index("def _ladder_step(")]
+
+    assert "top=None" in body, "the strip no longer asks for every strike"
+    for line in ("added = float(totals", "removed = float(totals"):
+        assert line in body, (
+            f"expected the headline to read from the untruncated frame: {line}"
         )

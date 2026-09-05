@@ -412,6 +412,8 @@ def render(ctx: ViewContext) -> None:
         # the question the bars cannot: not where the gamma is, but what
         # today put there.
         _draw_net_flow(ctx, expiry, dte_by_expiry)
+        _gap()
+        _draw_time_machine(ctx, expiry)
         _draw_caption(totals, expiry, per_strike, view)
 
         st.divider()
@@ -994,6 +996,15 @@ def _draw_net_flow(ctx: ViewContext, expiry: str | None,
         return
 
     rows = _net_flow(intraday, ctx.snapshot_id, scope)
+    # THE HEADLINE COUNTS EVERY STRIKE, THE CHART DRAWS THE BIGGEST MOVERS.
+    # These were one figure until 2026-09-05, and the shared one was the
+    # chart's: "Gamma added today" summed the 28 rungs that happened to be
+    # drawn and reported it under a label that says the whole day's flow. On
+    # All expiries it read 4.81B against a true 6.76B — understated by 29%,
+    # and understated by MORE the more strikes traded, which is exactly when
+    # the number matters. Drawing 28 rungs is a legibility decision; letting
+    # it silently redefine the total is not (BUG-036).
+    totals = _net_flow(intraday, ctx.snapshot_id, scope, top=None)
     if rows.empty:
         st.info(
             "Only one snapshot so far this session, so there is no change to "
@@ -1001,8 +1012,8 @@ def _draw_net_flow(ctx: ViewContext, expiry: str | None,
         )
         return
 
-    added = float(rows.loc[rows["flow"] > 0, "flow"].sum())
-    removed = float(rows.loc[rows["flow"] < 0, "flow"].sum())
+    added = float(totals.loc[totals["flow"] > 0, "flow"].sum())
+    removed = float(totals.loc[totals["flow"] < 0, "flow"].sum())
     _strip([
         _metric("Net flow today", _fmt_money(added + removed),
                 _CALL if added + removed >= 0 else _PUT),
@@ -1019,18 +1030,21 @@ def _draw_net_flow(ctx: ViewContext, expiry: str | None,
         "sitting on the board, and most of that was put on days or weeks "
         "ago. A price level can be piled high and have seen no trading at "
         "all today. This is the only chart here that shows what *today* did. "
-        "The dotted line is the current SPX price."
+        "The dotted line is the current SPX price. **The three figures above "
+        "count every strike; the ladder draws the biggest movers, so the bars "
+        "shown add up to less than the totals.**"
     )
-
-
-@st.cache_data(show_spinner=False, max_entries=4)
-def _net_flow(_intraday: pd.DataFrame, snapshot_id: int, scope: str):
-    return gex.net_flow_by_strike(_intraday, top=_NET_FLOW_STRIKES)
 
 
 # Enough rungs to see the shape of the ladder, few enough that each bar keeps
 # a readable height. The rest of the board moved by too little to draw.
 _NET_FLOW_STRIKES = 28
+
+
+@st.cache_data(show_spinner=False, max_entries=8)
+def _net_flow(_intraday: pd.DataFrame, snapshot_id: int, scope: str,
+              top: int | None = _NET_FLOW_STRIKES):
+    return gex.net_flow_by_strike(_intraday, top=top)
 
 
 @st.cache_data(show_spinner=False, max_entries=4)
@@ -1062,6 +1076,185 @@ def _net_flow_figure(_rows: pd.DataFrame, spot: float, snapshot_id: int,
     )
     _dark(fig, 520)
     return fig
+
+
+# -----------------------------------------------------------------------------
+# The time machine - the session replayed, both panels in step
+# -----------------------------------------------------------------------------
+
+# One frame per snapshot. The collector writes roughly every three minutes, so
+# a full session is ~128 frames; at 90ms each the replay runs about twelve
+# seconds, which is long enough to watch and short enough to rerun.
+_FRAME_MS = 90
+
+
+def _draw_time_machine(ctx: ViewContext, expiry: str | None) -> None:
+    """Play the session back, level and change side by side.
+
+    WHY ONE FIGURE AND NOT TWO. Chandan's requirement was that the two panels
+    agree - "when gex adds then I'll see in the GEX chart as well". Two Plotly
+    charts cannot be kept in step without custom JavaScript driving both, and
+    the first dropped frame would have the reader comparing 14:02 against
+    14:05 with nothing on screen saying so. One figure with two subplots has a
+    single frame list, so being out of step is not a state it can reach.
+
+    WHY IT ANIMATES IN THE BROWSER. The alternative - a Streamlit slider that
+    reruns the script per step - costs a server round trip for each of 128
+    frames. Measured on this app a rerun is ~0.5s even with everything
+    memoised, so that replay would take a minute and stutter. Plotly's own
+    frames ship once and play locally.
+
+    The two panels are drawn from ONE call to core.gex.replay_by_strike, so
+    the level and the change are the same numbers subtracted, not two
+    computations that happen to agree.
+    """
+    _remember_choice("gex_replay", [True, False], False)
+    on = st.toggle(
+        "Time machine - replay the session",
+        key="gex_replay",
+        help="Plays the day from the open to the latest snapshot. The left "
+             "panel is where the gamma sits; the right is what today changed. "
+             "They move together.",
+    )
+    _record_choice("gex_replay", on)
+    if not on:
+        return
+
+    intraday = ctx.load_intraday_strike_metrics(
+        ctx.session_date, ctx.snapshot_id, None, expiry)
+    frames = _replay_frames(intraday, ctx.snapshot_id, expiry or _ALL_EXPIRIES)
+    if frames.empty or frames["timestamp"].nunique() < 2:
+        st.info(
+            "There is only one snapshot so far this session, so there is "
+            "nothing to replay yet. This fills in as the day runs."
+        )
+        return
+
+    st.plotly_chart(
+        _time_machine_figure(frames, frames["timestamp"].nunique(),
+                             ctx.snapshot_id, expiry or _ALL_EXPIRIES),
+        use_container_width=True,
+    )
+    st.caption(
+        "- **How to read it:** press Play. The left panel is the gamma sitting "
+        "at each price level *at that moment*; the right is how much of it "
+        "arrived or left *since the open*. **The two are the same numbers** - "
+        "the right panel is the left one minus where it started - so a bar "
+        "growing green on the right is a bar growing on the left. Drag the "
+        "slider to scrub to any time of day."
+    )
+
+
+@st.cache_data(show_spinner=False, max_entries=4)
+def _replay_frames(_intraday: pd.DataFrame, snapshot_id: int, scope: str):
+    return gex.replay_by_strike(_intraday, strikes=_NET_FLOW_STRIKES)
+
+
+@st.cache_data(show_spinner=False, max_entries=2)
+def _time_machine_figure(_frames: pd.DataFrame, n_frames: int,
+                         snapshot_id: int, scope: str):
+    stamps = list(dict.fromkeys(_frames["timestamp"]))
+    local = to_display_time(pd.DataFrame({"timestamp": stamps}),
+                            config.DISPLAY_TIMEZONE)["timestamp"]
+    labels = [t.strftime("%H:%M") for t in local]
+
+    at = {t: g for t, g in _frames.groupby("timestamp", sort=False)}
+    strikes = sorted(_frames["strike"].unique())
+
+    # FIXED ACROSS EVERY FRAME. Left to itself Plotly rescales each frame, and
+    # a bar that holds still while the axis shrinks around it reads as growth.
+    # The point of the replay is to see size change, so the ruler must not.
+    lvl_max = float(_frames["net_gex"].abs().max() or 1.0) * 1.08
+    flw_max = float(_frames["flow"].abs().max() or 1.0) * 1.08
+
+    def panels(row):
+        """The two bar traces for one moment."""
+        lv = row.set_index("strike").reindex(strikes)
+        return [
+            go.Bar(x=lv["net_gex"], y=strikes, orientation="h", width=3.2,
+                   marker=dict(color=[_CALL if v >= 0 else _PUT
+                                      for v in lv["net_gex"].fillna(0)]),
+                   hovertemplate="Strike %{y:,.0f}<br>Gamma here "
+                                 "%{x:,.0f}<extra></extra>",
+                   xaxis="x", yaxis="y", showlegend=False),
+            go.Bar(x=lv["flow"], y=strikes, orientation="h", width=3.2,
+                   marker=dict(color=[_CALL if v >= 0 else _PUT
+                                      for v in lv["flow"].fillna(0)]),
+                   hovertemplate="Strike %{y:,.0f}<br>Change since open "
+                                 "%{x:,.0f}<extra></extra>",
+                   xaxis="x2", yaxis="y2", showlegend=False),
+        ]
+
+    fig = make_subplots(
+        rows=1, cols=2, shared_yaxes=True, horizontal_spacing=0.07,
+        subplot_titles=("Gamma at each level", "Added / removed since open"),
+    )
+    first = panels(at[stamps[0]])
+    fig.add_trace(first[0], row=1, col=1)
+    fig.add_trace(first[1], row=1, col=2)
+
+    fig.frames = [
+        go.Frame(name=label, data=panels(at[t]),
+                 layout=go.Layout(shapes=_spot_rungs(at[t])))
+        for t, label in zip(stamps, labels)
+    ]
+    fig.update_layout(shapes=_spot_rungs(at[stamps[0]]))
+
+    play = dict(frame=dict(duration=_FRAME_MS, redraw=True),
+                fromcurrent=True, mode="immediate",
+                transition=dict(duration=0))
+    fig.update_layout(
+        updatemenus=[dict(
+            type="buttons", direction="left", showactive=False,
+            x=0, y=1.16, xanchor="left", yanchor="top",
+            bgcolor="#111c2e", bordercolor="#1a2d45",
+            font=dict(color=_BRIGHT, size=11),
+            buttons=[
+                dict(label="Play", method="animate", args=[None, play]),
+                dict(label="Pause", method="animate",
+                     args=[[None], dict(frame=dict(duration=0, redraw=False),
+                                        mode="immediate")]),
+            ],
+        )],
+        sliders=[dict(
+            active=0, x=0.16, len=0.84, y=1.14, xanchor="left", yanchor="top",
+            currentvalue=dict(prefix="", font=dict(color=_BRIGHT, size=13)),
+            font=dict(color=_INK, size=9), bgcolor="#1a2d45",
+            activebgcolor=_BRIGHT, bordercolor="#1a2d45", tickcolor="#1a2d45",
+            steps=[dict(label=label, method="animate",
+                        args=[[label], dict(mode="immediate",
+                                            frame=dict(duration=0, redraw=True),
+                                            transition=dict(duration=0))])
+                   for label in labels],
+        )],
+        bargap=0.35,
+    )
+    fig.update_xaxes(range=[-lvl_max, lvl_max], zeroline=False,
+                     **_money_ticks([-lvl_max, lvl_max]), row=1, col=1)
+    fig.update_xaxes(range=[-flw_max, flw_max], zeroline=False,
+                     **_money_ticks([-flw_max, flw_max]), row=1, col=2)
+    fig.update_yaxes(tickformat="d",
+                     dtick=_ladder_step(pd.DataFrame({"strike": strikes})),
+                     row=1, col=1)
+    _dark(fig, 560)
+    # Room for the play button and the scrubber, which sit above the panels.
+    fig.update_layout(margin=dict(l=64, r=56, t=104, b=54))
+    return fig
+
+
+def _spot_rungs(row: pd.DataFrame) -> list:
+    """SPX at this moment, drawn across both panels.
+
+    A shape rather than a trace so it spans the full width of each panel
+    whatever the axis range, and carried in the FRAME's layout so it tracks
+    the index through the day - a spot line frozen at the open would put every
+    later frame's strikes on the wrong side of the money.
+    """
+    spot = float(row["underlying_price"].iloc[0])
+    line = dict(color="#9575cd", width=1.4, dash="dot")
+    return [dict(type="line", xref=x, yref=y, x0=0, x1=1, y0=spot, y1=spot,
+                 line=line)
+            for x, y in (("x domain", "y"), ("x2 domain", "y2"))]
 
 
 def _ladder_step(rows: pd.DataFrame) -> float:

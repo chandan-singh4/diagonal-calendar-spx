@@ -482,3 +482,72 @@ def net_flow_by_strike(intraday: pd.DataFrame,
         frame = frame.assign(mag=frame["flow"].abs()).nlargest(top, "mag")
         frame = frame.drop(columns=["mag"])
     return frame.sort_values("strike").reset_index(drop=True)
+
+
+def replay_by_strike(intraday: pd.DataFrame,
+                     *, strikes: int | None = None) -> pd.DataFrame:
+    """Every snapshot of the session as a level AND a change since the open.
+
+    THE TIME MACHINE'S DATA, and the reason it is one function rather than two.
+    Chandan's requirement for the replay was that the level chart and the
+    added/removed chart agree — "when gex adds then I'll see in the GEX chart
+    as well". Two functions computing net GEX from the same rows would agree
+    today and drift the first time one of them was touched; here `flow` is
+    literally `net_gex` minus the same column at the open, so the two panels
+    cannot disagree without the subtraction itself being wrong.
+
+    Returned LONG — one row per (timestamp, strike) — because the caller turns
+    it into animation frames and a wide pivot would have to be unpivoted again.
+
+    EVERY FRAME CARRIES EVERY STRIKE. An animation whose bars appear and
+    vanish between frames reads as the market moving when it is only the
+    quote list changing, and Plotly matches bars across frames by position,
+    so a shorter array in one frame silently repaints the wrong strikes. The
+    grid is therefore the union of strikes seen all session.
+
+    A strike not quoted in a given snapshot is left BLANK, not zero — the
+    project's standing rule, and here the difference is visible: zero would
+    draw a bar saying "no gamma at this level", blank draws nothing and says
+    "not quoted". `flow` is the deliberate exception, matching
+    net_flow_by_strike: a strike absent at the OPEN was genuinely carrying
+    nothing then, so its change is measured from zero.
+
+    Each snapshot is scaled by ITS OWN spot, for the reason given in
+    net_flow_by_strike: dollar_scale is quadratic in spot, so using the latest
+    price throughout would fold the index's own move into the flow.
+
+    `strikes` keeps only the N with the largest absolute flow at any point in
+    the day — chosen ACROSS the whole session, not per frame, so the ladder
+    holds still while it plays.
+    """
+    needed = {"strike", "timestamp", "call_gamma_oi", "put_gamma_oi",
+              "underlying_price"}
+    columns = ["timestamp", "strike", "net_gex", "flow", "underlying_price"]
+    if intraday is None or intraday.empty or not needed.issubset(intraday.columns):
+        return pd.DataFrame(columns=columns)
+
+    work = intraday.copy()
+    work["net_gex"] = ((work["call_gamma_oi"] - work["put_gamma_oi"])
+                       * work["underlying_price"].map(dollar_scale))
+
+    grid = (work.groupby(["timestamp", "strike"])
+                .agg(net_gex=("net_gex", "sum"),
+                     underlying_price=("underlying_price", "first"))
+                .unstack("strike"))
+    levels = grid["net_gex"]
+    # Spot is a property of the snapshot, not of a strike, so it survives the
+    # reindex that leaves unquoted strikes blank.
+    spot = grid["underlying_price"].bfill(axis=1).ffill(axis=1).iloc[:, 0]
+
+    at_open = levels.iloc[0].fillna(0.0)
+    flow = levels.fillna(0.0).sub(at_open, axis=1)
+
+    if strikes is not None and not flow.empty:
+        keep = flow.abs().max(axis=0).nlargest(strikes).index
+        levels, flow = levels[sorted(keep)], flow[sorted(keep)]
+
+    out = (levels.stack(future_stack=True).rename("net_gex").to_frame()
+           .join(flow.stack(future_stack=True).rename("flow"))
+           .reset_index())
+    out["underlying_price"] = out["timestamp"].map(spot)
+    return out.sort_values(["timestamp", "strike"], ignore_index=True)[columns]
