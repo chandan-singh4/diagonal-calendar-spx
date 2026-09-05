@@ -37,6 +37,17 @@ dependencies = [
     # requiring chart verification.
     "plotly>=6.8.0,<7.0.0",
 
+    # Backend API (M4). Read-only HTTP over core/ and dataaccess/, so the
+    # record can be read from a phone without the page (ADR-012).
+    #
+    # DECLARED, THOUGH ITS DEPENDENCIES WERE ALREADY HERE. starlette, uvicorn,
+    # anyio and httpx arrive transitively via streamlit and were installed
+    # before any of this was written. Relying on that would mean the API layer
+    # silently breaking the day streamlit drops one of them — which is exactly
+    # the drift the upper bounds at the top of this file exist to catch.
+    "fastapi>=0.115,<1.0",
+    "uvicorn>=0.49.0,<1.0",
+
     # Config
     "python-dotenv>=1.2.2,<2.0.0",
 ]
