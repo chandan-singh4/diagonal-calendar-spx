@@ -196,6 +196,30 @@ nothing** — whatever is already recorded is the baseline, not news.
 
 ---
 
+## After changing the code, while the dashboard is open
+
+The dashboard remembers every database read until a NEW SNAPSHOT arrives
+(ENH-011 — it used to forget after 55 seconds, which cost real time redoing
+identical work). One consequence is worth knowing:
+
+**A fix to a query does not reach an open dashboard until the collector writes
+a new snapshot.** Over a weekend, a holiday, or any time the collector is
+stopped, that never happens — and the page will keep drawing the old answer
+indefinitely. This is not theoretical: on 2026-09-05 a chart went on showing
+four sessions under a "5D" label after the bug had been fixed, because the
+record had not moved since the Friday close.
+
+The dashboard now notices when `db.py`, `dataaccess/queries.py` or
+`services/loaders.py` change on disk and drops what it remembered, so an edit
+or a deploy corrects itself on the next interaction. If a page still looks
+wrong after a change to anything else:
+
+    Restart the dashboard, or use ⋮ → Clear cache in the app menu.
+
+**Verify on the real system after deploying** — the rule holds here more than
+anywhere, because a cached page will happily show you the old behaviour and
+look like a failed fix.
+
 ## The routine, in one place
 
 | When | What |

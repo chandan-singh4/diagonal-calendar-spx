@@ -14,6 +14,8 @@ which is the whole question — and not what any query returns.
 """
 from __future__ import annotations
 
+import os
+
 import pandas as pd
 import pytest
 
@@ -160,3 +162,71 @@ def test_every_snapshot_scoped_wrapper_can_actually_be_cleared():
     whole page down rather than merely running slowly."""
     for memo in loaders._SNAPSHOT_SCOPED:
         assert hasattr(memo, "clear"), f"{memo!r} is not a cached function"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ...and when the code behind them changes
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Added 2026-09-05, after this bit me for real. The history-window fix
+# (BUG-033) landed while the collector was idle, so no new snapshot arrived to
+# clear the cache — and the running dashboard kept drawing the pre-fix answer.
+# Chandan reported the chart as still wrong when the code was already right.
+
+def test_a_code_change_drops_the_saved_results(counting_atm_hist, monkeypatch,
+                                               tmp_path):
+    """A fixed query must reach an already-running dashboard.
+
+    The alternative is what happened: with no TTL left and a stopped
+    collector, nothing would ever have cleared the cache and the corrected
+    query would never have been seen.
+    """
+    source = tmp_path / "queries.py"
+    source.write_text("# v1", encoding="utf-8")
+    monkeypatch.setattr(loaders, "_SOURCE_FILES", (str(source),))
+
+    loaders.invalidate_on_new_snapshot(1)
+    loaders._load_atm_hist("2026-09-11", 90)
+
+    os.utime(source, ns=(2_000_000_000_000_000_000, 2_000_000_000_000_000_000))
+
+    assert loaders.invalidate_on_new_snapshot(1) is True, (
+        "the same snapshot, but the code that read it has changed"
+    )
+    loaders._load_atm_hist("2026-09-11", 90)
+    assert counting_atm_hist["n"] == 2
+
+
+def test_unchanged_code_does_not_clear_anything(counting_atm_hist, monkeypatch,
+                                                tmp_path):
+    """In production the source never changes, so this must cost nothing. A
+    fingerprint that moved on its own would clear the cache on every rerun and
+    undo ENH-011 entirely."""
+    source = tmp_path / "queries.py"
+    source.write_text("# v1", encoding="utf-8")
+    monkeypatch.setattr(loaders, "_SOURCE_FILES", (str(source),))
+
+    loaders.invalidate_on_new_snapshot(1)
+    loaders._load_atm_hist("2026-09-11", 90)
+    for _ in range(5):
+        assert loaders.invalidate_on_new_snapshot(1) is False
+    loaders._load_atm_hist("2026-09-11", 90)
+
+    assert counting_atm_hist["n"] == 1
+
+
+def test_a_missing_source_file_does_not_break_the_page(monkeypatch):
+    """Stat failures are not worth a blank dashboard; snapshot invalidation
+    still works on its own."""
+    monkeypatch.setattr(loaders, "_SOURCE_FILES", ("no/such/file.py",))
+
+    assert loaders.invalidate_on_new_snapshot(1) is True
+    assert loaders.invalidate_on_new_snapshot(1) is False
+
+
+def test_the_real_source_files_are_the_ones_that_matter():
+    """The fingerprint must cover the modules the answers actually depend on:
+    the wrappers, the SQL, and the query layer between them."""
+    names = {os.path.basename(p) for p in loaders._SOURCE_FILES}
+
+    assert names == {"loaders.py", "db.py", "queries.py"}
