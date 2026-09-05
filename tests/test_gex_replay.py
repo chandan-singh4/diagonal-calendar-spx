@@ -192,3 +192,60 @@ def test_empty_in_empty_out_with_columns():
 
     assert out.empty
     assert {"timestamp", "strike", "net_gex", "flow"} <= set(out.columns)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BUG-038 — a level panel may not be filtered by movement
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_a_strike_with_large_stable_gamma_is_never_dropped():
+    """The defect Chandan found, reduced to three strikes.
+
+    The replay first kept the 28 biggest MOVERS, a number inherited from the
+    static ladder above it without re-asking whether it applied. It does not.
+    That rule is right for the "added/removed" panel and wrong for the one
+    labelled "Gamma at each level": a strike can carry enormous gamma and have
+    seen no trade all day, and filtering by movement makes it disappear from a
+    panel that claims to show every level.
+
+    On the live record for 2026-09-08 it left a hole straight through the
+    money — 7700 to 7745 blank on the replay while the chart directly above it
+    showed 275M sitting at 7745.
+    """
+    quiet, busy = 7700.0, 7900.0
+    out = gex.replay_by_strike(_rows(
+        # `quiet` is the largest position on the board and never moves.
+        (OPEN, quiet, 900.0, 0.0, 7700.0),
+        (CLOSE, quiet, 900.0, 0.0, 7700.0),
+        # `busy` is tiny but doubles, so any movement ranking prefers it.
+        (OPEN, busy, 10.0, 0.0, 7700.0),
+        (CLOSE, busy, 20.0, 0.0, 7700.0),
+    ))
+
+    at_close = _at(out, CLOSE)
+    assert quiet in at_close.index, (
+        "the biggest position on the board was dropped for not moving"
+    )
+    assert at_close.loc[quiet, "net_gex"] > at_close.loc[busy, "net_gex"]
+    assert at_close.loc[quiet, "flow"] == pytest.approx(0.0), (
+        "it genuinely did not move — that is the point"
+    )
+
+
+def test_the_replay_asks_for_every_strike():
+    """Checked at the call site, because the defect was there and not in
+    replay_by_strike: the function offered a `strikes` cap and the view passed
+    one. Nothing about the returned frame can show that the caller asked for
+    too little."""
+    from pathlib import Path
+
+    from views import gex as view_gex
+
+    source = Path(view_gex.__file__).read_text(encoding="utf-8")
+    body = source[source.index("def _replay_frames("):
+                  source.index("def _time_machine_figure(")]
+
+    assert "strikes=" not in body, (
+        "the replay is capping its strike list again; the level panel will "
+        "silently lose whatever did not move"
+    )

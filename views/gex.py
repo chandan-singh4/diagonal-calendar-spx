@@ -1083,9 +1083,16 @@ def _net_flow_figure(_rows: pd.DataFrame, spot: float, snapshot_id: int,
 # -----------------------------------------------------------------------------
 
 # One frame per snapshot. The collector writes roughly every three minutes, so
-# a full session is ~128 frames; at 90ms each the replay runs about twelve
-# seconds, which is long enough to watch and short enough to rerun.
-_FRAME_MS = 90
+# a full session is ~128 frames.
+#
+# THE FIRST VERSION RAN AT 90ms AND WAS UNWATCHABLE — twelve seconds for a
+# whole day, which is fast enough that a bar appearing and a bar already there
+# look the same (Chandan, 2026-09-05: "it just goes too fast to notice what's
+# happening"). The point of the replay is to see WHEN something arrived, and
+# that needs roughly a beat per snapshot. 320ms puts a session at about forty
+# seconds; Slow doubles it for watching one strike in particular.
+_FRAME_MS = 320
+_SLOW_MS = 700
 
 
 def _draw_time_machine(ctx: ViewContext, expiry: str | None) -> None:
@@ -1147,7 +1154,19 @@ def _draw_time_machine(ctx: ViewContext, expiry: str | None) -> None:
 
 @st.cache_data(show_spinner=False, max_entries=4)
 def _replay_frames(_intraday: pd.DataFrame, snapshot_id: int, scope: str):
-    return gex.replay_by_strike(_intraday, strikes=_NET_FLOW_STRIKES)
+    # EVERY STRIKE, not the biggest movers. The static ladder above draws the
+    # top 28 because a bar per strike would be unreadable there, and the first
+    # version of this replay inherited that number without re-asking whether
+    # it applied. It does not, and it broke the left panel: "Gamma at each
+    # level" was showing only the levels that MOVED, so strikes carrying
+    # large, stable gamma vanished. Chandan found the hole around the money on
+    # 2026-09-08 — 7700 to 7745 blank on the replay while the chart above it
+    # showed 275M sitting at 7745 (BUG-038).
+    #
+    # The two panels share a y axis, so one strike list has to serve both, and
+    # only the full list is honest for the level panel. Selecting by movement
+    # is right for the right-hand panel alone, and it is not worth two axes.
+    return gex.replay_by_strike(_intraday)
 
 
 @st.cache_data(show_spinner=False, max_entries=2)
@@ -1203,29 +1222,40 @@ def _time_machine_figure(_frames: pd.DataFrame, n_frames: int,
     play = dict(frame=dict(duration=_FRAME_MS, redraw=True),
                 fromcurrent=True, mode="immediate",
                 transition=dict(duration=0))
+    slow = dict(frame=dict(duration=_SLOW_MS, redraw=True),
+                fromcurrent=True, mode="immediate",
+                transition=dict(duration=0))
     fig.update_layout(
         updatemenus=[dict(
             type="buttons", direction="left", showactive=False,
-            x=0, y=1.16, xanchor="left", yanchor="top",
+            x=0, y=1.30, xanchor="left", yanchor="top",
             bgcolor="#111c2e", bordercolor="#1a2d45",
             font=dict(color=_BRIGHT, size=11),
             buttons=[
                 dict(label="Play", method="animate", args=[None, play]),
+                dict(label="Slow", method="animate", args=[None, slow]),
                 dict(label="Pause", method="animate",
                      args=[[None], dict(frame=dict(duration=0, redraw=False),
                                         mode="immediate")]),
             ],
         )],
         sliders=[dict(
-            active=0, x=0.16, len=0.84, y=1.14, xanchor="left", yanchor="top",
-            currentvalue=dict(prefix="", font=dict(color=_BRIGHT, size=13)),
+            active=0, x=0.30, len=0.70, y=1.30, xanchor="left", yanchor="top",
+            currentvalue=dict(prefix="", offset=8,
+                              font=dict(color=_BRIGHT, size=13)),
+            pad=dict(t=0, b=0),
             font=dict(color=_INK, size=9), bgcolor="#1a2d45",
             activebgcolor=_BRIGHT, bordercolor="#1a2d45", tickcolor="#1a2d45",
-            steps=[dict(label=label, method="animate",
+            # ONE LABEL IN TWELVE. Plotly writes a tick label per step, and 128
+            # of them under a scrubber ran into each other and then into the
+            # panel titles below. Blanking the rest keeps every step draggable
+            # while leaving the axis legible.
+            steps=[dict(label=(label if i % 12 == 0 else ""),
+                        method="animate",
                         args=[[label], dict(mode="immediate",
                                             frame=dict(duration=0, redraw=True),
                                             transition=dict(duration=0))])
-                   for label in labels],
+                   for i, label in enumerate(labels)],
         )],
         bargap=0.35,
     )
@@ -1236,9 +1266,18 @@ def _time_machine_figure(_frames: pd.DataFrame, n_frames: int,
     fig.update_yaxes(tickformat="d",
                      dtick=_ladder_step(pd.DataFrame({"strike": strikes})),
                      row=1, col=1)
-    _dark(fig, 560)
-    # Room for the play button and the scrubber, which sit above the panels.
-    fig.update_layout(margin=dict(l=64, r=56, t=104, b=54))
+    # Bars sized in STRIKE UNITS, from the actual spacing rather than a
+    # constant: a five-point grid and a twenty-five-point grid need different
+    # widths, and the constant 3.2 was tuned for the former alone.
+    step = min((b - a) for a, b in zip(strikes, strikes[1:])) if len(strikes) > 1 else 5.0
+    fig.update_traces(width=step * 0.72)
+    # Taller than the ladder above it because it now carries every strike
+    # rather than 28 rungs, and a bar under about five pixels reads as a line.
+    _dark(fig, 760)
+    # Room above the panels for the buttons and the scrubber, which sit in
+    # paper coordinates above the plotting area and would otherwise be drawn
+    # over the panel titles.
+    fig.update_layout(margin=dict(l=64, r=56, t=150, b=54))
     return fig
 
 
