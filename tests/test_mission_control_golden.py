@@ -70,7 +70,8 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 from app_loader import load_mission_control_functions
-from conftest import MC_BACK_EXPIRY, MC_CALL_STRIKE, MC_FRONT_EXPIRY, MC_PUT_STRIKE
+from conftest import (MC_BACK_EXPIRY, MC_CALL_STRIKE, MC_FRONT_EXPIRY,
+                      MC_PUT_STRIKE, anchor_record)
 
 import config
 
@@ -364,6 +365,12 @@ def test_history_window_is_respected(mc_db, signals):
     db_path, write = mc_db
     # Place the entire series ~3 days back, then ask for 1 day.
     write([9.0, 9.0, 9.0], end_minutes_ago=3 * 24 * 60)
+    # A recent, empty snapshot so the record has a "now" to measure from: the
+    # window is anchored to the newest snapshot, not to the wall clock, and
+    # without this the three-day-old series would be its own anchor and sit
+    # inside every window. It carries no option rows, so it cannot itself
+    # produce a signal.
+    anchor_record(db_path)
     assert signals(db_path, days=1) is None
     # The same data IS visible with a wide enough window.
     assert signals(db_path, days=7) is not None

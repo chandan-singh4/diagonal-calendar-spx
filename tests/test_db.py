@@ -793,9 +793,23 @@ def test_contract_iv_history_matches_one_exact_contract(temp_db):
 
 
 def test_contract_iv_history_excludes_rows_older_than_the_window(temp_db):
+    """Rewritten 2026-09-05. The window is measured from the newest snapshot
+    in the RECORD, not from now, so a lone 40-day-old snapshot is now inside
+    its own 30-day window rather than outside a window anchored to today.
+
+    The behaviour being checked is unchanged and is still the real one: a row
+    older than the window is excluded. It now needs two snapshots to state,
+    because one snapshot is always its own anchor."""
+    recent = add_snapshot(temp_db, ts_ago(days=1))
     old = add_snapshot(temp_db, ts_ago(days=40))
+    db.insert_option_rows(temp_db, [opt(recent, FRONT, CALL_STRIKE, "C", iv=0.11)])
     db.insert_option_rows(temp_db, [opt(old, FRONT, CALL_STRIKE, "C", iv=0.99)])
-    assert db.get_contract_iv_history(temp_db, FRONT, CALL_STRIKE, "C", days=30) == []
+
+    ivs = [r["iv"] for r in
+           db.get_contract_iv_history(temp_db, FRONT, CALL_STRIKE, "C", days=30)]
+
+    assert 0.11 in ivs, "the recent row must be inside the window"
+    assert 0.99 not in ivs, "the 40-day-old row must be outside a 30-day window"
 
 
 def test_contract_iv_history_excludes_incomplete_snapshots(temp_db):
@@ -1164,11 +1178,19 @@ def test_diagonal_history_guards_division_by_a_zero_front_iv(temp_db):
 
 
 def test_diagonal_history_excludes_snapshots_outside_the_window(temp_db):
-    sid = add_snapshot(temp_db, ts_ago(days=120))
-    db.insert_option_rows(temp_db, four_legs(sid))
-    db.insert_atm_iv_records(temp_db, [atm(sid, FRONT, 0.20), atm(sid, BACK, 0.10)])
-    assert db.get_diagonal_history(temp_db, FRONT, BACK,
-                                   CALL_STRIKE, PUT_STRIKE, days=90) == []
+    """Rewritten 2026-09-05 — see the note on the contract-IV equivalent
+    above. Two snapshots, because the window is anchored to the newest one."""
+    recent = add_snapshot(temp_db, ts_ago(days=1))
+    old = add_snapshot(temp_db, ts_ago(days=120))
+    for sid in (recent, old):
+        db.insert_option_rows(temp_db, four_legs(sid))
+        db.insert_atm_iv_records(temp_db,
+                                 [atm(sid, FRONT, 0.20), atm(sid, BACK, 0.10)])
+
+    rows = db.get_diagonal_history(temp_db, FRONT, BACK,
+                                   CALL_STRIKE, PUT_STRIKE, days=90)
+
+    assert len(rows) == 1, "only the snapshot inside the window may be returned"
 
 
 def test_transform_mark_history_returns_all_six_legs(temp_db):

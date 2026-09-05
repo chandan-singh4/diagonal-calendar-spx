@@ -538,6 +538,36 @@ def mc_db(temp_db):
     return temp_db, write
 
 
+def anchor_record(db_path, *, minutes_ago=0, spx=6000.0):
+    """Write one recent COMPLETE snapshot carrying no option data.
+
+    History windows are measured from the newest snapshot in the RECORD rather
+    than from the wall clock (2026-09-05, so that a chart does not blank out
+    as the day goes on). A test that writes only old data therefore finds it
+    inside its own window, however old it is — one snapshot is always its own
+    anchor.
+
+    This puts a "now" into the record without adding anything a query under
+    test would return, so "older than the window is excluded" can still be
+    stated. It is deliberately empty of option rows for exactly that reason.
+    """
+    import datetime as dt
+
+    import db
+
+    ts = ((dt.datetime.now(dt.UTC) - dt.timedelta(minutes=minutes_ago))
+          .strftime("%Y-%m-%d %H:%M:%S"))
+    snapshot_id = db.create_snapshot(
+        db_path, snapshot_timestamp=ts, market_session="MIDDAY",
+        poll_interval_used=300, underlying_price=spx,
+        underlying_bid=spx - 1, underlying_ask=spx + 1, vix_value=18.5,
+    )
+    db.finalize_snapshot(db_path, snapshot_id, status="COMPLETE",
+                         strikes_fetched=0, expiries_fetched=0,
+                         collection_latency_ms=0)
+    return snapshot_id
+
+
 def make_atm_iv_history(db_path, ivs, *, expiry=None, interval_minutes=5,
                         end_minutes_ago=0, spx=6000.0, dte=7):
     """Write one COMPLETE snapshot per entry in `ivs`, each carrying an
