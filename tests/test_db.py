@@ -2057,3 +2057,37 @@ def test_prior_session_oi_returns_that_session_s_volume_too(temp_db):
     call = next(r for r in rows if r["strike"] == CALL_STRIKE)
     assert "call_volume" in call.keys() and "put_volume" in call.keys()
     assert call["call_volume"] > 0
+
+
+def test_the_intraday_read_selects_its_session_in_a_subquery(temp_db):
+    """BUG-039, a 110x performance regression that no correctness test saw.
+
+    Written the obvious way — `s.status = 'COMPLETE' AND
+    DATE(s.snapshot_timestamp) = ?` as join predicates, beside an expiry
+    filter — SQLite drove the query from the expiry index. That picks one
+    contract across EVERY session in a 19M-row table and only then discards
+    all but today, so the read got slower with each session collected: 2.20s
+    against 0.02s for the same 4,845 rows on the live record, and the whole
+    Gamma Exposure tab took 4.5s to open because of it.
+
+    Guarded at the source because the fault is invisible downstream. The rows
+    are identical either way — that is what makes it worth pinning here rather
+    than trusting the correctness tests above, all of which passed throughout.
+    """
+    import inspect
+
+    # Comments stripped first: the fix carries an explanation that quotes the
+    # slow shape verbatim, and a guard that reads its own documentation as
+    # code would fire on the very commit that fixed the bug.
+    sql = "\n".join(
+        line for line in inspect.getsource(db.get_intraday_strike_metrics).splitlines()
+        if not line.strip().startswith(("--", "#"))
+    )
+
+    assert "o.snapshot_id IN (SELECT snapshot_id FROM snapshots" in sql, (
+        "the session is no longer selected in a subquery; the planner will "
+        "drive from the expiry index again and the tab will crawl"
+    )
+    assert "DATE(s.snapshot_timestamp) = ?" not in sql, (
+        "the date is back as a join predicate, which is the slow shape"
+    )

@@ -2093,8 +2093,17 @@ def get_intraday_strike_metrics(db_path: str, session_date: str,
                             THEN COALESCE(o.open_interest, 0) ELSE 0 END) AS put_oi
             FROM option_rows o
             JOIN snapshots  s USING (snapshot_id)
-            WHERE s.status = 'COMPLETE'
-              AND DATE(s.snapshot_timestamp) = ?
+            -- THE SESSION IS SELECTED IN A SUBQUERY, NOT AS A JOIN PREDICATE,
+            -- and the difference is 110x. Written as `s.status = 'COMPLETE'
+            -- AND DATE(s.snapshot_timestamp) = ?` alongside an expiry filter,
+            -- SQLite drove the query from the expiry index instead: that picks
+            -- one contract across ALL 52 sessions of a 19M-row table and only
+            -- then discards everything but today. 2.20s, and it got slower
+            -- every session collected. Naming the snapshots first makes the
+            -- date the selective term it always was -- 0.02s (BUG-039).
+            WHERE o.snapshot_id IN (SELECT snapshot_id FROM snapshots
+                                    WHERE status = 'COMPLETE'
+                                      AND DATE(snapshot_timestamp) = ?)
               AND o.gamma IS NOT NULL
               AND {scope}
             GROUP BY s.snapshot_id, o.strike
