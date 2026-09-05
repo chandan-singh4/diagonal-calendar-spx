@@ -1,3 +1,19 @@
+[server]
+# OPS-006, fixed 2026-09-05 (M4.5). Streamlit's default binds 0.0.0.0: running
+# `streamlit run app.py` advertised a Network URL and an External URL, so the
+# dashboard — and through it the whole price history — was reachable from any
+# device on the LAN. Confirmed as still true on 2026-07-26 and unchanged since.
+#
+# ADR-012 makes localhost-only a HARD REQUIREMENT before any further exposure:
+# the access model is one machine reached from a phone over Tailscale, and
+# Tailscale reaches THIS interface. Binding the LAN as well does not enable
+# anything the tunnel needs; it only widens who can connect.
+address = "127.0.0.1"
+
+# Nothing on this dashboard is uploaded, and CORS/XSRF defaults assume a
+# browser origin that a localhost-only server does not have to negotiate.
+headless = true
+
 [theme]
 base                     = "dark"
 backgroundColor          = "#07090f"

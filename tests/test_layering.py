@@ -32,6 +32,7 @@ STATE_DIR = ROOT / "state"
 VIEWS_DIR = ROOT / "views"
 SERVICES_DIR = ROOT / "services"
 UI_DIR = ROOT / "ui"
+API_DIR = ROOT / "api"
 
 
 def page_sources() -> list[Path]:
@@ -115,6 +116,26 @@ FORBIDDEN_UI = {
     "views":          "a tab. Chrome renders around the tabs, not from them",
 }
 
+# api/ SERVES — added in M4.1. It is the server's binding layer: the analogue of
+# services/ on the page side, and allowed the same `config.DB_PATH` for the same
+# reason. What makes it a separate layer rather than a reuse of services/ is the
+# clause below.
+#
+# `services` IS THE ONE THAT MATTERS. Every module in services/ imports
+# streamlit, so an `import services` here drags the page into a process that has
+# no browser session — and it fails QUIETLY: st.cache_data outside a script run
+# degrades rather than raising, so the server would answer correctly while
+# re-querying SQLite on every single request. That is the same invisible failure
+# the views/ rule guards against, one layer over.
+FORBIDDEN_API = {
+    "streamlit":      "the page. api/ serves data; a server with a browser session is not a server",
+    "services":       "the page's data layer — every module in it imports streamlit",
+    "views":          "a tab. Nothing served over HTTP should depend on how a tab draws",
+    "ui":             "page chrome",
+    "app":            "the dashboard itself",
+    "schwab_client":  "the broker. The API serves the record; collecting is the collector's job",
+}
+
 LAYERS = [
     pytest.param(CORE_DIR, FORBIDDEN_CORE, id="core"),
     pytest.param(DATAACCESS_DIR, FORBIDDEN_DATAACCESS, id="dataaccess"),
@@ -122,6 +143,7 @@ LAYERS = [
     pytest.param(VIEWS_DIR, FORBIDDEN_VIEWS, id="views"),
     pytest.param(SERVICES_DIR, FORBIDDEN_SERVICES, id="services"),
     pytest.param(UI_DIR, FORBIDDEN_UI, id="ui"),
+    pytest.param(API_DIR, FORBIDDEN_API, id="api"),
 ]
 
 
@@ -132,7 +154,8 @@ def modules_in(directory: Path) -> list[Path]:
 def all_modules() -> list[Path]:
     """The layers that must stay free of the page. views/ IS the page, so it
     is deliberately absent — see view_modules() below for its own rules."""
-    return modules_in(CORE_DIR) + modules_in(DATAACCESS_DIR) + modules_in(STATE_DIR)
+    return (modules_in(CORE_DIR) + modules_in(DATAACCESS_DIR)
+            + modules_in(STATE_DIR) + modules_in(API_DIR))
 
 
 def view_modules() -> list[Path]:

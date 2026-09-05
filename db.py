@@ -2059,3 +2059,107 @@ def get_prior_session_oi(db_path: str, session_date: str,
             """,
             (prior["snapshot_id"], expiry, expiry)
         ).fetchall()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Mission Control's "New" registry (M4.3, schema v4)
+#
+# A pair is NEW when it is eligible now and was not eligible at the previous
+# RECORDED snapshot. The dashboard has always answered that from
+# st.session_state, which is per-browser-tab: close the tab and everything is
+# new again, and a second client disagrees with the first. Neither is a fact
+# about the market. These three functions move the answer into the record,
+# anchored on snapshot_id, so every client gets the same one and it survives a
+# restart (Chandan's decision, 2026-09-05).
+#
+# "Previous RECORDED snapshot" is the honest phrase and the docstrings use it
+# rather than "previous snapshot". Nothing records eligibility unless someone
+# asks for it, so on a quiet morning the comparison may reach back to
+# yesterday's last request. That is a truthful answer to "what has appeared
+# since this was last looked at" and a misleading answer to "what appeared in
+# the last minute" — get_new_pairs returns the snapshot it compared against so
+# a caller can tell which question it just had answered.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def record_eligible_keys(db_path: str, snapshot_id: int,
+                         keys: dict[str, float]) -> int:
+    """Record which pairs cleared the threshold at this snapshot.
+
+    `keys` maps pair_key ("front|back|put|call") to the gap that qualified it.
+    Idempotent: recording the same snapshot twice replaces its rows rather
+    than doubling them, so a retried request cannot corrupt the comparison.
+
+    An EMPTY set is still recorded, and that matters. "No pairs were eligible"
+    and "this snapshot was never examined" are different states, and without
+    the marker row below they would be indistinguishable — the next request
+    would compare against a snapshot from before the quiet period and report a
+    flood of things that had been sitting there all along.
+    """
+    now = _utcnow()
+    with managed_conn(db_path) as conn:
+        conn.execute("DELETE FROM mc_eligible_keys WHERE snapshot_id = ?",
+                     (snapshot_id,))
+        if keys:
+            conn.executemany(
+                "INSERT INTO mc_eligible_keys (snapshot_id, pair_key, gap, "
+                "recorded_at) VALUES (?, ?, ?, ?)",
+                [(snapshot_id, k, float(g), now) for k, g in keys.items()],
+            )
+        else:
+            # The marker: pair_key is empty, which no real key can be, so it
+            # never collides with one and is filtered out on read.
+            conn.execute(
+                "INSERT INTO mc_eligible_keys (snapshot_id, pair_key, gap, "
+                "recorded_at) VALUES (?, '', NULL, ?)",
+                (snapshot_id, now),
+            )
+    return len(keys)
+
+
+def get_eligible_keys(db_path: str, snapshot_id: int) -> set[str]:
+    """The pairs recorded eligible at exactly this snapshot.
+
+    Empty for a snapshot that was examined and had none, and also empty for
+    one never examined — use get_previous_recorded_snapshot to tell those
+    apart, which is why it exists as a separate function.
+    """
+    with get_conn(db_path) as conn:
+        rows = conn.execute(
+            "SELECT pair_key FROM mc_eligible_keys "
+            "WHERE snapshot_id = ? AND pair_key <> ''",
+            (snapshot_id,)
+        ).fetchall()
+    return {r["pair_key"] for r in rows}
+
+
+def get_previous_recorded_snapshot(db_path: str,
+                                    snapshot_id: int) -> int | None:
+    """The newest snapshot STRICTLY BEFORE this one that was recorded.
+
+    None when this is the first ever recorded — in which case nothing is new,
+    because there is no "before" to have been absent from. Reporting every
+    eligible pair as new on the first request would be the same false alarm
+    the browser-tab version raises every time a tab is reopened.
+    """
+    with get_conn(db_path) as conn:
+        row = conn.execute(
+            "SELECT MAX(snapshot_id) AS prev FROM mc_eligible_keys "
+            "WHERE snapshot_id < ?",
+            (snapshot_id,)
+        ).fetchone()
+    return row["prev"] if row and row["prev"] is not None else None
+
+
+def get_snapshot_by_id(db_path: str, snapshot_id: int) -> sqlite3.Row | None:
+    """One snapshot by id, whatever its status.
+
+    Added in M4.2: the API lets a caller ask for an explicit snapshot rather
+    than the newest, and the spot price for that snapshot has to come from
+    that row. Taking it from the LATEST snapshot instead — the shape this
+    replaced — would price a chain from last Tuesday against today's SPX, and
+    every derived figure would be wrong while looking entirely reasonable.
+    """
+    with get_conn(db_path) as conn:
+        return conn.execute(
+            "SELECT * FROM snapshots WHERE snapshot_id = ?", (snapshot_id,)
+        ).fetchone()

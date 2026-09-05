@@ -146,6 +146,45 @@ def _v3_trades_columns(conn: sqlite3.Connection) -> None:
         add_column(conn, "trades", column, decl)
 
 
+def _v4_mc_eligible_keys(conn: sqlite3.Connection) -> None:
+    """M4.3: the Mission Control "New" registry, moved out of a browser tab.
+
+    WHAT "NEW" MEANS AND WHY IT NEEDED A TABLE. A pair is new when it is
+    eligible now and was not eligible at the previous recorded snapshot. The
+    dashboard has always worked that out by holding the previous set in
+    `st.session_state` — which is per-browser-tab: closing the tab makes
+    everything new again, and a second client has its own opinion. Neither is
+    a property of the market, and M4 serves clients that have no session at
+    all (Chandan's decision, 2026-09-05).
+
+    Anchored on snapshot_id, not on a clock or a viewer, so the answer is the
+    same for every client and survives a restart of anything.
+
+    THE ONLY WRITE IN AN OTHERWISE READ-ONLY MILESTONE, and deliberately a
+    small one: an append-only log of which pairs cleared the threshold at
+    which snapshot. It derives from data already in the record and can be
+    deleted and rebuilt without loss — which is the test a new table in this
+    project has to pass.
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS mc_eligible_keys (
+            snapshot_id  INTEGER NOT NULL,
+            pair_key     TEXT    NOT NULL,
+            gap          REAL,
+            recorded_at  TEXT    NOT NULL,
+            PRIMARY KEY (snapshot_id, pair_key)
+        )
+        """
+    )
+    # The lookup this table exists to serve is "the newest recorded snapshot
+    # at or before N", which is a descending scan of distinct snapshot_ids.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_mc_eligible_snapshot "
+        "ON mc_eligible_keys (snapshot_id DESC)"
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     # v1 is the initial snapshot-anchored schema. It has no step here because
     # db._DDL creates it in full on a fresh database and every existing
@@ -156,6 +195,9 @@ MIGRATIONS: tuple[Migration, ...] = (
                  "(ADR-046)", _v2_settlement_columns),
     Migration(3, "trades: transform_commissions, close_type, and the eight "
                  "entry-IV columns (ADR-044)", _v3_trades_columns),
+    Migration(4, "mc_eligible_keys: the Mission Control \"New\" registry, "
+                 "anchored on the snapshot rather than a browser tab (M4.3)",
+              _v4_mc_eligible_keys),
 )
 
 SCHEMA_VERSION = max(m.version for m in MIGRATIONS)
