@@ -796,6 +796,40 @@ def get_option_chain(db_path: str, snapshot_id: int) -> list:
         ).fetchall()
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# The window every history read shares
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# ANCHORED TO THE RECORD, NOT TO THE WALL CLOCK. These four reads used to
+# filter on `datetime('now', '-N days', 'utc')`, which is a rolling window
+# ending at the moment the question is asked. That is wrong for a price
+# history, and it fails in a way that looks like missing data:
+#
+# Chandan, 2026-09-05 — the Calendar Edge chart on "Today" showed only the
+# last few minutes of the session. The newest snapshot in the record was
+# 2026-09-04 20:01 UTC (16:01 ET, that day's close); the question was asked at
+# 2026-09-05 19:45 UTC, so the one-day window began at 2026-09-04 19:45 and
+# sliced off everything before 15:45 ET. The whole morning was inside the
+# database and outside the window. The later in the day it was looked at, the
+# more of the session disappeared — and after 24 hours the chart would have
+# been empty.
+#
+# The same arithmetic quietly cost a day on the longer windows: "5D" asked at
+# 21:24 UTC began at 21:24 on the fifth day back, which is after that session
+# had closed, so five days of history drew four.
+#
+# Anchoring to MAX(snapshot_timestamp) makes the window mean what the labels
+# say: N days of the RECORD, ending at the most recent thing in it. A weekend,
+# a holiday or a collector that was stopped no longer eats into the window.
+#
+# The 'utc' modifier is gone with it. `'now'` is already UTC in SQLite, and
+# 'utc' is for converting a LOCAL time — it was a no-op that read as though a
+# conversion were happening. Stored timestamps are naive UTC (ADR-038), and so
+# is the anchor now, so no conversion arises at all.
+_WINDOW_START = ("datetime((SELECT MAX(snapshot_timestamp) "
+                 "FROM snapshots WHERE status = 'COMPLETE'), ?)")
+
+
 def get_contract_iv_history(db_path: str, expiry_date: str, strike: float,
                               right: str, days: int = 30,
                               settlement: str | None = None) -> list:
@@ -830,7 +864,7 @@ def get_contract_iv_history(db_path: str, expiry_date: str, strike: float,
               AND o.right       = ?
               AND {contract.match_clause(expiry_date, settlement, rows="o", snaps="s")}
               AND s.status      = 'COMPLETE'
-              AND s.snapshot_timestamp >= datetime('now', ?, 'utc')
+              AND s.snapshot_timestamp >= {_WINDOW_START}
             ORDER BY s.snapshot_timestamp
             """,
             (expiry_date, strike, right, f"-{days} days")
@@ -868,7 +902,7 @@ def get_atm_iv_history(db_path: str, expiry: str,
             WHERE a.expiry_date = ?
               AND {match}
               AND s.status      = 'COMPLETE'
-              AND s.snapshot_timestamp >= datetime('now', ?, 'utc')
+              AND s.snapshot_timestamp >= {_WINDOW_START}
             ORDER BY s.snapshot_timestamp
             """,
             (expiry_date, f"-{days} days")
@@ -1139,7 +1173,7 @@ def get_diagonal_history(
                AND obp.expiry_date = ? AND obp.strike = ? AND obp.right = 'P'
                AND {obp_match}
             WHERE s.status = 'COMPLETE'
-              AND s.snapshot_timestamp >= datetime('now', ?, 'utc')
+              AND s.snapshot_timestamp >= {_WINDOW_START}
               AND COALESCE(ofc.mark, (ofc.bid + ofc.ask) / 2.0) IS NOT NULL
               AND COALESCE(obc.mark, (obc.bid + obc.ask) / 2.0) IS NOT NULL
               AND COALESCE(ofp.mark, (ofp.bid + ofp.ask) / 2.0) IS NOT NULL
@@ -1240,7 +1274,7 @@ def get_transform_mark_history(
                AND owp.expiry_date = ? AND owp.strike = ? AND owp.right = 'P'
                AND {owp_match}
             WHERE s.status = 'COMPLETE'
-              AND s.snapshot_timestamp >= datetime('now', ?, 'utc')
+              AND s.snapshot_timestamp >= {_WINDOW_START}
               AND COALESCE(ofc.mark, (ofc.bid + ofc.ask) / 2.0) IS NOT NULL
               AND COALESCE(obc.mark, (obc.bid + obc.ask) / 2.0) IS NOT NULL
               AND COALESCE(ofp.mark, (ofp.bid + ofp.ask) / 2.0) IS NOT NULL

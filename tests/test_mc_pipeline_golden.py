@@ -50,6 +50,7 @@ from conftest import (
     MC_CALL_STRIKE,
     MC_FRONT_EXPIRY,
     MC_PUT_STRIKE,
+    anchor_record,
     make_atm_iv_history,
     make_transform_history,
 )
@@ -689,6 +690,11 @@ def test_atm_history_fallback_widens_the_window_then_keeps_one_day(pipe):
     db_path = pipe["_db"]
     make_atm_iv_history(db_path, [0.18, 0.19], end_minutes_ago=3 * 24 * 60)
     make_atm_iv_history(db_path, [0.20, 0.21], end_minutes_ago=2 * 24 * 60)
+    # A recent, empty snapshot: history windows are anchored to the newest
+    # snapshot in the record rather than to the wall clock, so without a "now"
+    # in the record the two-day-old session would be its own anchor and the
+    # one-day window would not be empty — the precondition this test needs.
+    anchor_record(db_path)
 
     assert pipe["_load_atm_hist"](MC_FRONT_EXPIRY, 1).empty, "fixture precondition"
 
