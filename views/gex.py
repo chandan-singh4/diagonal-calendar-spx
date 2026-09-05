@@ -349,61 +349,23 @@ def _draw_headline(totals: dict) -> None:
 
 def _draw_strike_panels(ctx: ViewContext, shown: pd.DataFrame,
                         view: str, expiry: str | None, stack: bool) -> None:
-    '''Everything read against the strike axis, in one stack.
+    """Everything read against the strike axis, in one stack.
 
-    Volume, open interest and the overnight change in open interest were three
-    separate cards with three separate strike axes, and comparing a bar in one
-    against a bar in another meant scrolling and trusting your memory of where
-    7,750 sat. They share an axis now, so the comparison is vertical and the
-    reader does nothing to make it.
+    Volume and open interest share an axis so a bar in one can be read straight
+    down against the same strike in the other, with no scrolling and no
+    remembering where 7,750 sat.
 
-    The order is deliberate: VOLUME first because it is the only one of the
-    three that moves while you watch, then the OPEN INTEREST it will settle
-    into tonight, then the CHANGE in that count - cause above effect, top to
-    bottom.
-    '''
-    prior = ctx.load_prior_session_oi(ctx.session_date, expiry)
-    change = _oi_change_frame(shown, prior)
+    VOLUME sits above OPEN INTEREST because it is the one that moves while you
+    watch, and the question reads downward: did today's trading stick? The two
+    are different clocks — volume is today, open interest is the count
+    published after the last close — and the caption under the chart says so.
+    Deliberately NOT in the headings: a parenthetical on every title is read
+    once and then becomes noise on every render after.
+    """
     fig = _strike_figure(shown, ctx.chain_df, ctx.spx_price, view, expiry,
-                         stack, ctx.snapshot_id, _prior_fingerprint(prior),
-                         _change=change)
+                         stack, ctx.snapshot_id)
     with st.container(key="chartcard_gex"):
         st.plotly_chart(fig, use_container_width=True)
-        if change is None:
-            st.info(
-                "No previous session to compare open interest against, so the "
-                "change panel is not drawn — this is the first collected day, "
-                "or the record has a gap before it."
-            )
-
-
-def _oi_change_frame(shown: pd.DataFrame,
-                     prior: pd.DataFrame) -> pd.DataFrame | None:
-    '''The overnight change per strike, or None when there is none to draw.
-
-    None and an all-zero frame are different answers and are kept different:
-    None means no previous session exists to subtract, which is a gap in the
-    record and gets said out loud. An empty frame after filtering means the
-    count genuinely did not move, which is a reading.
-    '''
-    if prior is None or prior.empty:
-        return None
-    change = gex.oi_change(shown, prior)
-    return change[(change["call_oi_change"] != 0)
-                  | (change["put_oi_change"] != 0)]
-
-
-def _prior_fingerprint(prior: pd.DataFrame) -> int:
-    '''A cache-key stand-in for the prior frame, which is passed unhashed.
-
-    `_change` rides in under a leading underscore so Streamlit skips hashing a
-    wide frame, and an unhashed argument is NOT part of the key. Without this
-    the figure would be keyed on today's snapshot alone and would go on serving
-    the old delta panel after the overnight count landed.
-    '''
-    if prior is None or prior.empty:
-        return 0
-    return int(prior["call_oi"].sum() + prior["put_oi"].sum())
 
 
 # MEMOISED FIGURES. Building these is the bulk of what a click on this tab
@@ -419,20 +381,13 @@ def _prior_fingerprint(prior: pd.DataFrame) -> int:
 @st.cache_data(show_spinner=False, max_entries=16)
 def _strike_figure(_shown: pd.DataFrame, _chain: pd.DataFrame, spot: float,
                    view: str, expiry: str | None, stack: bool,
-                   snapshot_id: int, prior_fingerprint: int,
-                   _change: pd.DataFrame | None = None):
+                   snapshot_id: int):
     shown, ctx_chain = _shown, _chain
-    delta_row = 4 if _change is not None and not _change.empty else None
-    rows = 4 if delta_row else 3
     fig = make_subplots(
-        rows=rows, cols=1, shared_xaxes=True, vertical_spacing=0.10,
-        row_heights=([0.40, 0.20, 0.20, 0.20] if delta_row
-                     else [0.48, 0.26, 0.26]),
-        specs=[[{"secondary_y": True}]] + [[{}]] * (rows - 1),
-        subplot_titles=("Gamma Exposure", "Volume (today, still moving)",
-                        "Open Interest (as of last night's close)")
-                       + (("Change in Open Interest (overnight)",)
-                          if delta_row else ()),
+        rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.14,
+        row_heights=[0.48, 0.26, 0.26],
+        specs=[[{"secondary_y": True}], [{}], [{}]],
+        subplot_titles=("Gamma Exposure", "Volume", "Open Interest"),
     )
 
     # ── Panel 1, background: the day's volume as translucent fills ───────────
@@ -490,20 +445,7 @@ def _strike_figure(_shown: pd.DataFrame, _chain: pd.DataFrame, spot: float,
     _add_bar(fig, shown["strike"], put_sign * shown["put_oi"], _PUT, 3,
              "Strike %{x:,.0f}<br>Put OI %{customdata:,.0f}<extra></extra>",
              custom=shown["put_oi"])
-    if delta_row:
-        # The delta panel keeps puts pointing DOWN whatever the mirror toggle
-        # says. Up and down here already mean opened and closed, which is the
-        # whole reading; borrowing them for calls-versus-puts would give this
-        # one axis a second meaning and neither would survive it.
-        _add_bar(fig, _change["strike"], _change["call_oi_change"], _CALL,
-                 delta_row,
-                 "Strike %{x:,.0f}<br>Call OI change %{y:+,.0f}<extra></extra>")
-        _add_bar(fig, _change["strike"], -_change["put_oi_change"], _PUT,
-                 delta_row,
-                 "Strike %{x:,.0f}<br>Put OI change %{customdata:+,.0f}"
-                 "<extra></extra>", custom=_change["put_oi_change"])
-
-    for row in range(1, rows + 1):
+    for row in (1, 2, 3):
         fig.add_vline(x=spot,
                       line=dict(color="#8fa9c4", width=1, dash="dot"),
                       row=row, col=1)
@@ -557,10 +499,7 @@ def _strike_figure(_shown: pd.DataFrame, _chain: pd.DataFrame, spot: float,
                      zerolinecolor="#3c5570", **_money_ticks(vol_side, ""))
     fig.update_yaxes(title_text=None, row=3, col=1, zeroline=True,
                      zerolinecolor="#3c5570", **_money_ticks(oi_side, ""))
-    if delta_row:
-        both = pd.concat([_change["call_oi_change"], -_change["put_oi_change"]])
-        fig.update_yaxes(title_text=None, row=delta_row, col=1, zeroline=True,
-                         zerolinecolor="#3c5570", **_money_ticks(both, ""))
+
 
     # Strike labels on EVERY panel, not only the bottom one: shared_xaxes
     # hides them on the upper rows, which leaves the gamma panel — the one
@@ -577,9 +516,9 @@ def _strike_figure(_shown: pd.DataFrame, _chain: pd.DataFrame, spot: float,
     fig.update_xaxes(showticklabels=True, ticks="outside", ticklen=4,
                      tickcolor=_GRID, tickangle=0, dtick=step,
                      tickformat="d")
-    fig.update_xaxes(title_text=None, row=rows, col=1)
+    fig.update_xaxes(title_text=None, row=3, col=1)
     fig.update_layout(barmode="relative", bargap=0.15)
-    _dark(fig, 1180 if delta_row else 940)
+    _dark(fig, 940)
     return fig
 
 
@@ -808,16 +747,13 @@ def _draw_caption(totals: dict, expiry: str | None,
         "they overlap. It is measured on the right-hand scale, not the left. "
         "In the two lower panels puts are drawn downward so the two sides can "
         "be compared at a glance — hovering shows the real, positive count.",
-        "**The three lower panels are three different clocks, stacked on "
+        "**The two lower panels are two different clocks, stacked on "
         "purpose.** *Volume* is today, counted so far, and it is still "
         "growing while you look at it. *Open Interest* is how many contracts "
         "were still alive at the close of the last completed session — the "
-        "exchange counts them once, overnight, so this number does not move "
-        "during the day no matter how much trades. *Change in Open Interest* "
-        "is that count minus the one before it, so it is the overnight step: "
-        "bars up mean contracts were opened, bars down mean they were closed. "
-        "Today's trading has not reached the lower two panels yet; it arrives "
-        "tonight.",
+        "exchange counts them once, overnight, so that number does not move "
+        "during the day no matter how much trades. Today's trading has not "
+        "reached the open interest panel yet; it arrives tonight.",
         "**Ratio and Sentiment describe only the bars you can see**, so they "
         "move if the strike range changes. Sentiment is the percentage of "
         "the price levels shown that have positive gamma. Ratio is the "
