@@ -137,3 +137,48 @@ affected by this and is the one to trust.
 
 The browser-side caveat at the top of this document still stands: none of this
 measures paint time.
+
+---
+
+# The flicker (reported by Chandan, 2026-09-05, after the fixes above)
+
+> *"when I navigate from one tab to another, I see the flicker or the refresh
+> on the page"*
+
+**Cause: every tab click ran the whole script twice.** Confirmed by counting
+script executions per click — two, every time. The page was built, discarded,
+and built again, and the discard is what showed as a flash.
+
+The nav is a button row rather than `st.tabs`, so a Mission Control card can
+jump straight to a pre-scoped tab. The buttons sit *below* the controls bar,
+so by the time a click was noticed the bar had already been drawn for the tab
+being left. The workaround was `st.rerun()` immediately after the click, which
+bought correctness at the price of a second full render.
+
+**Fix:** the click is now read at the top of the run from the button's own
+state — a button's press is visible in `session_state` before the widget is
+recreated, verified in isolation rather than assumed — so the active tab is
+settled before anything draws. The buttons only draw now; they decide nothing.
+One run per click, the highlight correct on the same run, and the controls bar
+still correctly hidden on Gamma Exposure.
+
+The three remaining `st.rerun()` calls in `views/` and `ui/locks.py` are
+untouched and genuine: they set `pending_` values the controls bar must
+promote before its widgets exist, which can only happen on a fresh run.
+
+Guarded by tests/test_tab_navigation.py, proved by restoring the old shape.
+
+## A caveat on every absolute number in this document
+
+Re-measuring at 14:50 the same day gave figures roughly three times those
+taken at 14:00 — `_load_intraday_strike_metrics` went from 0.65s to 1.97s —
+with the code unchanged and the same snapshot. The intraday tables grow
+through the trading session, so query cost grows with it.
+
+**So absolute timings here are only comparable within a single run.** The
+before/after pairs above were each taken minutes apart and are sound; a figure
+from one section should not be compared with one from another. The idle test
+was re-run under the later, slower conditions and still holds: Gamma Exposure
+3.30s on first visit, 0.437s returning after 65 seconds idle.
+
+That intraday growth is itself worth knowing, and is filed as ENH-013.

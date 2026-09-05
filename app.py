@@ -285,6 +285,66 @@ header.render(
 header.render_attention_strip(MC)
 header.render_token_banner(_token_age, sys.executable)
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB SELECTION — resolved HERE, before anything is drawn.
+#
+# WHY THIS IS NOT NEXT TO THE NAV BAR, which is where it reads more naturally
+# and where it lived until 2026-09-05. The nav sits below the controls bar on
+# the page, so a click used to be handled below too — and by then the controls
+# bar had already been drawn for the OLD tab. The fix was an st.rerun() right
+# after the click, which meant EVERY tab click ran this whole script twice:
+# once to notice the click, then a full discard and redraw. That double draw
+# is what showed up as a flicker on every navigation (Chandan, 2026-09-05).
+#
+# A button's click is readable from session_state at the top of the run that
+# follows it, before the widget itself is created — verified, not assumed —
+# so the choice can be settled first and the page drawn once, correctly. The
+# buttons below now only DRAW; they no longer decide anything.
+#
+# The ordering constraint that forced the old shape is real and still applies:
+# the Gamma Exposure tab hides the controls bar, and that decision is made
+# further down but above the nav. It now reads an active_tab that is already
+# final.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _strike_with_history(ctx) -> None:
+    """Strike Detail with the Historical Statistics section beneath it.
+
+    They were two tabs and are now one. Both answer questions about the SAME
+    pair of expiries the controls bar has selected — one at today's strikes,
+    one over the past twenty days — and a reader comparing them was clicking
+    between two tabs to hold both in their head.
+
+    Composed HERE rather than by having one view import the other: views/ may
+    not import views/ (test_layering), and for a good reason — a view that
+    calls another is a view you cannot render or reason about alone. This
+    function is the page deciding what goes on a page, which is app.py's job.
+    """
+    view_strike.render(ctx)
+    st.divider()
+    view_historical.render(ctx)
+
+
+_TABS = [
+    ("scanner",  "🔭  Scanner",          view_scanner.render),
+    ("entry",    "📊  Entry Analysis",   view_entry.render),
+    ("edge",     "📈  Calendar Edge",    view_edge.render),
+    ("strike",   "🎯  Strike Detail",    _strike_with_history),
+    ("gex",      "🧲  Gamma Exposure",   view_gex.render),
+    ("research", "🔬  Research",         view_research.render),
+]
+
+if "active_tab" not in st.session_state:
+    st.session_state["active_tab"] = "scanner"
+
+# The click that happened in the browser since the last run, applied before a
+# single element is drawn. Streamlit clears a button's value after the run it
+# belongs to, so this is true exactly once per click.
+for _tkey, _, _ in _TABS:
+    if st.session_state.get(f"nav_{_tkey}"):
+        st.session_state["active_tab"] = _tkey
+        break
 # ═══════════════════════════════════════════════════════════════════════════════
 # PERSISTENT CONTROLS BAR — front/back expiry + put/call strike
 # Always visible above the tabs so every section can access these values.
@@ -410,47 +470,19 @@ VIEW_CTX = ViewContext(
 # comments sixty lines below, so adding or renaming a tab meant editing two
 # places that could not see each other. Nothing is dispatched that is not in
 # this list, and nothing in this list goes undispatched.
-def _strike_with_history(ctx) -> None:
-    """Strike Detail with the Historical Statistics section beneath it.
-
-    They were two tabs and are now one. Both answer questions about the SAME
-    pair of expiries the controls bar has selected — one at today's strikes,
-    one over the past twenty days — and a reader comparing them was clicking
-    between two tabs to hold both in their head.
-
-    Composed HERE rather than by having one view import the other: views/ may
-    not import views/ (test_layering), and for a good reason — a view that
-    calls another is a view you cannot render or reason about alone. This
-    function is the page deciding what goes on a page, which is app.py's job.
-    """
-    view_strike.render(ctx)
-    st.divider()
-    view_historical.render(ctx)
-
-
-_TABS = [
-    ("scanner",  "🔭  Scanner",          view_scanner.render),
-    ("entry",    "📊  Entry Analysis",   view_entry.render),
-    ("edge",     "📈  Calendar Edge",    view_edge.render),
-    ("strike",   "🎯  Strike Detail",    _strike_with_history),
-    ("gex",      "🧲  Gamma Exposure",   view_gex.render),
-    ("research", "🔬  Research",         view_research.render),
-]
-
-if "active_tab" not in st.session_state:
-    st.session_state["active_tab"] = "scanner"
-
 with st.container(key="topnav"):
     _nav_cols = st.columns(len(_TABS))
     for (_tkey, _tlabel, _), _tcol in zip(_TABS, _nav_cols):
         with _tcol:
+            # Draws only. The click is read at the top of the NEXT run, by
+            # the loop under "TAB SELECTION" above — which is why there is no
+            # st.rerun() here any more, and why the highlight below is already
+            # correct rather than one click behind.
             _is_active = st.session_state["active_tab"] == _tkey
-            if st.button(
+            st.button(
                 _tlabel, key=f"nav_{_tkey}", use_container_width=True,
                 type="primary" if _is_active else "secondary",
-            ):
-                st.session_state["active_tab"] = _tkey
-                st.rerun()
+            )
 
 # Exactly one tab body runs per script execution — the custom nav means the
 # others are not merely hidden, they are never executed.
