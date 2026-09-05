@@ -195,6 +195,78 @@ def _dark(fig, height: int, *, legend: bool = False) -> None:
             note.font.update(color=_INK, size=12)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Remembering which expiry is on screen
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# THE PROBLEM. Streamlit discards a widget's state when the widget is not
+# drawn, and the custom nav means the other five tabs never draw this one. So
+# leaving the tab erased the selection, and coming back showed the whole chain
+# again — as did a data refresh taken while another tab was open. Verified
+# 2026-09-05: the key is gone from session_state entirely while away.
+#
+# THE FIX. A second key that is NOT a widget key, so nothing garbage-collects
+# it. The widget stays the source of truth while it exists; this remembers
+# what it last said, and puts it back when Streamlit has thrown it away.
+
+_EXPIRY_MEMORY = "gex_expiry_remembered"
+_ALL_EXPIRIES = "All expiries"
+
+
+def _default_expiry(expiries: list, dte_by_expiry: dict) -> str:
+    """0DTE, which is what this tab is usually opened to look at.
+
+    Gamma at zero days is the position that has to resolve today; it is the
+    reason to open this tab intraday at all, and defaulting to the whole board
+    meant selecting it by hand every single time (Chandan, 2026-09-05).
+
+    WHEN THERE IS NO 0DTE — a weekend, a holiday, or any session with no
+    expiry dated today — the nearest expiry is used rather than the whole
+    chain. That is a judgement, not a request: "the front contract" is the
+    nearest thing to what was asked for, and falling back to every expiry
+    added together would reintroduce the behaviour being fixed on exactly the
+    days it is least expected.
+
+    The third Friday lists two contracts (AM and PM settled) and both can be
+    0 DTE. `expiries` is already in contract.sort_key order, so the first is
+    taken and the choice is at least stable rather than arbitrary.
+    """
+    if not expiries:
+        return _ALL_EXPIRIES
+    # The nearest expiry IS the 0DTE one whenever the board has one, so there
+    # is no separate branch for it. There was, briefly; deleted because no
+    # test could tell the two apart, which is the definition of dead code.
+    # min() keeps the first of equal DTEs, which is what makes the duplicated
+    # third Friday stable.
+    return min(expiries, key=lambda e: dte_by_expiry.get(e, 10**6))
+
+
+def _restore_expiry_choice(options: list, expiries: list,
+                           dte_by_expiry: dict) -> None:
+    """Put the remembered expiry back, but never over a fresh choice.
+
+    ORDER MATTERS AND IS EASY TO GET WRONG. When the reader picks a new expiry,
+    Streamlit has already written it into session_state before this script
+    runs. Assigning the remembered value unconditionally here would overwrite
+    that new pick with the previous one on every change, and the dropdown
+    would appear frozen. So the widget's own value wins whenever it is present
+    and still valid; this only fills a gap.
+
+    A remembered expiry that has since rolled off the board is not valid — it
+    is dropped and the default applies, which is what makes the first visit of
+    a new session show that day's 0DTE rather than yesterday's.
+    """
+    current = st.session_state.get("gex_expiry")
+    if current in options:
+        return
+
+    remembered = st.session_state.get(_EXPIRY_MEMORY)
+    st.session_state["gex_expiry"] = (
+        remembered if remembered in options
+        else _default_expiry(expiries, dte_by_expiry)
+    )
+
+
 def render(ctx: ViewContext) -> None:
     """Draw the tab."""
     st.markdown(
@@ -226,12 +298,17 @@ def render(ctx: ViewContext) -> None:
 
     # Capped to the same width as the charts below, so the control row
     # and the panels it drives share one left and right edge.
+    # Settled BEFORE the widget is created, because that is the only moment at
+    # which a value can be supplied to it (see _restore_expiry_choice).
+    _expiry_options = [_ALL_EXPIRIES, *expiries]
+    _restore_expiry_choice(_expiry_options, expiries, dte_by_expiry)
+
     with st.container(key="gexcontrols"):
         c1, c3 = st.columns([2, 2], vertical_alignment="bottom")
         with c1:
             choice = st.selectbox(
-                "Expiry", ["All expiries", *expiries], key="gex_expiry",
-                format_func=lambda e: (e if e == "All expiries"
+                "Expiry", _expiry_options, key="gex_expiry",
+                format_func=lambda e: (e if e == _ALL_EXPIRIES
                                        else fmt.exp_label(e, dte_by_expiry)),
                 help="All expiries is the whole-chain figure most GEX commentary "
                      "refers to. The third Friday appears twice because SPX lists "
@@ -254,7 +331,11 @@ def render(ctx: ViewContext) -> None:
     # on the first, no key exists yet and the default applies.
     side_mode = st.session_state.get("gex_side_mode") or _SIDE_MODES[0]
 
-    expiry = None if choice == "All expiries" else choice
+    # What to put back when Streamlit next discards the widget. Written after
+    # the widget has spoken, so it records what is actually on screen.
+    st.session_state[_EXPIRY_MEMORY] = choice
+
+    expiry = None if choice == _ALL_EXPIRIES else choice
     per_strike = gex.by_strike(chain, ctx.spx_price, expiry=expiry)
     if per_strike.empty:
         st.info("No strike in this selection carries gamma.")
