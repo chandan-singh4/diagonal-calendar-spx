@@ -21,6 +21,26 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# The environment the suite runs in
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.fixture(autouse=True)
+def _no_ambient_api_token(monkeypatch):
+    """No test inherits SPX_API_TOKEN from the developer's .env.
+
+    config.py calls load_dotenv() at import, so a real token in .env lands in
+    os.environ for the whole session. On 2026-09-05 that turned nine passing
+    API read tests into 401s — the code was unchanged and correct; the tests
+    had been silently depending on the machine they ran on.
+
+    Auth behaviour is still fully covered: tests/test_api_auth.py sets the
+    variable explicitly, which overrides this because an autouse fixture is
+    resolved before the fixtures a test names.
+    """
+    monkeypatch.delenv("SPX_API_TOKEN", raising=False)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Chain fixtures
 #
 # CONVENTION REMINDER (iv_engine docstring): IV is in PERCENTAGE form here —
