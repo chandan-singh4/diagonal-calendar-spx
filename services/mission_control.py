@@ -341,7 +341,7 @@ def _compute_mc_core(_chain_df: pd.DataFrame, spx_price: float,
     )
 
 def _build_non_atm_panel(non_atm_current: pd.DataFrame, registry: dict,
-                          dte_by_expiry: dict, lookback_days: int,
+                          dte_by_expiry: dict, window_start: str | None,
                           snapshot_ts: str, cap: int = _MC_HISTORY_CAP,
                           min_display: int = 6):
     """
@@ -371,9 +371,26 @@ def _build_non_atm_panel(non_atm_current: pd.DataFrame, registry: dict,
 
     Returns (capped_cards, in_window_total, fallback_used_count).
     """
+    # `window_start` arrives already resolved to the date of the Nth most
+    # recent SESSION ON RECORD — it is not computed here, and not derived from
+    # a day count. Subtracting a Timedelta made "20D" fifteen sessions on a
+    # Friday while the reader was told twenty (BUG-035); this panel and the
+    # charts beneath it carry one label, so they must mean one window.
+    #
+    # It is a parameter rather than a lookup because resolving it needs the
+    # database, and a panel that reads config.DB_PATH to decide its own window
+    # cannot be exercised without the real record beside it.
+    if window_start is not None and not isinstance(window_start, str):
+        # This argument used to be a day count, and pd.Timestamp accepts an
+        # int — as nanoseconds since 1970. A caller left on the old signature
+        # would therefore get a cutoff in 1970 and a panel that windowed
+        # nothing, silently and while looking entirely healthy.
+        raise TypeError(
+            f"window_start must be a date string, not {type(window_start).__name__}"
+        )
     try:
-        cutoff = pd.Timestamp(snapshot_ts) - pd.Timedelta(days=lookback_days)
-    except (ValueError, TypeError):
+        cutoff = pd.Timestamp(window_start) if window_start else None
+    except ValueError:
         cutoff = None
 
     current_lookup: dict[str, dict] = {}
@@ -498,7 +515,9 @@ def _build_non_atm_panel_cached(_non_atm_current: pd.DataFrame, _registry: dict,
     is_new onto the cards it gets back — which it does, immediately below.
     """
     return _build_non_atm_panel(_non_atm_current, _registry, _dte_by_expiry,
-                                 lookback_days, snapshot_ts)
+                                 db.session_window_start(config.DB_PATH,
+                                                         lookback_days),
+                                 snapshot_ts)
 
 
 def _run_mission_control(chain_df: pd.DataFrame, spx_price: float,

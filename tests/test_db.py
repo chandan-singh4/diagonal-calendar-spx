@@ -764,11 +764,13 @@ def test_latest_atm_iv_excludes_incomplete_snapshots(temp_db):
 
 def test_atm_iv_history_excludes_rows_older_than_the_window(temp_db):
     recent = add_snapshot(temp_db, ts_ago(days=2))
-    old = add_snapshot(temp_db, ts_ago(days=40))
+    for day in (3, 4):        # see the contract-IV equivalent: `days` counts
+        add_snapshot(temp_db, ts_ago(days=day))   # sessions on record, not
+    old = add_snapshot(temp_db, ts_ago(days=40))  # calendar days (BUG-035)
     db.insert_atm_iv_records(temp_db, [atm(recent, FRONT, 0.18)])
     db.insert_atm_iv_records(temp_db, [atm(old, FRONT, 0.99)])
 
-    rows = db.get_atm_iv_history(temp_db, FRONT, days=30)
+    rows = db.get_atm_iv_history(temp_db, FRONT, days=3)
     assert [r["atm_avg_iv"] for r in rows] == [0.18]
 
 
@@ -793,23 +795,29 @@ def test_contract_iv_history_matches_one_exact_contract(temp_db):
 
 
 def test_contract_iv_history_excludes_rows_older_than_the_window(temp_db):
-    """Rewritten 2026-09-05. The window is measured from the newest snapshot
-    in the RECORD, not from now, so a lone 40-day-old snapshot is now inside
-    its own 30-day window rather than outside a window anchored to today.
+    """Rewritten twice, 2026-09-05, as the meaning of the window was corrected.
 
-    The behaviour being checked is unchanged and is still the real one: a row
-    older than the window is excluded. It now needs two snapshots to state,
-    because one snapshot is always its own anchor."""
+    First: the window is measured from the newest snapshot in the RECORD, not
+    from now (BUG-033), so it takes two snapshots to state — one snapshot is
+    always its own anchor. Then: `days` counts SESSIONS ON RECORD, not calendar
+    days (BUG-035), so "outside the window" requires more sessions to exist
+    than the window asks for. A 40-day-old row in a record holding only two
+    sessions is legitimately one of the last two.
+
+    The behaviour being checked has not been relaxed and is still the real one:
+    a row older than the window is excluded."""
     recent = add_snapshot(temp_db, ts_ago(days=1))
+    for day in (2, 3):                      # fills the window out to 3 sessions
+        add_snapshot(temp_db, ts_ago(days=day))
     old = add_snapshot(temp_db, ts_ago(days=40))
     db.insert_option_rows(temp_db, [opt(recent, FRONT, CALL_STRIKE, "C", iv=0.11)])
     db.insert_option_rows(temp_db, [opt(old, FRONT, CALL_STRIKE, "C", iv=0.99)])
 
     ivs = [r["iv"] for r in
-           db.get_contract_iv_history(temp_db, FRONT, CALL_STRIKE, "C", days=30)]
+           db.get_contract_iv_history(temp_db, FRONT, CALL_STRIKE, "C", days=3)]
 
     assert 0.11 in ivs, "the recent row must be inside the window"
-    assert 0.99 not in ivs, "the 40-day-old row must be outside a 30-day window"
+    assert 0.99 not in ivs, "the 4th session back must be outside a 3-session window"
 
 
 def test_contract_iv_history_excludes_incomplete_snapshots(temp_db):
@@ -1181,6 +1189,8 @@ def test_diagonal_history_excludes_snapshots_outside_the_window(temp_db):
     """Rewritten 2026-09-05 — see the note on the contract-IV equivalent
     above. Two snapshots, because the window is anchored to the newest one."""
     recent = add_snapshot(temp_db, ts_ago(days=1))
+    for day in (2, 3):        # `days` counts sessions on record (BUG-035), so
+        add_snapshot(temp_db, ts_ago(days=day))   # the window needs filling
     old = add_snapshot(temp_db, ts_ago(days=120))
     for sid in (recent, old):
         db.insert_option_rows(temp_db, four_legs(sid))
@@ -1188,7 +1198,7 @@ def test_diagonal_history_excludes_snapshots_outside_the_window(temp_db):
                                  [atm(sid, FRONT, 0.20), atm(sid, BACK, 0.10)])
 
     rows = db.get_diagonal_history(temp_db, FRONT, BACK,
-                                   CALL_STRIKE, PUT_STRIKE, days=90)
+                                   CALL_STRIKE, PUT_STRIKE, days=3)
 
     assert len(rows) == 1, "only the snapshot inside the window may be returned"
 

@@ -826,8 +826,67 @@ def get_option_chain(db_path: str, snapshot_id: int) -> list:
 # 'utc' is for converting a LOCAL time — it was a no-op that read as though a
 # conversion were happening. Stored timestamps are naive UTC (ADR-038), and so
 # is the anchor now, so no conversion arises at all.
-_WINDOW_START = ("datetime((SELECT MAX(snapshot_timestamp) "
-                 "FROM snapshots WHERE status = 'COMPLETE'), ?)")
+# The start of a history window, counted in SESSIONS ON RECORD — not in
+# calendar days.
+#
+# WHY NOT `datetime(anchor, '-N days')`. The page offers these windows as
+# "Today / 5D / 10D / 20D", and a person reading "20D" means twenty trading
+# days. Calendar arithmetic does not: twenty calendar days back from a Friday
+# crosses three weekends and yields fifteen sessions, and ten gives eight. The
+# label and the chart disagreed, which is how BUG-035 was noticed. 5D was
+# right only by coincidence of the weekday — five calendar days back from a
+# Friday clears exactly one weekend — which is why it looked fine while 10D
+# and 20D did not.
+#
+# So the bound is the Nth most recent recorded session, and a public holiday
+# or a day the collector was down is not a session and does not consume one of
+# the N. That is the reading under which "20D" means twenty days of data.
+#
+# WHY THE '-5 hours' SHIFT. A session has to be grouped by its NEW YORK date,
+# not its UTC one. Bare `date(snapshot_timestamp)` splits an evening at 20:00
+# New York, because 20:05 New York is already tomorrow in UTC — the exact
+# fault tests/test_query_timestamps.py pins, and one that regular market hours
+# would never have exposed. Shifting back five hours moves the date boundary
+# to 00:00 EST / 01:00 EDT New York, so every timestamp from 01:00 New York
+# onward carries its own trading date under both offsets. It is a fixed shift
+# rather than a real zone conversion because SQLite has no timezone table; the
+# hour it gets wrong under EDT (00:00-01:00 New York) is one in which nothing
+# is ever collected.
+_SESSION_DATE = "date(datetime({col}, '-5 hours'))"
+
+# The whole comparison, not just the bound: both sides must be the same
+# expression or the shift above is applied to one end of the window only.
+_WINDOW_CLAUSE = (
+    _SESSION_DATE.format(col="s.snapshot_timestamp") + " >= "
+    "(SELECT MIN(d) FROM (SELECT DISTINCT "
+    + _SESSION_DATE.format(col="snapshot_timestamp") + " AS d "
+    "FROM snapshots WHERE status = 'COMPLETE' ORDER BY d DESC LIMIT ?))"
+)
+
+
+def session_window_start(db_path: str, sessions: int) -> str | None:
+    """The date of the Nth most recent recorded session, or None if none exist.
+
+    The Python-side twin of _WINDOW_START above, for callers that filter in
+    pandas rather than in SQL — Mission Control's registry window is the one
+    that matters, because it reads timestamps out of a JSON file that SQL
+    never sees. It existing separately is the risk: if the two ever disagree
+    about what "20D" means, the panel and the charts below it are windowed
+    differently while sharing one label. tests/test_history_window.py pins
+    them to the same answer for that reason.
+    """
+    with get_conn(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT MIN(d) FROM (
+                SELECT DISTINCT date(datetime(snapshot_timestamp, '-5 hours')) AS d
+                FROM snapshots WHERE status = 'COMPLETE'
+                ORDER BY d DESC LIMIT ?
+            )
+            """,
+            (sessions,)
+        ).fetchone()
+    return row[0] if row and row[0] else None
 
 
 def get_contract_iv_history(db_path: str, expiry_date: str, strike: float,
@@ -864,10 +923,10 @@ def get_contract_iv_history(db_path: str, expiry_date: str, strike: float,
               AND o.right       = ?
               AND {contract.match_clause(expiry_date, settlement, rows="o", snaps="s")}
               AND s.status      = 'COMPLETE'
-              AND s.snapshot_timestamp >= {_WINDOW_START}
+              AND {_WINDOW_CLAUSE}
             ORDER BY s.snapshot_timestamp
             """,
-            (expiry_date, strike, right, f"-{days} days")
+            (expiry_date, strike, right, days)
         ).fetchall()
 
 
@@ -902,10 +961,10 @@ def get_atm_iv_history(db_path: str, expiry: str,
             WHERE a.expiry_date = ?
               AND {match}
               AND s.status      = 'COMPLETE'
-              AND s.snapshot_timestamp >= {_WINDOW_START}
+              AND {_WINDOW_CLAUSE}
             ORDER BY s.snapshot_timestamp
             """,
-            (expiry_date, f"-{days} days")
+            (expiry_date, days)
         ).fetchall()
 
 
@@ -1173,7 +1232,7 @@ def get_diagonal_history(
                AND obp.expiry_date = ? AND obp.strike = ? AND obp.right = 'P'
                AND {obp_match}
             WHERE s.status = 'COMPLETE'
-              AND s.snapshot_timestamp >= {_WINDOW_START}
+              AND {_WINDOW_CLAUSE}
               AND COALESCE(ofc.mark, (ofc.bid + ofc.ask) / 2.0) IS NOT NULL
               AND COALESCE(obc.mark, (obc.bid + obc.ask) / 2.0) IS NOT NULL
               AND COALESCE(ofp.mark, (ofp.bid + ofp.ask) / 2.0) IS NOT NULL
@@ -1189,7 +1248,7 @@ def get_diagonal_history(
                 back_date,  float(call_strike),
                 front_date, float(put_strike),
                 back_date,  float(put_strike),
-                f"-{days} days",
+                days,
             ),
         ).fetchall()
 
@@ -1274,7 +1333,7 @@ def get_transform_mark_history(
                AND owp.expiry_date = ? AND owp.strike = ? AND owp.right = 'P'
                AND {owp_match}
             WHERE s.status = 'COMPLETE'
-              AND s.snapshot_timestamp >= {_WINDOW_START}
+              AND {_WINDOW_CLAUSE}
               AND COALESCE(ofc.mark, (ofc.bid + ofc.ask) / 2.0) IS NOT NULL
               AND COALESCE(obc.mark, (obc.bid + obc.ask) / 2.0) IS NOT NULL
               AND COALESCE(ofp.mark, (ofp.bid + ofp.ask) / 2.0) IS NOT NULL
@@ -1296,7 +1355,7 @@ def get_transform_mark_history(
                 back_date,  float(put_strike),
                 front_date, float(call_strike) + 5,
                 front_date, float(put_strike)  - 5,
-                f"-{days} days",
+                days,
             ),
         ).fetchall()
 

@@ -164,4 +164,107 @@ def test_every_history_read_shares_the_window():
         "a history window measured from the wall clock will blank a chart as "
         f"the day goes on: {offenders}"
     )
-    assert sum("{_WINDOW_START}" in ln for ln in code) == 4
+    assert sum("{_WINDOW_CLAUSE}" in ln for ln in code) == 4
+
+    # And none of them may group sessions on the bare UTC date: that splits a
+    # New York evening at 20:00 (BUG-035's second half). The shared clause
+    # applies the '-5 hours' shift; a read spelling the grouping out for itself
+    # would lose it.
+    unshifted = [ln.strip() for ln in code
+                 if "date(snapshot_timestamp)" in ln]
+    assert unshifted == [], (
+        f"a session grouped by its UTC date is cut at 20:00 New York: {unshifted}"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BUG-035 — "20D" has to mean twenty days of data
+#
+# WHAT WENT WRONG (Chandan, 2026-09-05, on the same chart). With the window
+# anchored correctly, the counting was still calendar arithmetic. Measured on
+# the real record that day: "10D" drew 8 sessions and "20D" drew 15, because
+# twenty calendar days back from a Friday crosses three weekends.
+#
+# "5D" was right, and that is the trap — five calendar days back from a Friday
+# clears exactly one weekend and lands on 5 sessions. It agreed by coincidence
+# of the weekday, so a check written only against a Friday proves nothing. The
+# record below therefore spans weekends AND a holiday, and every count below
+# differs from what calendar arithmetic would give.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Three trading weeks. 2026-01-19 is absent — a holiday, or a collector that
+# was down; either way it is not a session and must not consume one of the N.
+WEEKS = [
+    "2026-01-05", "2026-01-06", "2026-01-07", "2026-01-08", "2026-01-09",
+    "2026-01-12", "2026-01-13", "2026-01-14", "2026-01-15", "2026-01-16",
+                  "2026-01-20", "2026-01-21", "2026-01-22", "2026-01-23",
+]
+
+
+@pytest.fixture
+def weeks_db(temp_db) -> str:
+    global SESSIONS
+    original, SESSIONS = SESSIONS, WEEKS
+    try:
+        _record(temp_db)
+    finally:
+        SESSIONS = original
+    return temp_db
+
+
+def _sessions_returned(path: str, days: int) -> list[str]:
+    rows = db.get_atm_iv_history(path, EXPIRY, days=days)
+    return sorted({r["snapshot_timestamp"][:10] for r in rows})
+
+
+@pytest.mark.parametrize("days", [1, 5, 10])
+def test_a_window_of_n_returns_exactly_n_sessions(weeks_db, days):
+    """The whole point. Not "about N", and not "N minus the weekends"."""
+    assert len(_sessions_returned(weeks_db, days)) == days
+
+
+def test_the_window_reaches_back_over_weekends(weeks_db):
+    """Calendar arithmetic reached back to 2026-01-13 and found 8 sessions;
+    the two weekends and the holiday inside the window were spent as if they
+    were trading days. Counting sessions reaches four days further, to
+    2026-01-09, which is where the tenth one back actually is."""
+    assert _sessions_returned(weeks_db, 10)[0] == "2026-01-09"
+
+
+def test_five_days_is_not_right_only_by_the_weekday(weeks_db):
+    """The newest session here is a Friday, exactly as on the day the bug was
+    reported. Calendar arithmetic gives 4 sessions from this record because a
+    holiday sits in the window; it gave 5 from the real one because none did.
+    A window that counts sessions is right in both."""
+    assert _sessions_returned(weeks_db, 5) == [
+        "2026-01-16", "2026-01-20", "2026-01-21", "2026-01-22", "2026-01-23",
+    ]
+
+
+def test_a_missing_session_does_not_consume_one_of_the_n(weeks_db):
+    """2026-01-19 is not in the record. Asking for 4 must reach past it to a
+    fourth day that exists, rather than returning three and a hole."""
+    assert _sessions_returned(weeks_db, 4) == [
+        "2026-01-20", "2026-01-21", "2026-01-22", "2026-01-23",
+    ]
+
+
+def test_asking_for_more_sessions_than_exist_returns_all_of_them(weeks_db):
+    """No error and no empty answer: a young record simply has less to show."""
+    assert len(_sessions_returned(weeks_db, 90)) == len(WEEKS)
+
+
+def test_the_python_window_agrees_with_the_sql_one(weeks_db):
+    """db.session_window_start is what Mission Control filters its registry on,
+    while the charts below it filter in SQL. They carry the same label, so a
+    disagreement would window the panel and the chart differently while telling
+    the reader one number."""
+    for days in (1, 4, 5, 10, 90):
+        assert db.session_window_start(weeks_db, days) == \
+            _sessions_returned(weeks_db, days)[0]
+
+
+def test_an_empty_record_has_no_window_start(temp_db):
+    """Before the first snapshot there is no Nth session. None, not a crash and
+    not a date invented from the clock."""
+    assert db.session_window_start(temp_db, 5) is None

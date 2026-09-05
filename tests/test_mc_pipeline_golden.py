@@ -61,6 +61,9 @@ from core.charts import to_display_time
 pytestmark = pytest.mark.integration
 
 SNAP_TS = "2026-07-23 19:59:32"
+# A window start early enough that nothing in these fixtures falls outside
+# it — for the tests whose subject is ranking or formatting, not windowing.
+WIDE_WINDOW = "2026-01-01"
 
 
 @pytest.fixture
@@ -367,7 +370,7 @@ def test_the_panel_labels_cards_with_the_table_it_was_handed(pipe):
     dte = {MC_FRONT_EXPIRY: 7, MC_BACK_EXPIRY: 21}
 
     cards, _, _ = pipe["_build_non_atm_panel"](
-        _combos([(5800.0, 6200.0, 7.0)]), registry, dte, 30, SNAP_TS
+        _combos([(5800.0, 6200.0, 7.0)]), registry, dte, WIDE_WINDOW, SNAP_TS
     )
 
     assert cards, "no cards to inspect"
@@ -387,7 +390,7 @@ def test_panel_puts_live_above_historical(pipe):
     current = _combos([(5800.0, 6200.0, 7.0)])   # only this one is live now
 
     cards, in_window, fallback = pipe["_build_non_atm_panel"](
-        current, registry, {}, 30, SNAP_TS
+        current, registry, {}, WIDE_WINDOW, SNAP_TS
     )
     assert cards[0]["put_strike"] == 5800.0
     assert cards[0]["is_live"] is True
@@ -407,7 +410,7 @@ def test_live_cards_rank_on_current_gap_historical_on_peak(pipe):
                                 last_seen="2026-07-23 11:00:00")),
     )
     cards, _, _ = pipe["_build_non_atm_panel"](
-        pd.DataFrame(), registry, {}, 30, SNAP_TS
+        pd.DataFrame(), registry, {}, WIDE_WINDOW, SNAP_TS
     )
     assert [c["put_strike"] for c in cards] == [5900.0, 5800.0]
     assert cards[0]["gap"] == 50.0
@@ -424,7 +427,7 @@ def test_panel_breaks_gap_ties_on_hit_count(pipe):
                                 last_seen="2026-07-23 10:00:00")),
     )
     cards, _, _ = pipe["_build_non_atm_panel"](
-        pd.DataFrame(), registry, {}, 30, SNAP_TS
+        pd.DataFrame(), registry, {}, WIDE_WINDOW, SNAP_TS
     )
     assert cards[0]["hit_count"] == 12
 
@@ -443,7 +446,7 @@ def test_a_gap_of_exactly_the_threshold_counts_as_live(pipe):
     )
     current = _combos([(5900.0, 6100.0, 5.0)])
     cards, _, _ = pipe["_build_non_atm_panel"](
-        current, registry, {}, 30, SNAP_TS
+        current, registry, {}, WIDE_WINDOW, SNAP_TS
     )
     assert cards[0]["is_live"] is True
     assert cards[0]["current_gap"] == 5.0
@@ -456,8 +459,12 @@ def test_panel_excludes_entries_older_than_the_lookback(pipe):
         (5800.0, 6200.0, _entry(5800.0, 6200.0, max_gap=8.0, hits=1,
                                 last_seen="2026-06-01 10:00:00")),
     )
+    # The 4th argument is the window START — the date of the Nth most recent
+    # SESSION ON RECORD, resolved by the caller (BUG-035). It used to be a day
+    # count that this function turned into a Timedelta, which made "20D" mean
+    # fifteen sessions on a Friday.
     cards, in_window, _ = pipe["_build_non_atm_panel"](
-        pd.DataFrame(), registry, {}, 1, SNAP_TS
+        pd.DataFrame(), registry, {}, "2026-07-23", SNAP_TS
     )
     assert in_window == 1
     assert cards[0]["put_strike"] == 5900.0
@@ -478,9 +485,9 @@ def test_out_of_window_fallback_is_flagged_not_silent(pipe):
         for i in range(4)
     ])
     cards, in_window, fallback = pipe["_build_non_atm_panel"](
-        pd.DataFrame(), registry, {}, 1, SNAP_TS, min_display=6
+        pd.DataFrame(), registry, {}, "2026-07-23", SNAP_TS, min_display=6
     )
-    assert in_window == 0, "nothing is inside a 1-day window"
+    assert in_window == 0, "nothing is inside a window starting 2026-07-23"
     assert fallback == 4
     assert all(c["outside_lookback"] is True for c in cards)
 
@@ -489,7 +496,7 @@ def test_a_truly_empty_registry_gives_an_empty_panel(pipe):
     """Cold start is the one case the never-empty guarantee cannot cover, and it
     must not be papered over with a placeholder card."""
     cards, in_window, fallback = pipe["_build_non_atm_panel"](
-        pd.DataFrame(), {}, {}, 30, SNAP_TS
+        pd.DataFrame(), {}, {}, WIDE_WINDOW, SNAP_TS
     )
     assert cards == []
     assert (in_window, fallback) == (0, 0)
@@ -503,7 +510,7 @@ def test_panel_respects_the_cap(pipe):
         for i in range(30)
     ])
     cards, in_window, _ = pipe["_build_non_atm_panel"](
-        pd.DataFrame(), registry, {}, 30, SNAP_TS
+        pd.DataFrame(), registry, {}, WIDE_WINDOW, SNAP_TS
     )
     assert in_window == 30
     assert len(cards) == pipe["_MC_HISTORY_CAP"]
@@ -520,7 +527,7 @@ def test_duration_is_shown_only_for_live_cards(pipe):
                 last_seen="2026-07-23 19:00:00")),
     )
     cards, _, _ = pipe["_build_non_atm_panel"](
-        pd.DataFrame(), registry, {}, 30, SNAP_TS
+        pd.DataFrame(), registry, {}, WIDE_WINDOW, SNAP_TS
     )
     assert cards[0]["is_live"] is False
     assert cards[0]["duration"] is None
@@ -538,7 +545,7 @@ def test_a_malformed_registry_entry_is_skipped_not_fatal(pipe):
                                             last_seen="2026-07-23 10:00:00"))),
     }
     cards, in_window, _ = pipe["_build_non_atm_panel"](
-        pd.DataFrame(), registry, {}, 30, SNAP_TS
+        pd.DataFrame(), registry, {}, WIDE_WINDOW, SNAP_TS
     )
     assert in_window == 1
     assert cards[0]["put_strike"] == 5900.0
