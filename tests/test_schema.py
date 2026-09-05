@@ -86,14 +86,24 @@ def test_the_live_databases_situation_changes_nothing_but_the_version(temp_db):
 
     Every column is already there; the only thing missing is the record of it.
     Migrating must stamp the version and touch nothing else — an ALTER that
-    fired here would raise against the real file."""
+    fired here would raise against the real file.
+
+    "Touch nothing else" means the SHAPE OF THESE THREE TABLES. From v4 the
+    list also creates a new table (mc_eligible_keys), which is additive and
+    cannot disturb what is already stored; the assertion below is deliberately
+    about existing columns rather than about the database being untouched.
+
+    The expected list is derived from SCHEMA_VERSION rather than written out,
+    so adding a migration does not require editing this test to keep passing —
+    which would make it a record of what someone last typed instead of a check
+    that every step from v1 actually runs."""
     conn = _at_version_one(temp_db)
     before = {t: _columns(conn, t)
               for t in ("option_rows", "atm_iv_by_expiry", "trades")}
 
     applied = schema.migrate(conn)
 
-    assert applied == [2, 3]
+    assert applied == list(range(2, schema.SCHEMA_VERSION + 1))
     assert schema.current_version(conn) == schema.SCHEMA_VERSION
     assert {t: _columns(conn, t) for t in before} == before, \
         "nothing about the shape may change"

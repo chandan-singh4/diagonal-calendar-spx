@@ -147,6 +147,55 @@ next snapshot 83 seconds later and recorded no gap at all.
 
 ---
 
+## The API, and reading it from a phone (M4)
+
+A second server, separate from the dashboard, that serves the record as data
+rather than as a page. **The dashboard does not need it and is unaffected by
+it** — start it, or do not, and nothing about the screen changes.
+
+    python -m uvicorn api.app:app --host 127.0.0.1 --port 8899
+
+`GET /health` says whether it can read the record and how old the newest
+snapshot is. **It does not go red when the collector is quiet**, because that
+is the correct state every evening and all weekend; judging silence needs the
+market calendar and is the watchdog's job (ADR-045). Interactive documentation
+for every endpoint is at `/docs` once it is running.
+
+**Both servers bind 127.0.0.1 only.** For Streamlit this is set in
+`.streamlit/config.toml` and closes OPS-006 — before 2026-09-05 `streamlit run`
+advertised a Network URL and an External URL, so the dashboard was reachable
+from anything on the Wi-Fi. For the API it is the `--host` argument above, and
+leaving it off would undo this.
+
+### Reaching it from the phone
+
+Tailscale, not port forwarding. Tailscale connects to the loopback interface,
+so localhost-only binding costs nothing and keeps the LAN out.
+
+**Set a token first.** In `.env`:
+
+    SPX_API_TOKEN=<a long random string>
+
+With no token set the API is open, which is right for a server only this
+machine can reach and wrong the moment anything else can. Clients send it as
+the `X-API-Token` header. `/health` stays reachable without it so a monitor
+can check the server is up without holding the secret.
+
+**What the token does not do:** there is no rate limiting, no audit log, and
+revoking means changing the value and restarting. It is not enough to make the
+API safe on the open internet — the tunnel is the exposure model, and the
+token is what stops the tunnel being the only thing in the way.
+
+### Live updates
+
+`ws://127.0.0.1:8899/ws/snapshot` pushes a message when a snapshot completes,
+so a client does not have to keep asking. The first message on connect is
+labelled `current` and reports where things stand; later ones are labelled
+`snapshot` and mean something has just changed. **A restart announces
+nothing** — whatever is already recorded is the baseline, not news.
+
+---
+
 ## The routine, in one place
 
 | When | What |

@@ -10,15 +10,20 @@ package that reads the configured database.
 """
 from __future__ import annotations
 
+import contextlib
 import datetime as _dt
 import sqlite3
+from collections.abc import AsyncIterator
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 
 import config
 import db
 import schema
+from api import auth, reads, watch
+from api.cache import SnapshotCache
 
 # The wire format for every timestamp this API emits. Stored timestamps are
 # UTC and naive ("2026-09-04 20:01:00" is 16:01 New York, the settled close
@@ -47,8 +52,26 @@ def create_app(db_path: str | None = None) -> FastAPI:
     nothing below it has to.
     """
     resolved = db_path or config.DB_PATH
+    cache = SnapshotCache()
+    watcher = watch.SnapshotWatcher(resolved)
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        """One poller for the whole process, started with the server.
+
+        Started here rather than lazily on the first websocket connection: a
+        watcher that only exists while someone is listening cannot tell a
+        newly-connected client whether it missed anything, and the first
+        client would always be told the current snapshot is "new".
+        """
+        await watcher.start()
+        try:
+            yield
+        finally:
+            await watcher.stop()
 
     app = FastAPI(
+        lifespan=lifespan,
         title="SPX Diagonal Dashboard API",
         version="0.1.0",
         summary="Read-only access to the SPX option price history.",
@@ -107,8 +130,31 @@ def create_app(db_path: str | None = None) -> FastAPI:
                 "underlying_price": latest["underlying_price"],
             }
         )
+        payload["cache"] = cache.stats()
+        payload["websocket_clients"] = watcher.client_count()
         return payload
 
+    @app.middleware("http")
+    async def require_token(request, call_next):
+        """Every route, not a decorator per route (M4.5).
+
+        A per-route dependency protects the routes someone remembered to
+        decorate. A new endpoint added later would be open by default, and
+        nothing would say so — the failure is invisible until it matters.
+        """
+        try:
+            auth.check(request)
+        except HTTPException as exc:
+            return JSONResponse(status_code=exc.status_code,
+                                content={"detail": exc.detail})
+        return await call_next(request)
+
+    ctx = reads.ReadContext(resolved, cache)
+    app.include_router(reads.build_router(ctx))
+    app.include_router(reads.build_computed_router(ctx))
+    app.include_router(watch.build_router(watcher))
+    app.state.watcher = watcher
+    app.state.cache = cache
     return app
 
 
