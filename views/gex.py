@@ -209,8 +209,53 @@ def _dark(fig, height: int, *, legend: bool = False) -> None:
 # it. The widget stays the source of truth while it exists; this remembers
 # what it last said, and puts it back when Streamlit has thrown it away.
 
-_EXPIRY_MEMORY = "gex_expiry_remembered"
+def _memory_key(widget_key: str) -> str:
+    """Where a control's choice is kept while its widget does not exist."""
+    return f"{widget_key}__remembered"
+
+
+_EXPIRY_MEMORY = _memory_key("gex_expiry")
 _ALL_EXPIRIES = "All expiries"
+
+
+def _remember_choice(widget_key: str, options: list, default):
+    """Restore a control Streamlit has discarded, and return what it shows.
+
+    EVERY STICKY CONTROL ON THIS TAB NEEDS THIS, not just the expiry: the
+    View, the OI/Volume layout, the flow Scope and the positioning Day all
+    lost their setting on a tab change for the same reason, and all four now
+    go through here.
+
+    The widget's own value wins whenever it is present and still valid. That
+    is what stops a fresh pick being overwritten by the previous one — at the
+    moment this runs, Streamlit has already recorded what the reader just
+    clicked, and clobbering it would leave the control looking frozen.
+
+    An option that has gone away is not restored. That matters most for the
+    positioning Day control, whose labels change between sessions: a label
+    from yesterday is not a valid choice today, and putting it back would
+    select a day the board no longer offers.
+    """
+    current = st.session_state.get(widget_key)
+    if current in options:
+        return current
+
+    remembered = st.session_state.get(_memory_key(widget_key))
+    chosen = remembered if remembered in options else default
+    st.session_state[widget_key] = chosen
+    return chosen
+
+
+def _record_choice(widget_key: str, value) -> None:
+    """Note what the control is showing, for after Streamlit forgets it.
+
+    Called AFTER the widget has spoken, so it records what is actually on
+    screen rather than what was asked for. A None — a segmented control with
+    nothing selected — is not recorded, since restoring it later would put
+    the control into a state the reader cannot choose by clicking.
+    """
+    if value is not None:
+        st.session_state[_memory_key(widget_key)] = value
 
 
 def _default_expiry(expiries: list, dte_by_expiry: dict) -> str:
@@ -256,15 +301,8 @@ def _restore_expiry_choice(options: list, expiries: list,
     is dropped and the default applies, which is what makes the first visit of
     a new session show that day's 0DTE rather than yesterday's.
     """
-    current = st.session_state.get("gex_expiry")
-    if current in options:
-        return
-
-    remembered = st.session_state.get(_EXPIRY_MEMORY)
-    st.session_state["gex_expiry"] = (
-        remembered if remembered in options
-        else _default_expiry(expiries, dte_by_expiry)
-    )
+    _remember_choice("gex_expiry", options,
+                     _default_expiry(expiries, dte_by_expiry))
 
 
 def render(ctx: ViewContext) -> None:
@@ -320,20 +358,28 @@ def render(ctx: ViewContext) -> None:
         # column widths changed. A segmented control is laid out by Streamlit
         # and reaches any option in a single click rather than stepping.
         with c3:
+            _remember_choice("gex_view", _VIEWS, _VIEWS[0])
+            # No default= : _remember_choice has already put a valid value in
+            # session_state, and Streamlit warns when a widget is given both.
             view = st.segmented_control(
-                "View", _VIEWS, default=_VIEWS[0], key="gex_view",
+                "View", _VIEWS, key="gex_view",
                 selection_mode="single") or _VIEWS[0]
+    _record_choice("gex_view", view)
 
     # The OI/Volume layout picker is NOT in that row. It changes nothing about
     # the gamma panel it used to sit above, and reading its value here rather
     # than where the widget is drawn lets it live beside the two panels it
     # does change. Session state already holds the choice from the last run;
     # on the first, no key exists yet and the default applies.
-    side_mode = st.session_state.get("gex_side_mode") or _SIDE_MODES[0]
+    # Restored here rather than beside its widget because render() reads the
+    # value well above the point where _draw_side_mode_control() draws it.
+    side_mode = _remember_choice("gex_side_mode", _SIDE_MODES,
+                                 _SIDE_MODES[0]) or _SIDE_MODES[0]
+    _record_choice("gex_side_mode", side_mode)
 
     # What to put back when Streamlit next discards the widget. Written after
     # the widget has spoken, so it records what is actually on screen.
-    st.session_state[_EXPIRY_MEMORY] = choice
+    _record_choice("gex_expiry", choice)
 
     expiry = None if choice == _ALL_EXPIRIES else choice
     per_strike = gex.by_strike(chain, ctx.spx_price, expiry=expiry)
@@ -383,8 +429,7 @@ def _draw_side_mode_control() -> None:
     between runs — and it puts the control where its effect is visible."""
     with st.container(key="gexsidemode"):
         st.segmented_control(
-            "OI / Volume", _SIDE_MODES, default=_SIDE_MODES[0],
-            key="gex_side_mode", selection_mode="single", label_visibility="collapsed",
+            "OI / Volume", _SIDE_MODES, key="gex_side_mode", selection_mode="single", label_visibility="collapsed",
             help="Mirrored draws puts below the axis, so the two sides "
                  "compare at one strike. Stacked adds them, so totals "
                  "compare BETWEEN strikes.")
@@ -933,12 +978,14 @@ def _draw_net_flow(ctx: ViewContext) -> None:
     the day's change at that strike, which the level charts above cannot show
     because they are dominated by positions that were already there.
     """
+    _remember_choice("gex_flow_scope", list(_FLOW_SCOPES), "0DTE")
     scope = st.segmented_control(
-        "Scope", list(_FLOW_SCOPES), default="0DTE", key="gex_flow_scope",
+        "Scope", list(_FLOW_SCOPES), key="gex_flow_scope",
         selection_mode="single", label_visibility="collapsed",
         help="0DTE is where the day's flow actually moves the market — those "
              "positions settle in hours. All expiries is the whole board.",
     ) or "0DTE"
+    _record_choice("gex_flow_scope", scope)
 
     intraday = ctx.load_intraday_strike_metrics(
         ctx.session_date, ctx.snapshot_id, _FLOW_SCOPES[scope])
@@ -1189,13 +1236,15 @@ def _draw_volume_vs_oi(ctx: ViewContext, per_strike: pd.DataFrame,
     # borrowing yesterday's figure to fill it.
     labels = dealer.day_labels(_market_is_open())
     options = [labels["prior"], labels["current"]]
+    _remember_choice("gex_positioning_day", options, options[0])
     day = st.segmented_control(
-        "Day", options, default=options[0], key="gex_positioning_day",
+        "Day", options, key="gex_positioning_day",
         selection_mode="single", label_visibility="collapsed",
         help=f"{labels['prior']} is the finished session: volume, what stuck, "
              f"and a verdict. {labels['current']} is this session's volume — "
              "the exchange republishes the contract count after the close, so "
              "today's verdict cannot exist before tonight.") or options[0]
+    _record_choice("gex_positioning_day", day)
 
     st.markdown(
         _positioning_table(rows, ctx.spx_price, day == labels["current"], day),
