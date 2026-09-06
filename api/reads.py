@@ -337,15 +337,22 @@ def build_computed_router(ctx: ReadContext) -> APIRouter:
             returned=min(limit, len(sweep)),
             bands=computed.classify(sweep))
 
-    @router.get("/new", summary="Pairs eligible now that were not before")
-    def new_pairs(
-        snapshot_id: int | None = Query(None),
-        record: bool = Query(True, description=
-            "Advance the comparison point. False looks without recording — "
-            "which means the NEXT caller still compares against the older "
-            "snapshot."),
-    ) -> dict[str, Any]:
+    def _new_pairs(snapshot_id: int | None, *, record: bool) -> dict[str, Any]:
         """The "New" flag, anchored on the snapshot rather than a browser tab.
+
+        BUG-040. Two routes share this body because the two verbs answer the
+        same question and only one of them may change anything. It used to be
+        one GET with `record=True` as its DEFAULT, so reading the endpoint
+        advanced the comparison point — I recorded snapshot 6387 into a
+        previously empty registry on 2026-09-05 by calling it to look at its
+        fields, which is how this was found.
+
+        A GET that writes is not merely untidy here. HTTP promises that GET is
+        safe and repeatable, and every layer in front of it believes that:
+        TanStack Query retries failed GETs and refetches on window focus, so
+        the React scanner would have advanced the registry every time Chandan
+        tabbed back to the browser, with no user action behind it. Proxies and
+        prefetchers make the same assumption.
 
         `compared_against_snapshot` is in the response on purpose. Nothing
         records eligibility unless asked, so after a quiet night the
@@ -380,6 +387,57 @@ def build_computed_router(ctx: ReadContext) -> APIRouter:
                        "the next collector start or dashboard open. The "
                        "scanner endpoints work regardless.",
             ) from exc
+
+    @router.get("/cards", summary="Mission Control cards: approaching, likely next")
+    def cards(snapshot_id: int | None = Query(None),
+              cap: int = Query(computed.MC_HISTORY_CAP, ge=1, le=100,
+                               description="How many candidates get Phase B "
+                                           "history. Cost scales with this.")
+              ) -> dict[str, Any]:
+        """The cards above the Scanner table, which views/scanner.py calls
+        "the strategy's whole point".
+
+        NOT the whole panel. The registry-backed non-ATM grid is still only in
+        services/mission_control.py (DEBT-041), so a front end built on this
+        endpoint alone has the Approaching and Likely Next grids and not that
+        one. Said here rather than only in the plan, because the gap is
+        invisible from the response — it looks like a complete answer.
+
+        Phase B reads per-candidate history, so this is the expensive endpoint
+        of the three. It shares the snapshot-keyed sweep with /mission/scan
+        rather than recomputing 21 offsets.
+        """
+        target, chain, spot = _chain_and_spot(snapshot_id)
+        sweep = ctx.cached(("sweep", target),
+                           lambda: computed.scan(chain, spot, target))
+        panel = ctx.cached(
+            ("cards", target, cap),
+            lambda: computed.approaching_panel(sweep, db_path=ctx.db_path,
+                                               cap=cap))
+        return {"snapshot_id": target, "spot": spot, **panel}
+
+    @router.get("/new", summary="Pairs eligible now that were not before")
+    def new_pairs(snapshot_id: int | None = Query(None)) -> dict[str, Any]:
+        """Look without advancing the comparison point. Never writes.
+
+        Safe to retry, prefetch and refetch. Because it does not record, the
+        NEXT caller still compares against the same older snapshot, so calling
+        this repeatedly keeps returning the same pairs as new — which is the
+        honest behaviour for a question that changes nothing.
+        """
+        return _new_pairs(snapshot_id, record=False)
+
+    @router.post("/new/record",
+                 summary="Record eligibility now, advancing the comparison point")
+    def record_new_pairs(snapshot_id: int | None = Query(None)) -> dict[str, Any]:
+        """The one write in this package, now behind the verb that means it.
+
+        Returns the same payload as the GET. It has to be called by something,
+        or the comparison point never moves and every pair reads as new
+        forever — but it must be called deliberately, which is the entire
+        point of the split.
+        """
+        return _new_pairs(snapshot_id, record=True)
 
     @router.get("/gamma", summary="Gamma exposure by strike, and the flip level")
     def gamma(

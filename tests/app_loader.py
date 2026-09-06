@@ -62,6 +62,7 @@ import config
 import db
 from core import contract
 import iv_engine
+from api import computed
 from dataaccess import queries
 from state import eligible_history
 
@@ -318,6 +319,15 @@ def load_mission_control_functions() -> dict:
     namespace: dict = {
         "pd": pd, "np": np, "math": math, "contract": contract,
         "db": db, "config": config,
+        # `computed` is api/computed.py — the real module, supplied for the
+        # same reason `queries` is below. As of 2026-09-05 the bodies of
+        # _candidate_signals and the card half of _compute_mc_core live there,
+        # moved down a layer so the FastAPI server serves the cards the tab
+        # draws instead of keeping a second copy. services/ calls down into
+        # them, so what these golden tests exercise is still the one and only
+        # definition. A stand-in here would make the goldens agree with a mock
+        # while the page and the server drifted.
+        "computed": computed,
         "__builtins__": __builtins__,
     }
     return _load_from_app(_MC_FUNCS, _MC_CONSTS, namespace, what="Mission Control layer")
@@ -356,6 +366,7 @@ def load_pipeline() -> dict:
         "pd": pd, "np": np, "math": math, "bisect": bisect, "json": json,
         "contract": contract,
         "Path": Path, "iv_engine": iv_engine, "db": db, "config": config,
+        "computed": computed,
         # The nine _load_* wrappers are now memo-and-nothing-else: their bodies
         # call dataaccess.queries. Supplying the REAL module is the point — the
         # tests measure the actual reads, not a stand-in (M2 step 2.2).

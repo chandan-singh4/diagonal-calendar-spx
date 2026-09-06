@@ -43,6 +43,7 @@ import db
 from core.format import exp_label, fmt_duration, sparkline
 from core.ranking import card_key, rank_for_panel
 from core.scanner import APPROACHING_LOW, TSCAN_THRESHOLD, scan_all_offsets
+from api import computed
 from services.loaders import compute_transform_scanner
 from services.sidecars import (
     _ELIGIBLE_HISTORY_RETENTION_DAYS,
@@ -180,83 +181,20 @@ _MC_HISTORY_CAP   = 20    # max candidates per tier to run Phase B history on
 def _candidate_signals(front_raw: str, back_raw: str,
                         put_strike: float, call_strike: float,
                         days: int = 1, *, db_path=None) -> dict | None:
+    """Phase B for one candidate combo. The body now lives in api/computed.py.
+
+    Moved down a layer on 2026-09-05 so the server can serve the same cards
+    the tab draws (M6). Nothing about the arithmetic changed. This wrapper
+    stays for the one thing the moved version deliberately dropped: the
+    config.DB_PATH default from DEBT-027 / ADR-033, which is right for a page
+    that has exactly one database and wrong for a server handed whichever
+    database create_app was given.
     """
-    Phase B — for ONE candidate combo, compute:
-      duration   — how long the gap has stayed continuously >= 5, ending now
-                   (None if not currently eligible)
-      eta_minutes — linear projection of minutes until gap crosses 5,
-                   based on the slope of the last few snapshots
-                   (None if flat/declining — no point showing a bogus ETA)
-      spark      — unicode sparkline of the recent gap trajectory
-      trend_up   — whether the last 3 readings are monotonically increasing
-    Returns None if there isn't enough history to say anything useful.
-
-    db_path — DEBT-027, fixed in M2 step 2.2 (ADR-033). This used to read
-    config.DB_PATH directly, so no caller could aim it at another database and
-    every test had to overwrite that global to get near it. It defaults to the
-    global, so production is unchanged and existing callers need no edit.
-    """
-    rows = db.get_transform_mark_history(
-        db_path if db_path is not None else config.DB_PATH,
-        front_raw, back_raw, call_strike, put_strike, days=days,
+    return computed.candidate_signals(
+        front_raw, back_raw, put_strike, call_strike, days,
+        db_path=db_path if db_path is not None else config.DB_PATH,
     )
-    if not rows:
-        return None
-    df = pd.DataFrame([dict(r) for r in rows])
-    df["timestamp"] = (
-        pd.to_datetime(df["snapshot_timestamp"], format="ISO8601", utc=True)
-        .dt.tz_convert(config.DISPLAY_TIMEZONE)
-        .dt.tz_localize(None)  # naive wall-clock: required by Plotly rangebreaks
-    )
-    df["diagonal_mark"] = (
-        df["back_call_mark"] + df["back_put_mark"]
-        - df["front_call_mark"] - df["front_put_mark"]
-    )
-    df["transform_mark"] = (
-        df["back_call_mark"] + df["back_put_mark"]
-        - df["front_wing_call_mark"] - df["front_wing_put_mark"]
-    )
-    df["gap"] = df["transform_mark"] - df["diagonal_mark"]
-    df = df.sort_values("timestamp").reset_index(drop=True)
-    if df.empty:
-        return None
 
-    # Duration active — trailing contiguous streak where gap >= 5, ending now
-    flag = (df["gap"] >= TSCAN_THRESHOLD).tolist()
-    duration = None
-    if flag and flag[-1]:
-        i = len(flag) - 1
-        while i > 0 and flag[i - 1]:
-            i -= 1
-        duration = df["timestamp"].iloc[-1] - df["timestamp"].iloc[i]
-
-    # ETA — slope of the last up-to-6 readings, projected to threshold
-    eta_minutes = None
-    tail = df.tail(6).dropna(subset=["gap"])
-    tail = tail.drop_duplicates(subset=["timestamp"])
-    if len(tail) >= 3:
-        x_min = ((tail["timestamp"] - tail["timestamp"].iloc[0])
-                 .dt.total_seconds() / 60.0).to_numpy()
-        y_gap = tail["gap"].to_numpy()
-        # polyfit needs at least 2 distinct x values and finite data, or
-        # the underlying SVD can fail to converge (degenerate design matrix).
-        if (
-            np.isfinite(x_min).all() and np.isfinite(y_gap).all()
-            and np.ptp(x_min) > 0
-        ):
-            try:
-                slope, _ = np.polyfit(x_min, y_gap, 1)
-            except np.linalg.LinAlgError:
-                slope = None
-            if slope is not None:
-                current_gap = float(y_gap[-1])
-                if slope > 0.01 and current_gap < TSCAN_THRESHOLD:
-                    eta_minutes = (TSCAN_THRESHOLD - current_gap) / slope
-
-    spark = sparkline(df["gap"].tail(12).tolist())
-    trend_up = bool(df["gap"].tail(3).is_monotonic_increasing) if len(df) >= 3 else False
-
-    return dict(duration=duration, eta_minutes=eta_minutes, spark=spark, trend_up=trend_up)
 
 # rank_for_panel and card_key moved to core/ranking.py (ADR-032).
 
@@ -291,46 +229,11 @@ def _compute_mc_core(_chain_df: pd.DataFrame, spx_price: float,
     non_atm_current = all_combos[all_combos["Put Strike"] != all_combos["Call Strike"]].copy()
     registry = _update_eligible_history(non_atm_current, snapshot_ts)
 
-    approaching_df = all_combos[
-        (all_combos["Transform Diff"] >= APPROACHING_LOW)
-        & (all_combos["Transform Diff"] < TSCAN_THRESHOLD)
-    ].copy()
-    n_approaching = len(approaching_df)
-
-    # Rank for the panel BEFORE capping — otherwise asymmetric opportunities
-    # sitting just below the top-by-raw-gap rows would get starved out of
-    # the (necessarily limited, for cost reasons) Phase B history treatment.
-    approaching_df = rank_for_panel(approaching_df)
-
-    def _build_cards(df: pd.DataFrame, cap: int) -> list[dict]:
-        cards = []
-        for _, row in df.head(cap).iterrows():
-            front_raw = row["Front Expiry"].split(" ")[0]
-            back_raw  = row["Back Expiry"].split(" ")[0]
-            put_s     = float(row["Put Strike"])
-            call_s    = float(row["Call Strike"])
-            sig = _candidate_signals(front_raw, back_raw, put_s, call_s) or {}
-            cards.append(dict(
-                front_raw=front_raw, back_raw=back_raw,
-                front_label=row["Front Expiry"], back_label=row["Back Expiry"],
-                put_strike=put_s, call_strike=call_s,
-                gap=float(row["Transform Diff"]),
-                iv_ratio=row.get("IV Ratio"),
-                duration=sig.get("duration"),
-                eta_minutes=sig.get("eta_minutes"),
-                spark=sig.get("spark", "─"),
-                trend_up=sig.get("trend_up", False),
-            ))
-        return cards
-
-    approaching_cards = _build_cards(approaching_df, _MC_HISTORY_CAP)
-
-    # "Likely Next" — only candidates with a computable rising-trend ETA.
-    # Same asymmetric-first principle, ETA ascending within each tier.
-    likely_next = sorted(
-        [c for c in approaching_cards if c["eta_minutes"] is not None],
-        key=lambda c: (c["put_strike"] == c["call_strike"], c["eta_minutes"]),
-    )
+    panel = computed.approaching_panel(all_combos, db_path=config.DB_PATH,
+                                       cap=_MC_HISTORY_CAP)
+    approaching_cards = panel["approaching_cards"]
+    likely_next       = panel["likely_next"]
+    n_approaching     = panel["n_approaching"]
 
     return dict(
         approaching_cards=approaching_cards,

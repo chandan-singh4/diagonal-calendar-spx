@@ -81,7 +81,7 @@ have contract tests. Streamlit keeps serving every tab not yet moved.
 
 | # | Tab | API status |
 |---|-----|-----------|
-| 1 | Scanner | sweep table: `/mission/scan` — **covered**. Mission Control cards: **gap** — they come from `services/mission_control.py` and no endpoint serves them (DEBT-031). `/mission/new` is **blocked** by BUG-040 until its write is split off. |
+| 1 | Scanner | sweep table `/mission/scan` — **covered**. Approaching + Likely Next cards `/mission/cards` — **covered** as of 2026-09-05. `/mission/new` — **covered**, write split off by BUG-040. Non-ATM card grid — **gap**, DEBT-041. |
 | 2 | Gamma Exposure | `/mission/gamma`, `/strikes/intraday-metrics`, `/strikes/prior-session-oi` — **covered** (`expiry` scoping added 2026-09-05; the endpoint had been half-served since ENH-014) |
 | 3 | Calendar Edge | `/pairs/transform-marks`, `/atm-history`, `/spx/intraday` — **covered** |
 | 4 | Strike Detail | `/contract-history`, `/atm-iv/latest` — **covered** |
@@ -114,7 +114,7 @@ row volume is not a problem to solve here.
    without importing Streamlit.
 2. **Mission Control's non-ATM panel** — `/mission/scan` returns the sweep,
    not the curated registry-backed panel that `services/mission_control.py`
-   builds. DEBT-031 already records this.
+   builds. DEBT-041 records this.
 3. **Writes.** Entry locks, the eligible-history backfill and the chart-colour
    settings all write through `state/`. `api/` is read-only by design and the
    one documented exception is the "New" registry. Adding writes is a

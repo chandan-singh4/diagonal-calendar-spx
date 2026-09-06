@@ -8,16 +8,23 @@ SERVED: the transform scanner and the gamma/delta exposure work. Both live in
 arguments — so this module loads a chain through `dataaccess/` and calls them.
 Nothing is reimplemented.
 
-NOT SERVED: the Mission Control PANEL — the cards, the sparklines, the
-"likely next" list, the duration-of-gap figures. That logic is
-`services/mission_control.py`, 528 lines of it, and every path through it
-imports streamlit. `api/` may not import `services/` (see api/__init__.py, and
-the guard in tests/test_layering.py), so serving the panel would mean either
-importing the page into a server or copying five hundred lines into a second
-home that would immediately start drifting from the first. Both are worse than
-not serving it yet. Extracting the panel into a layer both callers can share
-is real work of the kind M2 did, and it belongs in its own task rather than
-being smuggled into this one.
+PARTLY SERVED, AS OF 2026-09-05: the Mission Control CARDS. This paragraph
+used to say the panel was not served at all, because every path through
+`services/mission_control.py` imports streamlit, `api/` may not import
+`services/`, and the choice was therefore between importing the page into a
+server and keeping a second copy that would drift. It ended by saying the
+extraction "belongs in its own task rather than being smuggled into this one".
+
+That task was done. `candidate_signals` and `approaching_panel` at the foot of
+this module are the ORIGINALS, moved down a layer, and services/ now calls
+them — so there is still exactly one definition. What made it possible was not
+that the code got easier: those two bodies never used streamlit, only the
+module around them did.
+
+STILL NOT SERVED: the non-ATM panel — `_build_non_atm_panel`, the registry-
+backed grid. It reads eligible_history.json through services/sidecars, which
+is a second extraction rather than a line of the first. DEBT-041 has it, and
+the Scanner tab is not fully replaceable until it is done.
 
 WHAT THAT LEAVES, AND WHY IT IS THE USEFUL HALF ANYWAY. The panel is a way of
 DISPLAYING the eligible set. The eligible set itself comes from the scanner
@@ -31,10 +38,14 @@ from __future__ import annotations
 
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
+import config
 import db
 from core import gex
+from core.format import sparkline
+from core.ranking import rank_for_panel
 from core.scanner import APPROACHING_LOW, TSCAN_THRESHOLD, scan_all_offsets
 
 
@@ -171,4 +182,174 @@ def gamma_exposure(chain_df: pd.DataFrame, spot: float,
         "flip_strike": gex.flip_strike(gex_df),
         "summary": gex.summary(gex_df),
         "by_strike": gex_df,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The Mission Control cards — extracted so both front ends share ONE definition
+#
+# The note at the top of this module said the panel was not served because
+# doing so would mean importing the page into a server or copying five hundred
+# lines into a second home that would immediately start drifting from the
+# first, and that extracting it "belongs in its own task rather than being
+# smuggled into this one". This is that task, for the half the cards need.
+#
+# WHAT MADE IT POSSIBLE, and it is not that the code got easier: neither body
+# below ever used streamlit. Only the module around them did, through its
+# @st.cache_data wrappers. Moving them changes no arithmetic — it moves them
+# under the layer boundary so api/ can reach them without reaching the page.
+# services/mission_control.py now calls DOWN into these, which is what stops
+# the cards on the Streamlit tab and the cards served over HTTP from drifting.
+#
+# STILL NOT SERVED: the non-ATM panel (_build_non_atm_panel). It reads the
+# eligible_history.json registry through services/sidecars, so it is a second
+# extraction and not a line of this one. DEBT-041 has it.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def candidate_signals(front_raw: str, back_raw: str,
+                      put_strike: float, call_strike: float,
+                      days: int = 1, *, db_path: str) -> dict | None:
+    """
+    Phase B — for ONE candidate combo, compute:
+      duration   — how long the gap has stayed continuously >= 5, ending now
+                   (None if not currently eligible)
+      eta_minutes — linear projection of minutes until gap crosses 5,
+                   based on the slope of the last few snapshots
+                   (None if flat/declining — no point showing a bogus ETA)
+      spark      — unicode sparkline of the recent gap trajectory
+      trend_up   — whether the last 3 readings are monotonically increasing
+    Returns None if there isn't enough history to say anything useful.
+
+    db_path is REQUIRED, unlike the services/ version this was lifted from
+    (DEBT-027 / ADR-033 gave that one a config.DB_PATH default so existing
+    callers needed no edit). A default is wrong in this layer: the server
+    answers for whichever database create_app was handed, and a forgotten
+    argument would silently answer from the production record instead.
+    """
+    rows = db.get_transform_mark_history(
+        db_path,
+        front_raw, back_raw, call_strike, put_strike, days=days,
+    )
+    if not rows:
+        return None
+    df = pd.DataFrame([dict(r) for r in rows])
+    df["timestamp"] = (
+        pd.to_datetime(df["snapshot_timestamp"], format="ISO8601", utc=True)
+        .dt.tz_convert(config.DISPLAY_TIMEZONE)
+        .dt.tz_localize(None)  # naive wall-clock: required by Plotly rangebreaks
+    )
+    df["diagonal_mark"] = (
+        df["back_call_mark"] + df["back_put_mark"]
+        - df["front_call_mark"] - df["front_put_mark"]
+    )
+    df["transform_mark"] = (
+        df["back_call_mark"] + df["back_put_mark"]
+        - df["front_wing_call_mark"] - df["front_wing_put_mark"]
+    )
+    df["gap"] = df["transform_mark"] - df["diagonal_mark"]
+    df = df.sort_values("timestamp").reset_index(drop=True)
+    if df.empty:
+        return None
+
+    # Duration active — trailing contiguous streak where gap >= 5, ending now
+    flag = (df["gap"] >= TSCAN_THRESHOLD).tolist()
+    duration = None
+    if flag and flag[-1]:
+        i = len(flag) - 1
+        while i > 0 and flag[i - 1]:
+            i -= 1
+        duration = df["timestamp"].iloc[-1] - df["timestamp"].iloc[i]
+
+    # ETA — slope of the last up-to-6 readings, projected to threshold
+    eta_minutes = None
+    tail = df.tail(6).dropna(subset=["gap"])
+    tail = tail.drop_duplicates(subset=["timestamp"])
+    if len(tail) >= 3:
+        x_min = ((tail["timestamp"] - tail["timestamp"].iloc[0])
+                 .dt.total_seconds() / 60.0).to_numpy()
+        y_gap = tail["gap"].to_numpy()
+        # polyfit needs at least 2 distinct x values and finite data, or
+        # the underlying SVD can fail to converge (degenerate design matrix).
+        if (
+            np.isfinite(x_min).all() and np.isfinite(y_gap).all()
+            and np.ptp(x_min) > 0
+        ):
+            try:
+                slope, _ = np.polyfit(x_min, y_gap, 1)
+            except np.linalg.LinAlgError:
+                slope = None
+            if slope is not None:
+                current_gap = float(y_gap[-1])
+                if slope > 0.01 and current_gap < TSCAN_THRESHOLD:
+                    eta_minutes = (TSCAN_THRESHOLD - current_gap) / slope
+
+    spark = sparkline(df["gap"].tail(12).tolist())
+    trend_up = bool(df["gap"].tail(3).is_monotonic_increasing) if len(df) >= 3 else False
+
+    return dict(duration=duration, eta_minutes=eta_minutes, spark=spark, trend_up=trend_up)
+
+
+# How many candidates get Phase B history. The cost of the panel is
+# proportional to this, and Phase B is the expensive half.
+MC_HISTORY_CAP = 20
+
+
+def approaching_panel(all_combos: pd.DataFrame, *, db_path: str,
+                      cap: int = MC_HISTORY_CAP) -> dict[str, Any]:
+    """The Approaching cards and the Likely Next list, from one sweep.
+
+    Takes the SWEEP rather than a chain, so the caller decides how it was
+    computed: the page hands in one already memoised across its tabs, the
+    server hands in one cached on the snapshot. Computing 21 offsets in here
+    would quietly double the most expensive thing either of them does.
+    """
+    if all_combos.empty:
+        return {"approaching_cards": [], "likely_next": [], "n_approaching": 0}
+
+    approaching_df = all_combos[
+        (all_combos["Transform Diff"] >= APPROACHING_LOW)
+        & (all_combos["Transform Diff"] < TSCAN_THRESHOLD)
+    ].copy()
+    n_approaching = len(approaching_df)
+
+    # Rank for the panel BEFORE capping — otherwise asymmetric opportunities
+    # sitting just below the top-by-raw-gap rows would get starved out of
+    # the (necessarily limited, for cost reasons) Phase B history treatment.
+    approaching_df = rank_for_panel(approaching_df)
+
+    def _build_cards(df: pd.DataFrame, cap: int) -> list[dict]:
+        cards = []
+        for _, row in df.head(cap).iterrows():
+            front_raw = row["Front Expiry"].split(" ")[0]
+            back_raw  = row["Back Expiry"].split(" ")[0]
+            put_s     = float(row["Put Strike"])
+            call_s    = float(row["Call Strike"])
+            sig = candidate_signals(front_raw, back_raw, put_s, call_s,
+                                    db_path=db_path) or {}
+            cards.append(dict(
+                front_raw=front_raw, back_raw=back_raw,
+                front_label=row["Front Expiry"], back_label=row["Back Expiry"],
+                put_strike=put_s, call_strike=call_s,
+                gap=float(row["Transform Diff"]),
+                iv_ratio=row.get("IV Ratio"),
+                duration=sig.get("duration"),
+                eta_minutes=sig.get("eta_minutes"),
+                spark=sig.get("spark", "─"),
+                trend_up=sig.get("trend_up", False),
+            ))
+        return cards
+
+    approaching_cards = _build_cards(approaching_df, cap)
+
+    # "Likely Next" — only candidates with a computable rising-trend ETA.
+    # Same asymmetric-first principle, ETA ascending within each tier.
+    likely_next = sorted(
+        [c for c in approaching_cards if c["eta_minutes"] is not None],
+        key=lambda c: (c["put_strike"] == c["call_strike"], c["eta_minutes"]),
+    )
+
+    return {
+        "approaching_cards": approaching_cards,
+        "likely_next": likely_next,
+        "n_approaching": n_approaching,
     }

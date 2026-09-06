@@ -201,3 +201,180 @@ def test_band_classification_counts_both_bands():
     assert bands["eligible"] == 1
     assert bands["approaching"] == 1
     assert bands["total"] == 3
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BUG-040 — the verb has to mean what it says
+#
+# The endpoint had NO test at this layer before. Everything above exercises
+# `computed.new_since_previous` directly, where `record` is an explicit
+# argument and its default never applies. That is exactly the gap that let a
+# GET default to writing: the write was well tested and the route was not.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _registry_rows(db_path: str) -> int:
+    conn = sqlite3.connect(db_path)
+    try:
+        return conn.execute("SELECT COUNT(*) FROM mc_eligible_keys").fetchone()[0]
+    finally:
+        conn.close()
+
+
+@pytest.fixture
+def scan_client(temp_db):
+    """A client over a database with one COMPLETE snapshot and a real chain."""
+    from fastapi.testclient import TestClient
+
+    from api.app import create_app
+    from test_db import _gex_seed
+
+    _gex_seed(temp_db)
+    return TestClient(create_app(db_path=temp_db)), temp_db
+
+
+def test_reading_the_new_flag_writes_nothing(scan_client):
+    """THE DEFECT, at the layer that had it.
+
+    Not "returns the right pairs" — that is covered above and was never wrong.
+    The claim here is about side effects: a GET must leave the registry
+    exactly as it found it. It did not, because `record` defaulted to True,
+    and I advanced a previously empty registry to snapshot 6387 on 2026-09-05
+    by calling this endpoint to look at its response shape.
+    """
+    client, db_path = scan_client
+    before = _registry_rows(db_path)
+
+    reply = client.get("/mission/new")
+
+    assert reply.status_code == 200, reply.text
+    assert reply.json()["recorded"] is False
+    assert _registry_rows(db_path) == before, (
+        "a GET advanced the comparison point"
+    )
+
+
+def test_reading_it_ten_times_still_writes_nothing(scan_client):
+    """Safe AND repeatable, which is the half that bites under M6.
+
+    One clean GET would pass even if the route wrote on a retry path.
+    TanStack Query retries failed GETs and refetches on window focus, so the
+    real access pattern is dozens of calls nobody made on purpose.
+    """
+    client, db_path = scan_client
+    before = _registry_rows(db_path)
+
+    for _ in range(10):
+        assert client.get("/mission/new").status_code == 200
+
+    assert _registry_rows(db_path) == before
+
+
+def test_there_is_no_query_parameter_that_makes_the_get_write(scan_client):
+    """The split has to remove the capability, not hide the default.
+
+    Flipping `record`'s default to False would pass both tests above while
+    leaving `?record=true` reachable — one query string from the same bug, and
+    a URL is the easiest thing in the world to copy from an old note. FastAPI
+    ignores unknown query parameters, so this asserts on the REGISTRY rather
+    than on a 4xx.
+    """
+    client, db_path = scan_client
+    before = _registry_rows(db_path)
+
+    client.get("/mission/new", params={"record": "true"})
+
+    assert _registry_rows(db_path) == before, (
+        "?record=true still writes; the default moved but the capability stayed"
+    )
+    spec = client.get("/openapi.json").json()
+    names = {p["name"]
+             for p in spec["paths"]["/mission/new"]["get"].get("parameters", [])}
+    assert "record" not in names, (
+        "the GET still advertises a `record` parameter"
+    )
+
+
+def test_recording_is_reachable_and_does_advance_the_point(scan_client):
+    """The other half. Splitting the verbs is only correct if the write is
+    still callable — a comparison point that can never move reports every pair
+    as new forever, which is the browser-tab behaviour M4.3 replaced."""
+    client, db_path = scan_client
+
+    reply = client.post("/mission/new/record")
+
+    assert reply.status_code == 200, reply.text
+    assert reply.json()["recorded"] is True
+    assert _registry_rows(db_path) > 0, "the write endpoint recorded nothing"
+
+
+def test_the_write_is_not_reachable_by_GET(scan_client):
+    """A POST-only route. If the recorder answered GET as well, every rule
+    above would be one URL away from being undone."""
+    client, _ = scan_client
+
+    assert client.get("/mission/new/record").status_code == 405
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The cards, and the one-definition rule that made serving them worth doing
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_the_page_and_the_server_call_the_same_card_builder():
+    """The whole reason this was extracted rather than copied.
+
+    M6's governing rule is that no formula gets a second home. The cheap way
+    to serve these cards was to reimplement Phase B in api/ — it would have
+    passed every behavioural test on both sides for as long as the two copies
+    happened to agree, and diverged the first time one was edited.
+
+    Checked at the SOURCE, because no output can show it: two identical
+    implementations produce identical cards right up until they do not.
+    """
+    from pathlib import Path
+
+    import services.mission_control as mc
+
+    source = Path(mc.__file__).read_text(encoding="utf-8")
+
+    assert "computed.approaching_panel" in source, (
+        "services/ no longer calls down into the shared builder — if the cards "
+        "are being built in services/ again, the server has a second copy"
+    )
+    assert "def _build_cards(" not in source, (
+        "the card builder is back in services/, so there are two of them"
+    )
+    assert "np.polyfit" not in source, (
+        "the ETA projection is back in services/; it belongs in one place"
+    )
+
+
+def test_the_cards_endpoint_answers_with_both_grids(scan_client):
+    """Shape, not arithmetic — the arithmetic is pinned above and unchanged by
+    the move. What is new is that these reach a front end at all."""
+    client, _ = scan_client
+
+    body = client.get("/mission/cards").json()
+
+    assert set(body) >= {"snapshot_id", "spot", "approaching_cards",
+                         "likely_next", "n_approaching"}
+    assert isinstance(body["approaching_cards"], list)
+    assert isinstance(body["likely_next"], list)
+
+
+def test_the_cards_endpoint_reads_the_database_it_was_given(scan_client):
+    """`candidate_signals` lost its config.DB_PATH default in the move, and
+    this is why. With a default, a forgotten argument answers from the
+    production record — silently, and only in production, where no test
+    database is in the way to make it obvious."""
+    import inspect
+
+    from api import computed
+
+    sig = inspect.signature(computed.candidate_signals)
+    assert sig.parameters["db_path"].default is inspect.Parameter.empty, (
+        "db_path has a default again; the server can now answer one "
+        "database's question with another's data"
+    )
+
+    client, db_path = scan_client
+    assert client.get("/mission/cards").status_code == 200
