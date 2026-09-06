@@ -90,3 +90,10 @@ Thumbs.db
 *_backup.py
 *.bak
 scratch/
+
+# ── Frontend (M6, React + Vite under web/) ───────────────────────────────────
+# node_modules is ~200 MB of reinstallable dependencies pinned by
+# package-lock.json, which IS committed. dist/ is build output.
+web/node_modules/
+web/dist/
+web/.vite/
