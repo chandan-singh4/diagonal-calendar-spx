@@ -21,7 +21,7 @@ redrawing the page; widget state is discarded when a widget is not drawn
 (BUG-032); the element tree is patched by position, so switching tabs
 repaints the old one (BUG-037); and the layout is whatever Streamlit's
 column model permits. A dense trading view — panels that update
-independently, a table of 4,221 rows that stays responsive, state that
+independently, a table that stays responsive over the whole sweep, state that
 survives navigation because it lives in the client — is a different shape of
 program, not a faster one.
 
@@ -81,17 +81,30 @@ have contract tests. Streamlit keeps serving every tab not yet moved.
 
 | # | Tab | API status |
 |---|-----|-----------|
-| 1 | Scanner | `/mission/scan`, `/mission/new` — **covered** |
+| 1 | Scanner | sweep table: `/mission/scan` — **covered**. Mission Control cards: **gap** — they come from `services/mission_control.py` and no endpoint serves them (DEBT-031). `/mission/new` is **blocked** by BUG-040 until its write is split off. |
 | 2 | Gamma Exposure | `/mission/gamma`, `/strikes/intraday-metrics`, `/strikes/prior-session-oi` — **covered** (`expiry` scoping added 2026-09-05; the endpoint had been half-served since ENH-014) |
 | 3 | Calendar Edge | `/pairs/transform-marks`, `/atm-history`, `/spx/intraday` — **covered** |
 | 4 | Strike Detail | `/contract-history`, `/atm-iv/latest` — **covered** |
 | 5 | Research | `/pairs/diagonal-history` — **covered** |
 | 6 | Entry Analysis | **gap** — term structure, theta differential, straddle, IC mark, IV percentile and liquidity are derived in `app.py`'s prelude and exposed nowhere |
 
-Scanner first because it is the tab most in need of a real table and its
-endpoints already exist, so the first increment proves the whole stack —
-build, auth, fetch, table, deploy — on a tab that can go into daily use
-immediately.
+Scanner first because it is the tab most in need of a real table, and the
+sweep behind that table is already served. Two corrections to what this
+paragraph first claimed, both found on 2026-09-05 by reading the code rather
+than the plan:
+
+**Its endpoints do NOT already exist in full.** `/mission/scan` returns the
+sweep and band COUNTS. The Mission Control opportunity cards above the table —
+which `views/scanner.py` calls "the strategy's whole point" — are built by
+`services/mission_control.py` and are served by nothing. The first increment
+is therefore the sweep table only, and the cards need an endpoint before the
+tab can replace the Streamlit one.
+
+**The 4,221 figure was mine, not the app's.** That is the size of the sweep.
+The Scanner has never drawn more than 200 rows of it: `ui/sidebar.py` offers
+10-200, default 50. `/mission/scan` caps `limit` at 2,000, so the endpoint is
+already an order of magnitude more generous than the tab has ever been, and
+row volume is not a problem to solve here.
 
 ### Known gaps, to be closed as their tab comes up
 
