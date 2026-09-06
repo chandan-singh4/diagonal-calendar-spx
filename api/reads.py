@@ -243,15 +243,25 @@ def build_router(ctx: ReadContext) -> APIRouter:
     def strike_metrics(
         session_date: str | None = Query(None),
         dte_max: int | None = Query(None, ge=0, description=
-            "Limit to expiries within this many days."),
+            "Limit to expiries within this many days. A CUMULATIVE bound: it "
+            "cannot express one contract. Use `expiry` for that."),
+        expiry: str | None = Query(None, description=
+            "Scopes to ONE contract by display key, and takes precedence over "
+            "dte_max. The third Friday lists two contracts, so this is a "
+            "display key rather than a bare date."),
     ) -> dict[str, Any]:
         target = session_date or ctx.default_session_date()
+        # `expiry` is in the cache key as well as the call. It was added to
+        # the query in ENH-014 and not here, so the API could still only ask
+        # the two questions the old Streamlit control asked — and a key
+        # missing an argument serves one scope's answer under another's label,
+        # which is the fault api/cache.py's docstring already warns about.
         df = ctx.cached(
-            ("strike_metrics", target, dte_max),
+            ("strike_metrics", target, dte_max, expiry),
             lambda: queries.load_intraday_strike_metrics(ctx.db_path, target,
-                                                         dte_max))
+                                                         dte_max, expiry))
         return serialize.frame_payload(df, session_date=target,
-                                       dte_max=dte_max)
+                                       dte_max=dte_max, expiry=expiry)
 
     @router.get("/strikes/prior-session-oi",
                 summary="Open interest per strike at the prior session's close")

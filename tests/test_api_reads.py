@@ -283,3 +283,132 @@ def test_every_dataaccess_read_has_an_endpoint():
         f"  unserved reads: {sorted(defined - served)}\n"
         f"  served but gone: {sorted(served - defined)}"
     )
+
+
+# The endpoint each read is served by. Kept beside the coverage test above,
+# which proves every read HAS an endpoint but says nothing about whether that
+# endpoint can ask the read everything it can answer.
+_READ_ENDPOINTS = {
+    "load_atm_hist": "/atm-history",
+    "load_atm_hist_fb": "/atm-history",
+    "load_contract_hist": "/contract-history",
+    "load_chain_df": "/chain",
+    "load_spx_intraday": "/spx/intraday",
+    "load_prior_close": "/spx/prior-close",
+    "load_transform_marks": "/pairs/transform-marks",
+    "load_latest_atm_iv": "/atm-iv/latest",
+    "load_diagonal_hist": "/pairs/diagonal-history",
+    "load_intraday_strike_metrics": "/strikes/intraday-metrics",
+    "load_prior_session_oi": "/strikes/prior-session-oi",
+}
+
+
+def test_every_read_parameter_is_reachable_from_its_endpoint(client: TestClient):
+    """A read that grew an argument the API cannot pass is half-served.
+
+    THE CASE THIS WAS WRITTEN FOR. ENH-014 added `expiry` scoping to
+    `load_intraday_strike_metrics` for the Streamlit tab and did not add it to
+    `/strikes/intraday-metrics`. Every test passed: the endpoint still worked,
+    still returned correct rows, and simply could not be asked the new
+    question. The test above did not see it because the endpoint existed.
+
+    It matters more from M6 onward, not less: the React front end has no route
+    to the database except this API, so an argument missing here is a feature
+    that cannot be built rather than one that is merely awkward.
+    """
+    import inspect
+
+    from dataaccess import queries
+
+    spec = client.get("/openapi.json").json()
+    missing = []
+    for read, path in _READ_ENDPOINTS.items():
+        params = inspect.signature(getattr(queries, read)).parameters
+        wanted = {n for n, p in params.items()
+                  if n not in ("db_path", "load")
+                  and p.default is not inspect.Parameter.empty}
+        exposed = {p["name"]
+                   for p in spec["paths"][path]["get"].get("parameters", [])}
+        for name in sorted(wanted - exposed):
+            missing.append(f"{path} cannot pass {read}({name}=...)")
+
+    assert missing == [], "reads the API cannot fully ask:\n  " + "\n  ".join(missing)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ENH-014 at the API layer — /strikes/intraday-metrics?expiry=
+#
+# What the read itself does with `expiry` is pinned in test_db.py and is not
+# re-checked here. What only this layer can get wrong is the two things below:
+# whether the argument arrives at the read at all, and whether it reaches the
+# CACHE KEY. The second is the dangerous one, because an endpoint that scopes
+# correctly and caches carelessly is right once and wrong afterwards.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _metrics(client: TestClient, session: str, **params) -> list[dict]:
+    reply = client.get("/strikes/intraday-metrics",
+                       params={"session_date": session, **params})
+    assert reply.status_code == 200, reply.text
+    return reply.json()["rows"]
+
+
+def test_the_expiry_scope_survives_the_trip_through_the_endpoint(temp_db):
+    """The seed puts a 0DTE and a 21DTE call at the SAME strike, so a scope
+    that quietly did nothing would return a plausible chart with both legs
+    summed into it rather than an error."""
+    from test_db import BACK, CALL_STRIKE, PUT_STRIKE, _gex_seed
+
+    session = _gex_seed(temp_db)
+    client = TestClient(create_app(db_path=temp_db))
+
+    rows = _metrics(client, session, expiry=BACK)
+
+    assert {r["strike"] for r in rows} == {CALL_STRIKE}, (
+        f"the back-month board has no put leg; {PUT_STRIKE} means the scope "
+        "was dropped somewhere between the query string and the read"
+    )
+    assert all(r["call_gamma_oi"] == pytest.approx(10.0) for r in rows), (
+        "20.0 is both expiries summed — the scope arrived as None"
+    )
+
+
+def test_one_expiry_is_never_served_under_another_expiry_label(temp_db):
+    """The cache key. Both requests name the same session and the same
+    snapshot, so everything the old key knew about is identical between them;
+    only `expiry` differs. Leave it out and the second caller is handed the
+    first caller's frame — the right numbers, under the wrong contract, with
+    nothing on screen to say so.
+
+    Asked in this order deliberately: the whole-board answer is a SUPERSET, so
+    a key that ignores `expiry` fails loudly here (extra strikes) instead of
+    passing by luck.
+    """
+    from test_db import BACK, CALL_STRIKE, _gex_seed
+
+    session = _gex_seed(temp_db)
+    client = TestClient(create_app(db_path=temp_db))
+
+    whole_board = _metrics(client, session)
+    back_month = _metrics(client, session, expiry=BACK)
+
+    assert len(whole_board) > len(back_month), "the seed cannot tell these apart"
+    assert {r["strike"] for r in back_month} == {CALL_STRIKE}, (
+        "the back-month request was served the whole board out of the cache"
+    )
+    # And the other way round: the scoped answer must not become the cached
+    # answer for the unscoped question either.
+    assert _metrics(client, session) == whole_board
+
+
+def test_the_expiry_is_echoed_back_so_a_chart_can_label_itself(temp_db):
+    """The front end has no other way to know which contract it is holding.
+    `dte_max` is already echoed for the same reason."""
+    from test_db import BACK, _gex_seed
+
+    session = _gex_seed(temp_db)
+    client = TestClient(create_app(db_path=temp_db))
+
+    body = client.get("/strikes/intraday-metrics",
+                      params={"session_date": session, "expiry": BACK}).json()
+
+    assert body["expiry"] == BACK
