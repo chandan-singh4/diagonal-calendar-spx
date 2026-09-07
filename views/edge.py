@@ -237,6 +237,28 @@ def render(ctx: ViewContext) -> None:
 
             _gap_df = break_sessions(_gap_df)
 
+            # THE INDEX, READ SEPARATELY FROM THE MARKS. `_gap_df` drops any
+            # snapshot missing one of the six option legs -- correct, because a
+            # diagonal cannot be priced without all six -- and SPX was riding
+            # on those same rows. On a 0DTE afternoon the front legs stop being
+            # quoted around 15:00, so the strike-channel panel below ended an
+            # hour before the market did (Chandan, 2026-09-07: "that's just the
+            # market data, that goes to four PM irrespective"). Same window,
+            # same session filter, same session breaks -- so the two frames are
+            # drawn on one timeline.
+            _spx_df = ctx.load_underlying_history(period_days, ctx.snapshot_id)
+            if not _spx_df.empty:
+                _spx_df["timestamp"] = (
+                    pd.to_datetime(_spx_df["snapshot_timestamp"], format="ISO8601", utc=True)
+                    .dt.tz_convert(config.DISPLAY_TIMEZONE)
+                    .dt.tz_localize(None)  # naive wall-clock: Plotly rangebreaks
+                )
+                if period_label == "Today":
+                    _spx_last = _spx_df["timestamp"].dt.date.max()
+                    _spx_df = _spx_df[_spx_df["timestamp"].dt.date == _spx_last]
+            if not _spx_df.empty:
+                _spx_df = break_sessions(_spx_df)
+
             # ── Entry Lock — position management mode ────────────────────────
             # Once a diagonal is actually filled, the trader stops caring where
             # a *new* hypothetical diagonal prices today and instead wants to
@@ -494,7 +516,7 @@ def render(ctx: ViewContext) -> None:
                 # a cache HIT reads ~0 ms. This isolates data-retrieval vs.
                 # chart-generation so we optimise the actual bottleneck.
                 try:
-                    _spx_now = float(_gap_df["spx"].iloc[-1])
+                    _spx_now = float(_spx_df["spx"].dropna().iloc[-1])
                     _dist_txt = (f" · call {ctx.call_strike - _spx_now:+.0f} / "
                                  f"put {ctx.put_strike - _spx_now:+.0f} pts from spot")
                 except Exception:
@@ -532,10 +554,10 @@ def render(ctx: ViewContext) -> None:
             # margins so the two align vertically. Answers "where was SPX vs. my
             # position when the marks moved" — the band is the zone between the
             # short strikes; the SPX line poking out = a short strike being tested.
-            if "spx" in _gap_df.columns and _gap_df["spx"].notna().any():
+            if not _spx_df.empty and _spx_df["spx"].notna().any():
                 _lo_k = float(min(ctx.put_strike, ctx.call_strike))
                 _hi_k = float(max(ctx.put_strike, ctx.call_strike))
-                _spx_series = _gap_df["spx"].astype(float)
+                _spx_series = _spx_df["spx"].astype(float)
 
                 fig_spx = go.Figure()
 
@@ -560,7 +582,7 @@ def render(ctx: ViewContext) -> None:
                     _spx_series.to_numpy() - ctx.call_strike,
                 ])
                 fig_spx.add_trace(go.Scatter(
-                    x=_gap_df["timestamp"], y=_spx_series,
+                    x=_spx_df["timestamp"], y=_spx_series,
                     name="SPX", mode="lines",
                     line=dict(color="#d7deea", width=2),
                     customdata=_cd,
@@ -573,8 +595,12 @@ def render(ctx: ViewContext) -> None:
                 # `core.series.strike_crossings` — one rule, shared with the
                 # API. See its docstring for why each inequality is closed on
                 # the side it is.
+                # ON THE FULL INDEX, not the marks rows. A crossing is an
+                # event in SPX; deriving it from rows that end at 14:50 would
+                # drop every crossing after that, on exactly the sessions where
+                # they matter most.
                 _cross = strike_crossings(
-                    _gap_df["timestamp"].to_numpy(), _spx_series.to_numpy(),
+                    _spx_df["timestamp"].to_numpy(), _spx_series.to_numpy(),
                     (ctx.put_strike, ctx.call_strike))
                 _cu_x = [p["x"] for p in _cross["up"]]
                 _cu_y = [p["y"] for p in _cross["up"]]
@@ -598,7 +624,7 @@ def render(ctx: ViewContext) -> None:
                         showlegend=False,
                         hovertemplate="▼ SPX crossed down through strike<extra></extra>",
                     ))
-                _add_market_open_lines(fig_spx, _gap_df["timestamp"])
+                _add_market_open_lines(fig_spx, _spx_df["timestamp"])
 
                 # Y-range padded around both the band and the SPX path.
                 _y_lo = min(_lo_k, float(_spx_series.min()))

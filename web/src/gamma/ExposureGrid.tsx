@@ -185,6 +185,11 @@ export interface ExposureGridProps {
    *  stronger guarantee than "the same query key". */
   gamma: GammaResponse
   expiries: string[]
+  /** The tab's volume-shade toggle, applied to all six cells at once. One
+   *  control, because the shade is one series drawn six times -- six
+   *  independent switches would let the grid disagree with itself about
+   *  whether today's volume is worth showing. */
+  showVolume: boolean
   /** "Stack volume & OI" — the tab's checkbox, which now governs this view's
    *  book section as well as the detail view's panels. Shared rather than
    *  duplicated so switching views does not silently change the answer. */
@@ -196,7 +201,7 @@ export interface ExposureGridProps {
  *  identity of its own to be maximised by. */
 const PAIR_ID = 'gamma-pair'
 
-export function ExposureGrid({ gamma, expiries, stack, onStack }: ExposureGridProps) {
+export function ExposureGrid({ gamma, expiries, showVolume, stack, onStack }: ExposureGridProps) {
   const [pairIndex, setPairIndex] = useState(0)
   // ONE AT A TIME. Two full-screen panels is not a state that means anything.
   const [big, setBig] = useState<string | null>(null)
@@ -289,11 +294,11 @@ export function ExposureGrid({ gamma, expiries, stack, onStack }: ExposureGridPr
           rows={gamma.rows}
           ranges={wicks}
           volumeRows={gamma.rows}
+          showVolume={showVolume}
           xRange={xRange}
           spec={pair.spec}
           ticks={gamma.ticks}
           spot={gamma.spot}
-          flipStrike={gamma.flip_strike ?? null}
           height={big === PAIR_ID ? FULL_HEIGHT : CELL_HEIGHT}
         />
       </Cell>
@@ -322,11 +327,11 @@ export function ExposureGrid({ gamma, expiries, stack, onStack }: ExposureGridPr
                 rows={body.rows}
                 ranges={rangeFor[measure]}
                 volumeRows={gamma.rows}
+                showVolume={showVolume}
                 xRange={xRange}
                 spec={spec}
                 ticks={body.ticks}
                 spot={body.spot}
-                flipStrike={body.flip_strike ?? null}
                 height={big === spec.title ? FULL_HEIGHT : CELL_HEIGHT}
               />
             )}
@@ -360,11 +365,11 @@ export function ExposureGrid({ gamma, expiries, stack, onStack }: ExposureGridPr
               rows={gamma.rows}
               ranges={wicks}
               volumeRows={gamma.rows}
+              showVolume={showVolume}
               xRange={xRange}
               spec={spec}
               ticks={NO_TICKS}
               spot={gamma.spot}
-              flipStrike={gamma.flip_strike ?? null}
               height={big === spec.title ? FULL_HEIGHT : BOOK_HEIGHT}
             />
           </Cell>

@@ -152,7 +152,13 @@ def test_an_incomplete_newest_snapshot_does_not_move_the_anchor(stale_db):
 
 def test_every_history_read_shares_the_window():
     """Four reads had this bug and all four were fixed. A fifth added later
-    that writes its own `datetime('now', ...)` would reintroduce it silently."""
+    that writes its own `datetime('now', ...)` would reintroduce it silently.
+
+    THE COUNT IS DELIBERATELY EXACT, so a new history read cannot slip in
+    without someone looking at this line. It went 4 -> 5 on 2026-09-07 for
+    `get_underlying_history`, which reads SPX alone so the strike-channel
+    panel survives an afternoon whose option legs stopped being quoted; it
+    uses the shared clause, which is what the number is here to confirm."""
     from pathlib import Path
     source = Path(db.__file__).read_text(encoding="utf-8")
 
@@ -164,7 +170,7 @@ def test_every_history_read_shares_the_window():
         "a history window measured from the wall clock will blank a chart as "
         f"the day goes on: {offenders}"
     )
-    assert sum("{_WINDOW_CLAUSE}" in ln for ln in code) == 4
+    assert sum("{_WINDOW_CLAUSE}" in ln for ln in code) == 5
 
     # And none of them may group sessions on the bare UTC date: that splits a
     # New York evening at 20:00 (BUG-035's second half). The shared clause

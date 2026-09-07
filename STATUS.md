@@ -1,7 +1,8 @@
 # PROJECT STATUS
 
 **Updated:** 2026-09-07 · **Branch:** `m6-gamma-live-clock`, merged to `main` and saved online.
-**State:** **1,505 checks pass. Everything is committed.** Stage 5 done; stage 6 running. The new
+**State:** **1,530 checks pass.** The data service was restarted 2026-09-07 and serves the
+SPX fix and `/locks`; the two screens have not been looked at since. Stage 5 done; stage 6 running. The new
 screen was checked in a real browser against the live record after the changes below.
 > Self-contained: read this file alone to start a session. Replaced entirely by `/wrap`.
 
@@ -58,19 +59,34 @@ cannot fail is worse than none.**
 
 1. **Research, then Entry Analysis** are the two tabs not started. **Entry Analysis has a known
    hole**: six figures it needs are computed inside the old screen's startup code, served nowhere.
-2. **The lower half of the Gamma Exposure tab is still unbuilt** — the time panels, the 0DTE flow
+2. **The volume shade on Gamma Exposure is now a checkbox** ("Volume shade", tab toolbar,
+   on by default, both layouts). It is NOT remembered across a reload — say so if it should be,
+   since that would be the first browser storage on this screen.
+3. **The lower half of the Gamma Exposure tab is still unbuilt** — the time panels, the 0DTE flow
    board, dealer structure, net flow and the replay.
-3. **Entry locks are scoped and ready to build (ADR-054).** The data service may write **entry
-   locks only** — not the `trades` table, no Journal row. Smaller than it sounds: locks live in
-   `entry_locks.json`, a sidecar, not in the database, so `data/dashboard.db` stays read-only to
-   the API. Two things to honour while building: the collector READS these locks to choose which
-   strikes to fetch, so writing one is not inert; and `create` is load-modify-save on one dict, so
-   two screens saving at the same instant lose an update silently.
-4. **Restart the data service, then look at Calendar Edge** — `api/reads.py` changed and it does
+4. **Three fixes are live on the data service and UNSEEN on the screens — look at Calendar
+   Edge on both.** (a) The **SPX panel now
+   runs to the close** even when the marks stop early — the index was being dropped whenever an
+   option leg went unquoted. (b) The **three time charts are drawn in one shared frame**, so
+   16:01 sits at the same pixel on all three; this is the fault reported four times, and the
+   cause was the MARGINS, not the range (ADR-055). (c) Entry locks, below.
+5. **Entry locks work and Chandan has one open** — Put 7700 / Call 7725, 11 Sep → 14 Sep,
+   entry $9.30. The new screen now has **All Locks** (list, view, remove) beside the lock
+   button, and the chart switches to **position management** when a lock is held: dashed entry
+   line, the live diagonal dimmed and renamed hypothetical, and the tooltip measuring against
+   entry. A parity check holds both screens to the same wordings. **Correcting a locked price
+   is deliberately not built** — the old screen has it, nothing asked for it here.
+   Older note, still true: The data service now
+   has `/locks` (list, create, clear) and the new screen has the Lock Entry control above the
+   Diagonal chart. **The data service must be restarted before any of it exists** — it does not
+   reload itself. Then, on the new screen: lock a combo, confirm the badge shows the price and
+   time, reload the page, and clear it. **Locking is a real write the collector reads** — it pins
+   those strikes for future fetches — so do this on a combo worth pinning, or clear it after.
+6. **Restart the data service, then look at Calendar Edge** — `api/reads.py` changed and it does
    not reload itself. Check on both Today and 5D: every session runs to 16:15, the 16:00-16:02
    closing readings are now drawn, and a session that lost its afternoon shows blank space rather
    than a short day. **The old screen changed too** (`views/edge.py`), so give 8501 a rerun.
-5. **`views/entry.py` still holds `_THRESHOLD = 5.0`** — its own docstring admits it. Calendar Edge
+7. **`views/entry.py` still holds `_THRESHOLD = 5.0`** — its own docstring admits it. Calendar Edge
    is clean and guarded now; Entry Analysis is the remaining copy (DEBT-031).
 
 ## Open problems
@@ -98,7 +114,9 @@ copies disagreeing at exactly 5.00. **DEBT-036** — `pinned_pairs.json` is dead
   comparisons live in Python, under test; a missing label is a field on the answer.
 - **Reading never writes** (ADR-052), **narrowed by ADR-054**: the data service may write entry
   locks, a sidecar file, and nothing else. The database stays read-only to the API. A read must
-  still be safe to repeat; the new screen retries.
+  still be safe to repeat; the new screen retries — which is why **deleting a lock that is not
+  there is a success, not a 404**, and why **locking a combo already locked is refused (409)
+  rather than overwriting the time the position was taken**.
   **Countdowns follow the clock only on the newest day's data** (ADR-053).
 - **The two third-Friday contracts are different options the record distinguishes** (ADR-046/047),
   and the morning one is over at the opening print at 9:30 New York (ADR-048).
@@ -106,6 +124,16 @@ copies disagreeing at exactly 5.00. **DEBT-036** — `pinned_pairs.json` is dead
   kept forever** (ADR-044); **history windows count sessions on record** (BUG-035), in New York time.
 - **Zero is a measurement, not an absence** (BUG-041) — everywhere except implied volatility,
   where a reported 0.0 means the broker could not price it.
+- **Charts that share a clock share a FRAME, not just a range** (ADR-055,
+  `web/src/edge/timeAxis.ts`). Plotly maps a range onto the container minus the margins, so
+  three charts agreeing on the range and disagreeing on `margin.r` by 38px still do not line
+  up. Reported four times and fixed three times against the innocent cause. The shared value is
+  the widest requirement, or the dual-axis chart's labels are clipped. A check reads all three
+  files. **When a fix does not take, re-measure the symptom instead of refining the fix.**
+- **The index is not a column on an option row.** SPX is read by its own query
+  (`db.get_underlying_history`), because the marks query drops any snapshot missing one of the
+  six legs and the index was riding along — so a 0DTE afternoon ended the SPX panel an hour
+  early. The marks still stop when the legs stop, and that is correct.
 - **Charts are drawn on whole sessions, not on the extent of their data**
   (`core.series.session_axis_range`, every window including multi-day). An axis that stops where
   the data stops hides the hole; anchoring to a series also moves the axis depending on which

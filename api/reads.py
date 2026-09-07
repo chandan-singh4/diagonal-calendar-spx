@@ -238,6 +238,24 @@ def build_router(ctx: ReadContext) -> APIRouter:
         # Plotly's rangebreaks (DEBT-030), and where a line must break across
         # a weekend or an outage is a question about the record, not about
         # the drawing.
+        # SPX IS READ SEPARATELY, and that is the point of this block. The
+        # marks query drops any snapshot missing one of the six option legs,
+        # because a diagonal cannot be priced without all six -- but the index
+        # was riding on those same rows, so a 0DTE afternoon whose front legs
+        # stop being quoted around 15:00 took the SPX panel down with it and
+        # the chart's lower half ended an hour before the market did
+        # (Chandan, 2026-09-07: "that's just the market data, that goes to
+        # four PM irrespective"). One query per question.
+        spx_df = ctx.cached(
+            ("underlying", days),
+            lambda: queries.load_underlying_history(ctx.db_path, days=days))
+        if not spx_df.empty:
+            spx_df = series.to_display_time(spx_df, config.DISPLAY_TIMEZONE,
+                                            ts_col="snapshot_timestamp")
+            spx_df = spx_df.rename(columns={"snapshot_timestamp": "timestamp"})
+            spx_df = series.break_sessions(spx_df.sort_values("timestamp")
+                                           .reset_index(drop=True))
+
         rest: dict[str, Any] = {}
         if not df.empty:
             df = series.to_display_time(
@@ -247,15 +265,20 @@ def build_router(ctx: ReadContext) -> APIRouter:
             df = series.break_sessions(df.sort_values("timestamp")
                                        .reset_index(drop=True))
             rest["rangebreaks"] = series.SESSION_RANGEBREAKS
-            # Where the underlying crossed a short strike, and which way.
-            # Served rather than left to the client: a crossing is a directed
-            # event with a boundary rule (see strike_crossings), and getting
-            # that boundary wrong marks a chart with events that never
-            # happened -- which reads as a volatile session, not as a bug.
-            if "spx" in df.columns and df["spx"].notna().any():
-                rest["crossings"] = series.strike_crossings(
-                    df["timestamp"].astype(str).tolist(),
-                    df["spx"].tolist(), (put_strike, call_strike))
+        # Where the underlying crossed a short strike, and which way.
+        # Served rather than left to the client: a crossing is a directed
+        # event with a boundary rule (see strike_crossings), and getting
+        # that boundary wrong marks a chart with events that never
+        # happened -- which reads as a volatile session, not as a bug.
+        #
+        # COMPUTED ON THE FULL SPX SERIES, not on the marks rows. A crossing
+        # is an event in the index; deriving it from rows that end at 14:50
+        # would silently drop every crossing after that, on the one kind of
+        # session -- a 0DTE afternoon -- where they matter most.
+        if not spx_df.empty:
+            rest["crossings"] = series.strike_crossings(
+                spx_df["timestamp"].astype(str).tolist(),
+                spx_df["spx"].tolist(), (put_strike, call_strike))
         # The 5-point line, served rather than restated. It is already
         # duplicated in four places in Python (DEBT-031); the shading on the
         # React chart marks every stretch at or above it, and a fifth copy
@@ -278,8 +301,17 @@ def build_router(ctx: ReadContext) -> APIRouter:
                                        # of missing marks read as a short
                                        # trading day. Same definition the old
                                        # screen draws on.
+                                       # DRAWN ON THE SPX SESSIONS, not the
+                                       # marks'. They are the same sessions --
+                                       # one query is a subset of the other --
+                                       # but taking the axis from the series
+                                       # that survives to the close is what
+                                       # stops a 0DTE afternoon shortening the
+                                       # whole figure.
                                        session_axis_range=series.session_axis_range(
-                                           df["timestamp"] if not df.empty else []),
+                                           spx_df["timestamp"] if not spx_df.empty
+                                           else (df["timestamp"] if not df.empty else [])),
+                                       spx_rows=serialize.frame_to_records(spx_df),
                                        **rest)
 
     @router.get("/pairs/atm-pair",
@@ -1178,6 +1210,12 @@ def build_computed_router(ctx: ReadContext) -> APIRouter:
             )
 
         target, chain, spot = _chain_and_spot(snapshot_id)
+        # WHEN THE SNAPSHOT WAS TAKEN, read once for every branch below. It
+        # used to be fetched inside the second-order branch alone; since
+        # BUG-044 the gamma and vGEX branches need it too, because the
+        # zero-gamma level re-prices the chain and a 0DTE contract's remaining
+        # hours are the difference between a level and a blank.
+        snapshot_ts = db.get_snapshot_by_id(ctx.db_path, target)["snapshot_timestamp"]
         # THE SELECTOR'S OPTIONS TRAVEL WITH EVERY ANSWER. `expiry` is a
         # display key and there was no way to discover the valid ones short of
         # pulling the whole chain. Returned on all four measures because the
@@ -1228,7 +1266,11 @@ def build_computed_router(ctx: ReadContext) -> APIRouter:
             # echoing of `measure` exists to prevent.
             result = ctx.cached(
                 ("vgex", target, scope),
-                lambda: computed.volume_gamma_exposure(chain, spot, scope))
+                lambda: computed.volume_gamma_exposure(
+                    chain, spot, scope,
+                    r=config.RISK_FREE_RATE, q=config.DIVIDEND_YIELD,
+                    snapshot_ts=snapshot_ts,
+                    display_tz=config.DISPLAY_TIMEZONE))
             frame = result["by_strike"]
             rest = {k: v for k, v in result.items() if k != "by_strike"}
             return serialize.frame_payload(
@@ -1254,8 +1296,6 @@ def build_computed_router(ctx: ReadContext) -> APIRouter:
                 **rest)
 
         if measure != "gamma":
-            row = db.get_snapshot_by_id(ctx.db_path, target)
-            snapshot_ts = row["snapshot_timestamp"]
             second = ctx.cached(
                 ("second-order", target, scope, measure),
                 lambda: computed.second_order_exposure(
@@ -1276,7 +1316,11 @@ def build_computed_router(ctx: ReadContext) -> APIRouter:
 
         result = ctx.cached(
             ("gamma", target, scope),
-            lambda: computed.gamma_exposure(chain, spot, scope))
+            lambda: computed.gamma_exposure(
+                chain, spot, scope,
+                r=config.RISK_FREE_RATE, q=config.DIVIDEND_YIELD,
+                snapshot_ts=snapshot_ts,
+                display_tz=config.DISPLAY_TIMEZONE))
         # COPY, DO NOT POP. `ctx.cached` returns the SAME dict on every hit,
         # so mutating it here emptied the cache entry the first time through
         # and raised KeyError on the second request in the same process.

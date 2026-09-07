@@ -880,3 +880,275 @@ def test_the_calendar_edge_page_never_writes_the_threshold_as_a_literal():
     assert not offenders, (
         f"{len(offenders)} literal copies of the transform threshold in "
         "views/edge.py -- import TSCAN_THRESHOLD from core.scanner instead")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The Calendar Edge time axis — three charts, one frame
+# ─────────────────────────────────────────────────────────────────────────────
+
+_TIME_AXIS_CHARTS = ("GapChart.tsx", "IvChart.tsx", "IvDualAxis.tsx")
+
+
+def test_the_list_of_time_charts_has_not_gone_stale():
+    """A hand-written list is a list that stops being true.
+
+    Any chart drawn on the session clock takes `sessionAxisRange` -- that is
+    what makes it one of these -- so the roster can be recovered from the
+    source rather than remembered. `IvScatter.tsx` is deliberately absent: its
+    x-axis is an IV ratio, not a time, so it keeps its own frame and should.
+    """
+    edge = ROOT / "web" / "src" / "edge"
+    def is_a_time_chart(path) -> bool:
+        text = path.read_text(encoding="utf-8")
+        # It draws (imports Plotly) AND it is handed the session window.
+        # EdgeTab.tsx names `sessionAxisRange` too, but only to pass it on --
+        # it owns no frame, so it is not one of these.
+        return "sessionAxisRange" in text and "from 'plotly.js-dist-min'" in text
+
+    time_charts = {path.name for path in edge.glob("*.tsx") if is_a_time_chart(path)}
+    assert time_charts == set(_TIME_AXIS_CHARTS), (
+        "a chart on the session clock is not covered by the shared-frame "
+        f"check: {sorted(time_charts.symmetric_difference(_TIME_AXIS_CHARTS))}"
+    )
+
+
+def test_every_calendar_edge_time_chart_is_drawn_in_the_same_frame():
+    """THE FAULT THIS PREVENTS CAME BACK FOUR TIMES.
+
+    Three charts on Calendar Edge share the session clock and are read by
+    scanning down the page. They already drew the identical
+    `session_axis_range` -- and still did not line up, because Plotly maps a
+    range onto the plotting area, and the plotting area is the container minus
+    the MARGINS. GapChart and IvChart used `r: 20`; IvDualAxis needs room for
+    its right-hand Ratio axis and used `r: 58`. Same range, a plot area 38px
+    narrower, so 16:01 on the bottom chart sat 38px left of 16:01 above it.
+
+    Every previous fix went to the range, which was never what was broken --
+    which is why the fix kept not working. The old Streamlit page had this
+    right all along (`_SYNC_MARGIN_L/_R` in views/edge.py, with a comment
+    saying why); the rebuild lost it.
+
+    SCANNING THE SOURCE, not the rendering. A visual check needs a browser and
+    a human eye, and this is precisely the fault that survived four of those.
+    """
+    import re
+
+    edge = ROOT / "web" / "src" / "edge"
+    offenders = []
+    for name in _TIME_AXIS_CHARTS:
+        source = (edge / name).read_text(encoding="utf-8")
+        body = " ".join(line for line in source.splitlines()
+                        if not line.lstrip().startswith("//")
+                        and not line.lstrip().startswith("*"))
+        # A margin written as an object literal is a private frame.
+        if re.search(r"margin:\s*\{", body):
+            offenders.append(f"{name} writes its own margin")
+        if "TIME_AXIS_MARGIN" not in body:
+            offenders.append(f"{name} does not use TIME_AXIS_MARGIN")
+
+    assert not offenders, (
+        "Calendar Edge time charts must share one frame -- "
+        + "; ".join(offenders)
+        + ". Import TIME_AXIS_MARGIN from './timeAxis'."
+    )
+
+
+def test_the_shared_frame_leaves_room_for_the_widest_axis():
+    """The right margin must fit the dual-axis chart's Ratio labels.
+
+    Sharing the frame is only half of it: shared at `r: 20` would align all
+    three and clip the right-hand tick labels off the bottom one. The shared
+    value has to be the widest requirement, not the narrowest -- so this pins
+    the direction the three were reconciled in.
+    """
+    import re
+
+    source = (ROOT / "web" / "src" / "edge" / "timeAxis.ts").read_text(encoding="utf-8")
+    match = re.search(r"TIME_AXIS_MARGIN\s*=\s*\{([^}]*)\}", source)
+    assert match, "TIME_AXIS_MARGIN is not an object literal any more"
+    values = dict(re.findall(r"(\w+):\s*(\d+)", match.group(1)))
+    assert int(values["r"]) >= 58, (
+        "the right margin must fit the IV Ratio axis -- 58px was measured, "
+        f"got {values['r']}")
+    assert int(values["l"]) >= 58, (
+        "the left margin must fit a four-digit SPX tick and its axis title")
+
+
+def test_both_screens_switch_to_position_management_the_same_way():
+    """A lock changes what the chart MEANS, and it must mean the same thing on
+    both screens while both are live.
+
+    `views/edge.py` has done this since long before the rebuild: on a lock it
+    draws the entry as a fixed dashed line, dims the live diagonal to
+    reference context under a name that says it is hypothetical, and relabels
+    the fourth tooltip line to the SIGNED difference against entry. The new
+    screen shipped the lock button first and none of that (Chandan,
+    2026-09-07: "it was represented by the dotted line ... that is also
+    missing").
+
+    THE TWO WORDINGS ARE THE ASSERTION. A reader moving between the screens
+    reads the same label for the same quantity, and a silent divergence here
+    is the worst kind: both charts look right, and they answer different
+    questions under the same heading.
+    """
+    old = (ROOT / "views" / "edge.py").read_text(encoding="utf-8")
+    new = (ROOT / "web" / "src" / "edge" / "GapChart.tsx").read_text(encoding="utf-8")
+
+    shared = ["Live Difference (vs. entry)", "Live Diagonal Mark (hypothetical)"]
+    missing = [phrase for phrase in shared
+               if phrase not in old or phrase not in new]
+    assert not missing, (
+        "the two screens disagree about what a locked position looks like: "
+        f"{missing}"
+    )
+
+    # And the entry price itself is drawn, not merely named in a tooltip.
+    assert "Entry $" in old and "Entry $" in new, (
+        "the locked entry must be drawn as a labelled line on both screens"
+    )
+
+
+def test_every_panel_that_shades_volume_obeys_the_tab_toggle():
+    """The volume shade is context, not measurement, and the reader may switch
+    it off (Chandan, 2026-09-07: "I can either choose to have it or not").
+
+    THE FAULT THIS PREVENTS is a seventh panel added later that draws the
+    shade and never reads the toggle: the checkbox would then clear five
+    panels and leave one shaded, which reads as a rendering glitch rather than
+    as a control that does not reach. `chart.ts` is where the colours are
+    DEFINED and draws nothing, so it is exempt by that rule rather than by
+    name -- a file that only names the constants has no trace to gate.
+    """
+    gamma = ROOT / "web" / "src" / "gamma"
+    offenders = []
+    for path in sorted(gamma.glob("*.ts*")):
+        text = path.read_text(encoding="utf-8")
+        draws = "fillcolor: fill" in text and "VOL_FILL" in text
+        if draws and "showVolume" not in text:
+            offenders.append(path.name)
+    assert not offenders, (
+        "these panels draw the volume shade without reading the tab's "
+        f"toggle: {offenders}"
+    )
+
+
+def test_the_toggle_cannot_put_a_volume_shade_behind_the_volume_chart():
+    """`spec.shade === false` is the PANEL's refusal; `showVolume` is the
+    READER's preference. They are different questions and the grid's book
+    cell depends on the difference -- volume drawn behind volume is not a
+    backdrop, it is the same series twice.
+
+    Collapsing the two into one flag is the tempting simplification, so the
+    check pins that MiniPanel still asks both.
+    """
+    text = (ROOT / "web" / "src" / "gamma" / "MiniPanel.tsx").read_text(encoding="utf-8")
+    assert "spec.shade === false || !showVolume" in text, (
+        "MiniPanel must refuse the shade when EITHER the panel forbids it or "
+        "the reader has switched it off"
+    )
+
+
+def test_the_reader_steering_a_query_never_blanks_the_page():
+    """Changing the expiry must not empty the screen it is being changed on.
+
+    THE FAULT. A new selection is a new query key, which has no cached data,
+    so `isPending` is true and GammaTab returned a bare "Loading the chain…"
+    for the WHOLE tab — unmounting the toolbar, and with it the open dropdown.
+    Chandan, 2026-09-07: "the whole page refreshes ... and the dropdown goes
+    away, and I have to click on the dropdown again."
+
+    ONE CAUSE, TWO SYMPTOMS, and the second is the one that hides the first:
+    the picker has no close-on-select and never did. It was being unmounted
+    along with everything else and coming back with its state reset. Anyone
+    debugging the dropdown alone would find nothing wrong with it.
+
+    `keepPreviousData` keeps the last answer on screen while the new one
+    loads, so the page stays mounted. The page must then SAY that what it
+    shows is the previous scope's answer, which is what `isPlaceholderData`
+    is for -- and not `isFetching`, which is also true during the background
+    refresh that leaves the answer correct.
+    """
+    client = (ROOT / "web" / "src" / "api" / "client.ts").read_text(encoding="utf-8")
+    tab = (ROOT / "web" / "src" / "gamma" / "GammaTab.tsx").read_text(encoding="utf-8")
+
+    # The two hooks the expiry picker re-keys.
+    for hook in ("useGamma", "useSessionRange"):
+        start = client.index(f"export function {hook}")
+        body = client[start:start + 900]
+        assert "...STEERED" in body, (
+            f"{hook} is re-keyed by the expiry picker, so it must keep the "
+            "previous answer while the new one loads (STEERED, not SHARED)"
+        )
+
+    # CODE, NOT PROSE. The first version of this line searched the whole file
+    # and passed on a build where the only mention left was the comment
+    # EXPLAINING isPlaceholderData -- caught by breaking it, which is the
+    # entire reason breaking is the rule here.
+    tab_code = " ".join(line for line in tab.splitlines()
+                        if not line.lstrip().startswith(("//", "*", "/*")))
+    assert "isPlaceholderData" in tab_code, (
+        "the tab must say when what is drawn belongs to the previous "
+        "selection -- silently showing a stale chain under a new scope is "
+        "worse than blanking, because the reader believes it"
+    )
+
+    # ...AND IT MUST WAIT BEFORE SAYING IT. Chandan, 2026-09-07, on the fix
+    # above: "charts go dim and say Updating", reported as the page still
+    # refreshing. An expiry is answered in ~0.2s, so the dim appeared and
+    # vanished inside a fifth of a second on every click -- correct, and read
+    # as a flicker, which is what the change was meant to stop. A signal that
+    # fires on every ordinary action is not a signal.
+    assert "useSettled(restating, SETTLE_MS)" in tab_code, (
+        "the stale mark must be the DELAYED form of `restating`, or it "
+        "flickers on every tick of the picker (see SETTLE_MS in GammaTab). "
+        "Naming the constant is not enough -- the flag actually drawn from "
+        "has to be the delayed one"
+    )
+    for marker in ("{stale && (", "opacity: stale ?"):
+        assert marker in tab_code, (
+            f"expected {marker!r}: the dim and the label must both be driven "
+            "by the DELAYED flag. Driving either from `restating` directly is "
+            "the flicker Chandan reported"
+        )
+    # The delayed flag must still be derived from the immediate one. A `stale`
+    # that had drifted loose of `isPlaceholderData` -- pinned to `isFetching`,
+    # say -- would dim on the background refresh that leaves the answer
+    # correct, which is the same flicker wearing a different cause.
+    derivation = tab_code[tab_code.index("const stale ="):]
+    assert derivation[:120].count("restating") == 1, (
+        "`stale` must be the delayed form of `restating` and nothing else"
+    )
+
+
+def test_no_strike_chart_draws_the_gamma_flip_as_a_line():
+    """**THE FLIP IS A NUMBER, NOT A LINE** (Chandan, 2026-09-07; ADR-056b).
+
+    THE FAULT THIS PINS. The level is the WHOLE CHAIN's while every strike
+    chart draws ONE EXPIRY's bars. A dashed vertical rule across those bars
+    makes the one claim it cannot support — that the bars change character at
+    that price, that "all the green turns to red" there — and no label beside
+    it is loud enough to deny what the line asserts.
+
+    Removing the drawing without pinning its absence would leave the next
+    person free to add it back as an obvious improvement; the reason it is
+    gone lives in an ADR, which is not where anyone looks before adding a
+    `add_vline`. So the check is here, against the source.
+
+    THE SPOT LINE IS NOT WHAT THIS FORBIDS — spot really is a property of the
+    bars beneath it, and every panel still draws it. Only the flip is barred.
+    """
+    charts = {
+        "web/src/gamma/StrikeChart.tsx": "flipStrike",
+        "web/src/gamma/MiniPanel.tsx": "flipStrike",
+        "views/gex.py": "flip",
+    }
+    for relative, name in charts.items():
+        path = ROOT / relative
+        assert path.exists(), f"{relative} moved -- this check now proves nothing"
+        text = path.read_text(encoding="utf-8")
+        # The words appear in the prose explaining WHY there is no line, so the
+        # check is for the DRAWING, not for the mention.
+        body = "\n".join(line for line in text.splitlines()
+                          if not line.lstrip().startswith(("#", "//", "*")))
+        assert f"x0: {name}" not in body, f"{relative} draws the flip again"
+        assert f"add_vline(x={name}" not in body, f"{relative} draws the flip again"

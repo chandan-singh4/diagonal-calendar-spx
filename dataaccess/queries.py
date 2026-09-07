@@ -200,6 +200,17 @@ def load_transform_marks(db_path, front: str, back: str, call_s: float,
     return pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
 
 
+def load_underlying_history(db_path, *, days: int) -> pd.DataFrame:
+    """SPX over the window, independent of any option chain.
+
+    Read separately from the marks so that the lower panel of the gap chart
+    runs to the close even on a 0DTE session whose front legs stop being
+    quoted mid-afternoon -- see get_underlying_history.
+    """
+    rows = db.get_underlying_history(db_path, days=days)
+    return pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
+
+
 def load_latest_atm_iv(db_path, expiry: str, n: int = 2) -> list:
     """The n most recent ATM-IV snapshots for one contract (as plain dicts).
 

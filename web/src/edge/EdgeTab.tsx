@@ -16,9 +16,10 @@
  */
 import { useState } from 'react'
 
-import { useAtmPair, useControls, useEdgeHeadline, useTransformMarks } from '../api/client'
+import { useAtmPair, useControls, useEdgeHeadline, useLocks, useTransformMarks } from '../api/client'
 import type { EdgeSelection } from '../nav'
 import { EdgeMetrics } from './EdgeMetrics'
+import { EntryLockBar } from './EntryLockBar'
 import { GapChart } from './GapChart'
 import { IvChart } from './IvChart'
 import { IvDualAxis } from './IvDualAxis'
@@ -78,6 +79,16 @@ export function EdgeTab({ initial = null }: { initial?: EdgeSelection | null }) 
   const eCall = callStrike ?? c?.call_strike ?? null
 
   const marks = useTransformMarks(eFront, eBack, eCall, ePut, days)
+
+  // THE SAME QUERY EntryLockBar RUNS, not a second request: react-query serves
+  // both from one cache entry under the key ['locks']. Read here because the
+  // chart changes shape when a position is held, and the bar cannot reach it.
+  const locks = useLocks()
+  const currentLock = locks.data?.locks.find(
+    (lock) =>
+      lock.front_expiry === eFront && lock.back_expiry === eBack &&
+      lock.put_strike === ePut && lock.call_strike === eCall,
+  )
   const atm = useAtmPair(eFront, eBack, days)
   const headline = useEdgeHeadline(eFront, eBack)
 
@@ -107,6 +118,32 @@ export function EdgeTab({ initial = null }: { initial?: EdgeSelection | null }) 
 
       <EdgeMetrics data={headline.data} />
 
+      {/* Position management for the combo the chart below is drawing. Placed
+          above the chart, as on the Streamlit page, because it changes what
+          that chart MEANS -- a locked combo is being managed, not shopped
+          for. The mark it freezes is the last row the chart drew. */}
+      <EntryLockBar
+        frontExpiry={eFront}
+        backExpiry={eBack}
+        putStrike={ePut}
+        callStrike={eCall}
+        // Selecting a locked position sets all four at once. They are set
+        // together rather than one at a time because a half-applied selection
+        // is a combo that was never locked -- the chart would fetch marks for
+        // a pair nobody holds and show it as unlocked.
+        onSelect={(next) => {
+          setFront(next.frontExpiry)
+          setBack(next.backExpiry)
+          setPutStrike(next.putStrike)
+          setCallStrike(next.callStrike)
+        }}
+        currentMark={
+          marks.data && marks.data.rows.length > 0
+            ? (marks.data.rows[marks.data.rows.length - 1].diagonal_mark ?? null)
+            : null
+        }
+      />
+
       <Heading
         icon="🟢"
         title="Diagonal vs. Transform Order Mark"
@@ -128,6 +165,7 @@ export function EdgeTab({ initial = null }: { initial?: EdgeSelection | null }) 
         <>
           <GapChart
             rows={marks.data.rows}
+            spxRows={marks.data.spx_rows ?? []}
             rangebreaks={marks.data.rangebreaks ?? []}
             crossings={marks.data.crossings ?? null}
             putStrike={ePut ?? 0}
@@ -135,13 +173,31 @@ export function EdgeTab({ initial = null }: { initial?: EdgeSelection | null }) 
             threshold={marks.data.threshold}
             marketOpens={marks.data.market_opens ?? []}
             sessionAxisRange={marks.data.session_axis_range ?? null}
+            entryMark={currentLock?.entry_diagonal_mark ?? null}
           />
+          {currentLock ? (
+            // POSITION MANAGEMENT. The caption below describes a band that is
+            // no longer drawn and a comparison that is no longer the one being
+            // made, so it is replaced rather than added to.
+            <p className="mt-1 text-[11px]" style={{ color: 'var(--text-3)' }}>
+              Position management: the dashed line is your locked entry at $
+              {currentLock.entry_diagonal_mark.toFixed(2)}. Read the green
+              Transform Order Mark against it — when it sits{' '}
+              {marks.data.threshold} points above the dashed line, the
+              transformation is worth taking. The dotted blue line is what a
+              NEW diagonal would cost today, kept only as context. Green
+              shading still marks the live gap reaching{' '}
+              {marks.data.threshold}. Lower panel: SPX against the short
+              strikes; ▲▼ mark a strike being crossed.
+            </p>
+          ) : (
           <p className="mt-1 text-[11px]" style={{ color: 'var(--text-3)' }}>
             Green shading marks every stretch when the position could have been
             transformed — when the iron condor was worth at least{' '}
             {marks.data.threshold} points more than the diagonal being held. Lower
             panel: SPX against the short strikes; ▲▼ mark a strike being crossed.
           </p>
+          )}
         </>
       )}
 

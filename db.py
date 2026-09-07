@@ -1360,6 +1360,36 @@ def get_transform_mark_history(
         ).fetchall()
 
 
+def get_underlying_history(db_path: str, days: int = 90) -> list:
+    """SPX at every complete snapshot in the window. No options involved.
+
+    WHY THIS IS NOT A COLUMN ON get_transform_mark_history. It was, and that
+    was the fault Chandan found twice. That query drops any snapshot where one
+    of the six option legs has no computable mark -- correct for the marks,
+    which cannot be computed without all six -- and `s.underlying_price` was
+    riding on the same row. So a 0DTE afternoon, where the front legs stop
+    being priceable around 15:00, took the SPX line down with it and the lower
+    panel stopped an hour before the market did. SPX is the index; it is
+    recorded on the snapshot itself and does not stop existing because an
+    option went unquoted.
+
+    Same window and same completeness rule as the marks, so the two series are
+    measured over the same sessions and can be drawn on one axis.
+    """
+    with get_conn(db_path) as conn:
+        return conn.execute(
+            f"""
+            SELECT s.snapshot_timestamp, s.underlying_price AS spx
+            FROM snapshots s
+            WHERE s.status = 'COMPLETE'
+              AND s.underlying_price IS NOT NULL
+              AND {_WINDOW_CLAUSE}
+            ORDER BY s.snapshot_timestamp
+            """,
+            (days,),
+        ).fetchall()
+
+
 def get_gaps(db_path: str, start: str, end: str,
               exclude_reasons: list[str] | None = None) -> list:
     """Collection gaps within a date range."""

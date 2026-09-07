@@ -7,6 +7,175 @@ it was recorded here.
 
 ---
 
+## ADR-056 — The gamma flip is a re-priced level, not a running total
+
+**Date:** 2026-09-07 · **Status:** Accepted · **Decided by:** Chandan ("C is the real answer
+and I'll go with that") · **Closes:** BUG-044
+
+**Context.** Chandan: *"I am not sure the gamma flip is calculated properly ... it is not
+available for some of the expiry dates and for some of the expiry dates, it's completely
+incorrect."* Both halves were the same defect. `core.gex.flip_strike` accumulated `net_gex`
+up the strikes and reported where the running total crossed zero — and that total starts at
+zero **at the lowest strike collected**, which is a fact about the collector, not the market.
+Every strike below the floor was exposure left out, so the curve carried an unknown offset
+and the crossing moved with it.
+
+**The measurement that settled it.** Snapshot 6387, one book, one second, nothing changed but
+where the chain was cut: 2026-09-16 read 7846 as collected, 7819 from 7560, 7772 from 7600,
+7672 from 7640. **175 points of movement with no market change.** The blanks were the same
+fault caught by an edge guard; the printed numbers were the same fault not caught. Eight of
+twenty expiries were blank, and the screen said nothing about why.
+
+**Three options were put to Chandan** — (a) report only where the omitted tail is provably
+small, (b) keep the number and relabel it as relative, (c) adopt the industry definition. He
+chose (c), the one that is a different piece of work rather than a patch.
+
+**Decision.** The gamma flip is now `core.gex.zero_gamma_spot`: **the SPX level at which the
+book's total dealer gamma would be zero.** Every contract is re-priced at each candidate
+level through Black-Scholes (`iv_engine.gamma`, new), the dealer-signed gammas are summed,
+and the sign change nearest spot is bisected to a level.
+
+**Why this is not the same fault in another shape.** There is no running total and no
+baseline. A missing far strike enters the sum **once**, at its own weight, instead of
+shifting a total that every strike above it inherits. That is a bound, not an escape:
+measured at a week to expiry, a strike 300 points out still carries ~5% of an at-the-money
+contract's gamma, so an omission near the money still matters and always will. What it no
+longer does is accumulate.
+
+**What it rests on, stated because it is the whole exposure.** Sticky strike (each contract
+keeps today's IV) and frozen inventory (open interest does not move with spot). Both are the
+standard assumptions behind every published zero-gamma figure — much of the point of
+adopting the standard definition — and both weaken with distance from spot. The dealer-sign
+convention is inherited unchanged and is still the assumption the whole tab rests on.
+
+**Consequences.**
+
+* `flip_strike` and `cumulative_net` are **deleted**, not deprecated. The old number is now
+  unreachable rather than merely unused.
+* `gex.summary` **takes** the level instead of computing one: `summary(df)` with nothing
+  passed returns `flip_strike=None`. A caller that forgets gets a blank, which is honest —
+  the previous shape is how a wrong number reached the screen in the first place.
+* `computed.gamma_exposure` and `volume_gamma_exposure` now **require** `r`, `q`,
+  `snapshot_ts` and `display_tz`, for the same reason `second_order_exposure` does: they are
+  assumptions not present in the record, and a default would hide them at every call site.
+  The vGEX flip is weighted by volume to match the bars it is drawn over.
+* The wire key `flip_strike` is unchanged, so both screens pick the new number up with no
+  client change. **The React tab needs only a reload; the data service needs a restart.**
+* On snapshot 6387 the blanks fall from 8 of 20 to 2 of 21, and the levels move from
+  clustering 100–200 points **above** spot to sitting around it. A 0DTE expiry mid-session
+  now pins within a point of spot, which is what a book with all its gamma at the money
+  should do.
+
+**What did not change.** A blank is still the answer when the book never crosses zero within
+±10% of spot, or when the crossing lands outside the collected strikes — there are no
+contracts out there to speak for it. That guard survived the rewrite because it is the one
+piece of the old code that was refusing to lie.
+
+---
+
+## ADR-056a — The flip is the whole chain's, even when one expiry is drawn
+
+**Date:** 2026-09-07 · **Status:** Accepted · **Decided by:** Chandan · **Amends:** ADR-056
+
+**Context.** Hours after ADR-056 shipped, Chandan read the Sep 18 panel and said the line was
+in the wrong place: *"there is no way the gamma flip is so on the left ... it should be
+somewhere around seven six fifty. That's where all the green turns to red."*
+
+**The arithmetic was right and the scope was wrong.** Measured on that panel: at 7,650 the
+strikes near it contribute −0.79B (below 7,600) and −0.25B (7,600–7,700), while the calls
+above contribute +1.17B and +1.83B. The book is still long **+1.96B** there, so for that
+expiry the total does not reach zero until 7,545. Where "green turns to red" is where
+INDIVIDUAL STRIKES change sign — a different question from where the total does, and the
+two need not coincide.
+
+But the level Chandan pointed at, ~7,650, was almost exactly the **whole chain's** flip:
+**7,671**. He was reading the chart correctly; the number was answering a narrower question
+than its name.
+
+**The definition, in his words** (a published one he brought): *"the underlying asset price
+where the aggregate dealer Gamma Exposure across an entire options chain equals zero ...
+Aggregate the net GEX for all available strikes **and expiration dates** in the chain."* It
+also confirms ADR-056's method — step 3 evaluates GEX_K(S*) at each candidate price rather
+than accumulating along the strikes.
+
+**Decision.** The flip ignores the expiry picker. The BARS stay scoped to the selection; the
+LEVEL is the whole chain's, always. vGEX keeps its volume weight — a weight difference is the
+only thing that may separate the two flips, since that comparison is the entire use of vGEX.
+
+**The consequence is carried on screen, not hidden.** The dashed line now describes more
+contracts than the bars it is drawn over, and every other figure in the headline strip is the
+selected expiry's. So the metric is labelled **"Gamma flip (chain)"** on both screens, and a
+test pins the word: a level quoted without its scope reads as belonging to the bars beside it,
+which is precisely the misreading this ADR exists to end.
+
+**Verified live.** Sep 18 alone, Sep 11 alone and the whole board now all report **7,671**,
+while their bar counts stay 80, 78 and 101 — the level shared, the panels not. The vGEX flip
+reads 7,714, correctly different.
+
+---
+
+## ADR-056b — The flip is a number on the strip, not a line on the chart
+**Date:** 2026-09-07 · **Status:** Accepted · **Decided by:** Chandan · **Amends:** ADR-056a
+
+**Context.** ADR-056a made the level whole-chain and kept drawing it as a dashed vertical rule
+across the strike panels. That put a chain-wide figure on top of a single expiry's bars, and a
+vertical line through a bar chart makes one claim above all others: *the bars change character
+HERE*. For a whole-board level over one expiry's bars, that claim is not true, and it is the
+same misreading ADR-056a was written to end — the label "(chain)" was doing all the work of
+denying what the line asserted.
+
+**Decision.** The dashed flip line is removed from every strike chart — the single view
+(`StrikeChart`) and the grid cells (`MiniPanel`) alike. The `flipStrike` prop is gone rather
+than left unused, so nothing can quietly start drawing it again. The SPOT rule stays: spot is
+genuinely a property of the bars beneath it.
+
+**The number stays**, on the headline strip, as "Gamma flip (chain)" — where no bars sit
+beside it to be read against, and where the label is the whole of the context needed. The
+server still computes and serves `flip_strike`; only the drawing of it stopped.
+
+**Why not scope the line to the expiry instead.** That was the state ADR-056a rejected: a
+single-expiry flip is not a figure anyone quotes, and it is not what the published definition
+means. The choice is between a truthful number without a line and a drawable number that is
+wrong. The record takes the first.
+
+---
+
+## ADR-055 — Charts that share a clock share a frame, not just a range
+**Date:** 2026-09-07 · **Status:** Accepted · **Decided by:** Chandan (as a fault report)
+
+**Context.** Calendar Edge stacks three charts on one time axis, read by scanning down the
+page. They did not line up. **Chandan reported this four times**, and it was "fixed" three
+times, each time by making the charts agree about the x-axis RANGE — which they already
+did. All three drew the identical `session_axis_range`.
+
+**What was actually wrong.** Plotly maps a range onto the plotting area, and the plotting
+area is the container minus the margins. `GapChart` and `IvChart` used `r: 20`;
+`IvDualAxis` needs room on the right for its Ratio axis and used `r: 58`. Same range, a
+plot area 38 px narrower, so its 16:01 sat 38 px to the left of the 16:01 above it. **A
+correct range inside a different frame is still a misaligned chart.**
+
+**The decision.** One exported frame — `web/src/edge/timeAxis.ts` — used by every
+time-axis chart on the tab. The shared value is the **widest** requirement, not the
+narrowest: sharing at `r: 20` would have aligned all three and clipped the Ratio labels off
+the bottom one.
+
+**`automargin` stays off.** It expands a margin to fit whatever labels a given day's data
+produces, which is the same class of fault one level down: a frame that moves with the
+data. A five-digit SPX would widen one chart and no other.
+
+**The old screen had this right all along.** `views/edge.py` has held
+`_SYNC_MARGIN_L, _SYNC_MARGIN_R` since it was written, with a comment stating the reason.
+The rebuild lost it — **a rule that lives only in one screen's source is a rule the rewrite
+will drop.** It is now a check (`tests/test_layering.py`) that reads all three chart files
+and fails if any writes its own margin.
+
+**The lesson worth more than the fix.** Three failed attempts all tested the wrong thing
+because the symptom ("the axes disagree") named a cause that was innocent. **When a fix
+does not take, stop refining it and re-measure the symptom** — the second reading here
+took one grep and found two numbers that differ.
+
+---
+
 ## ADR-054 — The new screen may write entry locks, and nothing else
 **Date:** 2026-09-07 · **Status:** Accepted · **Decided by:** Chandan
 
@@ -49,6 +218,23 @@ path that file was designed for, so the shape needs no negotiation.
   write path is separate, explicit, and confined to one sidecar file.
 - **Journal integration remains unscoped**, and the forward-compatible hook stays unused
   rather than being half-built against a guess.
+
+**As built, 2026-09-07.** Three choices the decision above did not settle:
+
+* **`POST /locks` refuses a combo already locked (409)** rather than overwriting it.
+  `entry_locks.create` mints a fresh `lock_id` and `locked_at`, so a second POST would
+  destroy the time the position was actually taken — and a double-tapped button on a
+  phone is the likeliest way to send one. The refusal names the existing price and time.
+* **`DELETE /locks` is idempotent** and returns `cleared: false` rather than 404 when
+  there was nothing to remove. The new screen retries a failed request; a retry landing
+  after the first attempt succeeded must not report a failure for work that was done.
+* **Correcting a fill price is not exposed.** ADR-054 permits update, and the old screen's
+  All Locks popover has it, but it is a different act from locking and nothing on the new
+  screen asks for it yet. Left unbuilt rather than built against a guess.
+
+The expiry purge (ADR-039) runs on **every** locks route, not just the list. Filtering
+only what is displayed would tidy the list while create and delete carried on seeing a
+lock whose front leg expired weeks ago — the shape of BUG-021.
 
 ---
 

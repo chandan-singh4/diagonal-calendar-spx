@@ -44,7 +44,7 @@ import { useEffect, useRef } from 'react'
 
 import type { AxisTicks, SessionRangeRow, StrikeRow } from '../api/types'
 import {
-  BG, BRIGHT, CALL, CALL_VOL_EDGE, CALL_VOL_FILL, CALL_WICK, FLIP, GRID, HOVER, INK,
+  BG, BRIGHT, CALL, CALL_VOL_EDGE, CALL_VOL_FILL, CALL_WICK, GRID, HOVER, INK,
   NET_WICK,
   type PanelSpec, PUT, PUT_VOL_EDGE, PUT_VOL_FILL, PUT_WICK, wickTrace,
 } from './chart'
@@ -73,9 +73,11 @@ export interface StrikeChartProps {
   spec: PanelSpec
   ticks: AxisTicks
   spot: number
-  flipStrike: number | null
   /** Mirrored puts the volume and OI panels below, independently of panel 1. */
   stack: boolean
+  /** The tab's volume-shade toggle. The dedicated volume PANEL below is not
+   *  affected — this is only the translucent backdrop behind the bars. */
+  showVolume: boolean
 }
 
 export function StrikeChart({
@@ -85,8 +87,8 @@ export function StrikeChart({
   spec,
   ticks,
   spot,
-  flipStrike,
   stack,
+  showVolume,
 }: StrikeChartProps) {
   const host = useRef<HTMLDivElement>(null)
 
@@ -132,10 +134,13 @@ export function StrikeChart({
     // ── Panel 1 background: the day's volume as translucent fills ───────────
     // Drawn FIRST so the bars sit on top, and on a secondary axis because
     // contracts traded and exposure are not the same unit.
-    for (const [col, fill, edge] of [
+    // The tab's toggle reaches here too. The detail view already draws volume
+    // as its own panel below, so the shade behind the bars is the redundant
+    // copy -- if anywhere earns the option to switch it off, it is here.
+    for (const [col, fill, edge] of showVolume ? [
       ['put_volume', PUT_VOL_FILL, PUT_VOL_EDGE],
       ['call_volume', CALL_VOL_FILL, CALL_VOL_EDGE],
-    ] as const) {
+    ] as const : []) {
       traces.push({
         type: 'scatter',
         mode: 'lines',
@@ -235,8 +240,13 @@ export function StrikeChart({
       )
     }
 
-    // The spot line through all three panels, and the gamma flip through the
-    // top one only — it is a gamma property and means nothing on a volume axis.
+    // The spot line through all three panels. NO GAMMA-FLIP LINE: it was
+    // removed at Chandan's request on 2026-09-07, the day after it was made
+    // whole-chain. The level is the WHOLE BOARD's while these bars are one
+    // expiry's, so a vertical rule drawn across them invites exactly the
+    // reading it cannot support — that the green turns red HERE, in this
+    // panel. The number is still on the headline strip, where it is labelled
+    // "(chain)" and has no bars beside it to be misread against.
     const shapes: Partial<Plotly.Shape>[] = ['y', 'y3', 'y4'].map((axis) => ({
       type: 'line',
       x0: spot,
@@ -247,24 +257,6 @@ export function StrikeChart({
       xref: axis === 'y' ? 'x' : axis === 'y3' ? 'x2' : 'x3',
       line: { color: '#8fa9c4', width: 1, dash: 'dot' },
     }))
-
-    if (
-      flipStrike !== null &&
-      strikes.length > 0 &&
-      flipStrike >= Math.min(...strikes) &&
-      flipStrike <= Math.max(...strikes)
-    ) {
-      shapes.push({
-        type: 'line',
-        x0: flipStrike,
-        x1: flipStrike,
-        xref: 'x',
-        yref: 'y domain',
-        y0: 0,
-        y1: 1,
-        line: { color: FLIP, width: 1, dash: 'dash' },
-      })
-    }
 
     // Ticks arrive placed and labelled. Empty arrays mean the server had
     // nothing to place, and Plotly is left to decide — see money_ticks.
@@ -331,7 +323,7 @@ export function StrikeChart({
       displayModeBar: false,
       responsive: true,
     })
-  }, [gammaRows, panelRows, ranges, spec, ticks, spot, flipStrike, stack])
+  }, [gammaRows, panelRows, ranges, spec, ticks, spot, stack, showVolume])
 
   // Purge on unmount. Plotly attaches listeners and a WebGL-free but still
   // stateful graph div to the node; React removing the element does not tell

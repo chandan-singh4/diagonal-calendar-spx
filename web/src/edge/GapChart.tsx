@@ -23,8 +23,9 @@
 import Plotly from 'plotly.js-dist-min'
 import { useEffect, useRef } from 'react'
 
-import type { Crossings, MarkRow, RangeBreak } from '../api/types'
+import type { Crossings, MarkRow, RangeBreak, SpxRow } from '../api/types'
 import { marketOpenShapes } from './marketOpens'
+import { TIME_AXIS_MARGIN } from './timeAxis'
 
 const DIAGONAL = '#548ce8'
 const TRANSFORM = '#10d4a3'
@@ -37,6 +38,9 @@ const STRIKE_LINE = '#4a5d80'
 
 export interface GapChartProps {
   rows: MarkRow[]
+  /** The index, read separately from the marks so the lower panel runs to the
+   *  close even when the front legs stopped being quoted at 15:00. */
+  spxRows: SpxRow[]
   rangebreaks: RangeBreak[]
   crossings: Crossings | null
   putStrike: number
@@ -46,6 +50,16 @@ export interface GapChartProps {
   threshold: number
   /** 09:30 for each trading day, from the response. */
   marketOpens: string[]
+  /** The locked entry price for this combo, or null when it is not locked.
+   *
+   *  POSITION MANAGEMENT VS DISCOVERY. With a lock, the question stops being
+   *  "what would a new diagonal cost today" and becomes "how does my fixed
+   *  entry compare to the live Transform Order Mark". `views/edge.py` has
+   *  answered it that way since long before the rebuild, and this is the same
+   *  three changes it makes: entry drawn as a fixed dashed line, the live
+   *  diagonal dimmed to reference context, and the tooltip's fourth line
+   *  measured against entry instead of between two live values. */
+  entryMark: number | null
   /** The window to draw the time axis on, from the response, or null to let
    *  Plotly fit the data (which is right across several days).
    *
@@ -101,8 +115,8 @@ function eligibleBands(rows: MarkRow[], threshold: number): [string, string][] {
 }
 
 export function GapChart({
-  rows, rangebreaks, crossings, putStrike, callStrike, threshold, marketOpens,
-  sessionAxisRange,
+  rows, spxRows, rangebreaks, crossings, putStrike, callStrike, threshold,
+  marketOpens, sessionAxisRange, entryMark,
 }: GapChartProps) {
   const host = useRef<HTMLDivElement>(null)
 
@@ -111,7 +125,9 @@ export function GapChart({
     if (!node) return
 
     const x = rows.map((row) => row.timestamp)
-    const hasSpx = rows.some((row) => row.spx !== null)
+    // FROM THE SPX SERIES, NOT THE MARKS. `rows[].spx` ends where the marks
+    // end; this panel is the index and outlives them.
+    const hasSpx = spxRows.some((row) => row.spx !== null)
 
     // ONE MASTER TOOLTIP IN A FIXED LINE ORDER: SPX, Diagonal, Transform,
     // Gap — carried by the Transform trace, with every other trace's hover
@@ -125,18 +141,37 @@ export function GapChart({
     // while the green shading tests the signed gap against the threshold. So
     // a pair where the diagonal is dearer than the transform reads "Gap:
     // $8.00" with no shading, correctly: that is eight points the wrong way.
+    // THE FOURTH LINE CHANGES MEANING WHEN A POSITION IS HELD, and says so.
+    // Discovery: the unsigned DISTANCE between two live marks. Position
+    // management: the SIGNED difference between the live transform mark and
+    // the fixed entry -- which can be negative, and must be, because a
+    // position under water is the fact the trader most needs to read.
+    const locked = entryMark !== null
+    const difference = (row: MarkRow): number | null =>
+      locked
+        ? (row.transform_mark === null ? null : row.transform_mark - entryMark)
+        : (row.gap === null ? null : Math.abs(row.gap))
+
     const master = rows.map((row) => [
       row.spx,
       row.diagonal_mark,
       row.transform_mark,
-      row.gap === null ? null : Math.abs(row.gap),
+      difference(row),
     ])
 
     const traces: Partial<Plotly.PlotData>[] = [
       {
-        type: 'scatter', mode: 'lines', name: 'Diagonal Mark',
+        type: 'scatter', mode: 'lines',
+        // Renamed, not just restyled. Once an entry is locked this line is a
+        // price the trader is NOT paying -- what a fresh diagonal would cost
+        // now -- and leaving it labelled "Diagonal Mark" beside a dashed line
+        // showing the real entry invites reading the wrong one as the position.
+        name: locked ? 'Live Diagonal Mark (hypothetical)' : 'Diagonal Mark',
         x, y: column(rows, 'diagonal_mark'),
-        line: { color: DIAGONAL, width: 1.8 },
+        line: locked
+          ? { color: DIAGONAL, width: 1.2, dash: 'dot' }
+          : { color: DIAGONAL, width: 1.8 },
+        opacity: locked ? 0.45 : 1,
         hoverinfo: 'skip',
         xaxis: 'x', yaxis: 'y',
       },
@@ -146,13 +181,21 @@ export function GapChart({
         line: { color: TRANSFORM, width: 1.8 },
         // The band between the two lines IS the gap, drawn directly so it
         // reads at a glance rather than by comparing two heights.
-        fill: 'tonexty', fillcolor: 'rgba(124,148,199,0.11)',
+        //
+        // DISCOVERY MODE ONLY. Under a lock the band would shade the distance
+        // between the live transform mark and a diagonal nobody is holding --
+        // a quantity that means nothing to a trader already in the position,
+        // drawn as the most prominent thing on the chart. `views/edge.py`
+        // drops it for the same reason.
+        ...(locked ? {} : { fill: 'tonexty' as const,
+                            fillcolor: 'rgba(124,148,199,0.11)' }),
         customdata: master as unknown as Plotly.Datum[],
         hovertemplate:
           'SPX: %{customdata[0]:,.2f}' +
           '<br>Diagonal Mark: $%{customdata[1]:.2f}' +
           '<br>Transform Order Mark: $%{customdata[2]:.2f}' +
-          '<br>Gap: $%{customdata[3]:.2f}<extra></extra>',
+          `<br>${locked ? 'Live Difference (vs. entry)' : 'Gap'}` +
+          ': $%{customdata[3]:.2f}<extra></extra>',
         xaxis: 'x', yaxis: 'y',
       },
     ]
@@ -160,10 +203,15 @@ export function GapChart({
     if (hasSpx) {
       traces.push({
         type: 'scatter', mode: 'lines', name: 'SPX',
-        x, y: column(rows, 'spx'),
+        x: spxRows.map((row) => row.timestamp), y: spxRows.map((row) => row.spx),
         line: { color: SPX_LINE, width: 2 },
-        // Reported by the master tooltip above, not twice.
-        hoverinfo: 'skip',
+        // ITS OWN READOUT, unlike before. The master tooltip above is built
+        // from the marks rows and stops when they do, so on the stretch this
+        // fix exists to restore -- the last hour of a 0DTE session -- hovering
+        // the line would otherwise report nothing at all. The two boxes do not
+        // collide: `x unified` groups per subplot, and this trace is the only
+        // one on x2 that answers.
+        hovertemplate: 'SPX: %{y:,.2f}<extra></extra>',
         xaxis: 'x2', yaxis: 'y2',
       })
       for (const [key, symbol, label] of [
@@ -191,6 +239,31 @@ export function GapChart({
         fillcolor: 'rgba(16,212,163,0.10)', line: { width: 0 }, layer: 'below',
       }),
     )
+
+    // THE LOCKED ENTRY, as a fixed dashed line across the whole window.
+    // `xref: 'paper'` so it spans the figure rather than the data: the entry
+    // price did not stop applying when the marks did, and on a session whose
+    // legs go unquoted mid-afternoon a data-anchored line would stop short of
+    // the stretch it is most needed on.
+    const annotations: Partial<Plotly.Annotations>[] = []
+    if (entryMark !== null) {
+      shapes.push({
+        type: 'line', xref: 'paper', yref: 'y',
+        x0: 0, x1: 1, y0: entryMark, y1: entryMark,
+        line: { color: DIAGONAL, width: 1.6, dash: 'dash' },
+      })
+      annotations.push({
+        // Labelled with the number, not just "Entry". The line's whole job is
+        // to be read against the transform mark above it, and a reader who
+        // has to hover to learn what it sits at is doing that arithmetic
+        // twice.
+        xref: 'paper', yref: 'y', x: 1, y: entryMark,
+        xanchor: 'right', yanchor: 'bottom',
+        text: `Entry $${entryMark.toFixed(2)}`,
+        showarrow: false,
+        font: { size: 10, color: DIAGONAL },
+      })
+    }
 
     // WHERE EACH TRADING DAY STARTS. Without these the session boundary is
     // invisible: break_sessions leaves a gap, but a gap looks the same as a
@@ -231,7 +304,7 @@ export function GapChart({
     const layout: Partial<Plotly.Layout> = {
       paper_bgcolor: BG, plot_bgcolor: BG,
       font: { color: INK, size: 11 },
-      margin: { l: 58, r: 20, t: 30, b: 34 },
+      margin: TIME_AXIS_MARGIN,
       hovermode: 'x unified',
       hoverlabel: { bgcolor: '#111c2e', bordercolor: '#1a2d45',
                     font: { color: BRIGHT, size: 12 } },
@@ -257,10 +330,12 @@ export function GapChart({
           }
         : {}),
       shapes,
+      annotations,
     }
 
     void Plotly.react(node, traces, layout, { displayModeBar: false, responsive: true })
-  }, [rows, rangebreaks, crossings, putStrike, callStrike, threshold, marketOpens,
+  }, [rows, spxRows, rangebreaks, crossings, putStrike, callStrike, threshold, marketOpens,
+      entryMark,
       sessionAxisRange])
 
   useEffect(() => {

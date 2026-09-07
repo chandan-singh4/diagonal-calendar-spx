@@ -49,6 +49,7 @@ hardcoded copies of the +/-5 wing offset (backlog DEBT-004, DEBT-006).
 import math
 from dataclasses import dataclass
 
+import numpy as np
 import pandas as pd
 
 # ---------------------------------------------------------------------------
@@ -734,6 +735,108 @@ def _d1_d2(spot: float, strike: float, t_years: float, sigma: float,
     d1 = (math.log(spot / strike)
           + (r - q + 0.5 * sigma * sigma) * t_years) / vol_t
     return d1, d1 - vol_t
+
+
+def _gamma_raw(spot, strike, t_years, sigma, r, q):
+    """The Black-Scholes gamma formula, written ONCE.
+
+        gamma = e^(-qT) * phi(d1) / (S * sigma * sqrt(T))
+
+    Written with numpy calls rather than `math` ones so the SAME expression
+    serves a single contract and a whole chain. `gamma` below validates one
+    set of scalars and calls this; `gamma_many` validates arrays and calls
+    this. A second copy for the fast path is exactly the kind of duplication
+    that ends with two answers to one question and no way to tell which screen
+    is showing which.
+
+    No validation here at all -- that is the callers' job, and it differs
+    between them: a scalar returns None where an array returns nan.
+    """
+    vol_t = sigma * np.sqrt(t_years)
+    d1 = (np.log(spot / strike) + (r - q + 0.5 * sigma * sigma) * t_years) / vol_t
+    pdf = np.exp(-0.5 * d1 * d1) / math.sqrt(2.0 * math.pi)
+    return np.exp(-q * t_years) * pdf / (spot * vol_t)
+
+
+def gamma(spot: float, strike: float, t_years: float, iv_pct: float,
+          r: float, q: float) -> float | None:
+    """d2Price/dSpot2 -- how fast an option's delta changes as SPX moves.
+
+    WHY THIS EXISTS WHEN THE BROKER ALREADY SENDS GAMMA. Schwab's `gamma` is
+    the gamma of that contract AT TODAY'S SPOT, and it is the right number for
+    every per-strike panel on the Gamma tab. It cannot answer the one question
+    the zero-gamma level asks -- "what would the book's total gamma be if SPX
+    were at 7,600 instead?" -- because that is a different spot, and gamma is
+    not constant in spot. Answering it needs the gamma RE-PRICED at a
+    hypothetical level, which is what this returns (core.gex.zero_gamma_spot).
+
+    THE SAME FOR CALLS AND PUTS, and for the same reason `vanna` is: put-call
+    parity fixes the delta difference at e^(-qT), which does not depend on
+    spot, so it differentiates away. `right` is therefore not a parameter, and
+    a caller wanting a dealer-signed figure must impose the convention itself
+    exactly as `core.gex.by_strike` does.
+
+    STRICTLY POSITIVE where it is defined -- every long option gains delta as
+    spot rises. A negative result would mean an input is wrong, not that a
+    contract has negative gamma.
+
+    `iv_pct` is a PERCENTAGE, per this module's convention (18.5 means 18.5%).
+    Unlike vanna and charm, the result needs NO unit conversion: gamma is
+    already per one point of spot, which is the unit the stored `gamma` column
+    uses, so a re-priced figure can be read directly against a broker one.
+
+    Returns None when the inputs do not define an option -- see _d1_d2, whose
+    guard this reuses rather than restating.
+    """
+    if iv_pct is None:
+        return None
+    sigma = float(iv_pct) / 100.0
+    if _d1_d2(spot, strike, t_years, sigma, r, q) is None:
+        return None
+    return float(_gamma_raw(float(spot), float(strike), float(t_years),
+                            sigma, r, q))
+
+
+def gamma_many(spot: float, strikes, t_years, iv_pct, r: float, q: float):
+    """`gamma` for a whole chain at one hypothetical spot, as an array.
+
+    WHY IT EXISTS, AND IT IS PERFORMANCE ALONE. `core.gex.zero_gamma_spot`
+    prices the entire book at fifty-odd candidate levels to find one crossing.
+    Done a contract at a time that is ~170,000 calls into this module per
+    request, which took 0.6s -- and the Gamma tab fires SEVEN requests when
+    the reader ticks an expiry, so it landed on the reader as seconds of
+    waiting (Chandan, 2026-09-07: "it's taking a really long time to update").
+
+    THE FORMULA IS NOT REPEATED HERE. Both this and `gamma` call `_gamma_raw`,
+    so there is one expression to be right or wrong, and
+    `tests/test_second_order_greeks.py` pins that the two agree contract by
+    contract. A fast path with its own copy of the arithmetic would be a
+    second definition that only the slow screen could contradict.
+
+    NaN, NOT None, for a contract that cannot be priced -- an array has to
+    have an entry for every row. Callers sum with `np.nansum`, which is the
+    array-shaped form of the blank-not-zero rule: unpriceable contracts are
+    left out of the total rather than counted as zeroes.
+
+    `iv_pct` is a PERCENTAGE per this module's convention, and `strikes`,
+    `t_years` and `iv_pct` must be arrays of equal length.
+    """
+    strikes = np.asarray(strikes, dtype=float)
+    t_years = np.asarray(t_years, dtype=float)
+    sigma = np.asarray(iv_pct, dtype=float) / 100.0
+
+    # The same conditions `_d1_d2` refuses on, applied to every row at once.
+    ok = ((strikes > 0) & (t_years > 0) & (sigma > 0)
+          & np.isfinite(strikes) & np.isfinite(t_years) & np.isfinite(sigma))
+    out = np.full(strikes.shape, np.nan)
+    if spot is None or spot <= 0 or not ok.any():
+        return out
+
+    # `where=ok` keeps the invalid rows out of the arithmetic entirely, so a
+    # zero volatility cannot raise a divide-by-zero warning on its way to
+    # being discarded.
+    out[ok] = _gamma_raw(float(spot), strikes[ok], t_years[ok], sigma[ok], r, q)
+    return out
 
 
 def vanna(spot: float, strike: float, t_years: float, iv_pct: float,

@@ -7,7 +7,7 @@
  * sit in `dist/` in plain text and be readable by anyone the page is ever
  * shown to. This is also why every URL below is relative.
  */
-import { useQuery } from '@tanstack/react-query'
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 import type {
   AtmPairResponse,
@@ -22,6 +22,8 @@ import type {
   SessionRangeResponse,
   HeaderResponse,
   HistoricalStatsResponse,
+  LocksResponse,
+  EntryLock,
   MarksResponse,
   Measure,
   NewResponse,
@@ -88,6 +90,29 @@ async function get<T>(path: string): Promise<T> {
  * actually arrives instead of faster than it can change.
  */
 const SHARED = { staleTime: 30_000, retry: 1 } as const
+
+/**
+ * SHARED, plus: keep showing the last answer while a new one is fetched.
+ *
+ * FOR QUERIES WHOSE KEY THE READER CHANGES. Ticking an expiry makes a NEW
+ * query key, which has no cached data, so `isPending` is true and the tab
+ * replaced the whole page with "Loading the chain…" — including the toolbar
+ * the reader was still using. Chandan, 2026-09-07: "the whole page refreshes
+ * ... and the dropdown goes away, and I have to click on the dropdown again."
+ *
+ * ONE CAUSE, BOTH SYMPTOMS. The picker never closed itself; it was unmounted
+ * along with everything else and came back with its state reset. Keeping the
+ * previous data keeps the page mounted, so the dropdown stays open because it
+ * was never taken away.
+ *
+ * NOT ON EVERY QUERY. This is right where a reader is steering — the answer
+ * changes because THEY changed the question, and the old answer is the
+ * honest thing to show while the new one arrives, provided the page says it
+ * is working. It would be wrong on a background refresh of live data, where
+ * showing a stale chain under a fresh timestamp is how a reader trades on a
+ * price that has moved.
+ */
+const STEERED = { ...SHARED, placeholderData: keepPreviousData } as const
 
 export function useScan(limit = 250) {
   return useQuery({
@@ -168,7 +193,7 @@ export function useSessionRange(expiries: string[], measure: Measure = 'gamma',
   return useQuery({
     queryKey: ['session-range', expiries, measure, dteMax],
     queryFn: () => get<SessionRangeResponse>(`/strikes/session-range?${query}`),
-    ...SHARED,
+    ...STEERED,
   })
 }
 
@@ -290,7 +315,7 @@ export function useGamma(measure: Measure, expiries: string[]) {
     // part of the identity — the same as the server's tuple cache key.
     queryKey: ['gamma', measure, expiries],
     queryFn: () => get<GammaResponse>(`/mission/gamma?${query}`),
-    ...SHARED,
+    ...STEERED,
   })
 }
 
@@ -451,5 +476,98 @@ export function useStrikeIv(
     queryFn: () => get<StrikeIvResponse>(`/mission/strike-iv?${query}`),
     enabled: ready,
     ...SHARED,
+  })
+}
+
+
+/* ─── Entry locks — the only thing this app writes ──────────────────────────
+ *
+ * ADR-054 narrowed "reading never writes" by exactly one file: the data
+ * service may create and remove entry locks, a ~1 KB JSON sidecar, and
+ * nothing else. The database is still read-only to it.
+ *
+ * THESE ARE MUTATIONS, NOT QUERIES, and that distinction is load-bearing
+ * here. `SHARED` above turns `refetchOnWindowFocus` ON, which is safe only
+ * because every query is a GET that changes nothing — the same reasoning that
+ * made `/mission/new` split into a look and a record. A lock created by
+ * tabbing back to the browser would be a position the trader never took.
+ *
+ * WRITING A LOCK IS NOT INERT. The collector reads this file to decide which
+ * strikes it fetches next cycle, so a lock changes what the record contains
+ * from that point on. That is the intent, but it is why the button below
+ * confirms first.
+ */
+
+async function send<T>(path: string, method: 'POST' | 'DELETE',
+                       body?: unknown): Promise<T> {
+  const response = await fetch(`/api${path}`, {
+    method,
+    headers: {
+      Accept: 'application/json',
+      ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  })
+  if (!response.ok) {
+    let detail = `${response.status} ${response.statusText}`
+    try {
+      const parsed = (await response.json()) as { detail?: unknown }
+      // The 409 "already locked at $3.25" and the 422 "mode must be one of"
+      // are written to be read by the person who clicked. FastAPI's 422 from
+      // a malformed body puts a LIST there instead of a sentence, so the type
+      // is checked rather than assumed.
+      if (typeof parsed.detail === 'string') detail = parsed.detail
+    } catch {
+      // Nothing better to say than the status line.
+    }
+    throw new ApiError(response.status, detail)
+  }
+  return (await response.json()) as T
+}
+
+/** Every live lock. Expired front legs are dropped by the server, not here —
+ *  filtering in the client would tidy this list while the lock badge on the
+ *  chart carried on showing a position that closed weeks ago (BUG-021). */
+export function useLocks() {
+  return useQuery({
+    queryKey: ['locks'],
+    queryFn: () => get<LocksResponse>('/locks'),
+    ...SHARED,
+  })
+}
+
+export interface LockRequest {
+  front_expiry: string
+  back_expiry: string
+  put_strike: number
+  call_strike: number
+  diagonal_mark: number
+  mode: 'monitor_only' | 'monitor_and_log'
+}
+
+export function useCreateLock() {
+  const queries = useQueryClient()
+  return useMutation({
+    mutationFn: (body: LockRequest) => send<EntryLock>('/locks', 'POST', body),
+    // Refetch rather than patch the cache by hand: the server owns the purge
+    // and the key format, and a locally-assembled entry would be this app's
+    // own second opinion about what is in the file.
+    onSuccess: () => { void queries.invalidateQueries({ queryKey: ['locks'] }) },
+  })
+}
+
+export function useClearLock() {
+  const queries = useQueryClient()
+  return useMutation({
+    mutationFn: (combo: Omit<LockRequest, 'diagonal_mark' | 'mode'>) => {
+      const query = new URLSearchParams({
+        front_expiry: combo.front_expiry,
+        back_expiry: combo.back_expiry,
+        put_strike: String(combo.put_strike),
+        call_strike: String(combo.call_strike),
+      })
+      return send<{ key: string; cleared: boolean }>(`/locks?${query}`, 'DELETE')
+    },
+    onSuccess: () => { void queries.invalidateQueries({ queryKey: ['locks'] }) },
   })
 }

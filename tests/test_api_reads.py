@@ -303,6 +303,13 @@ def test_every_dataaccess_read_has_an_endpoint():
         # /strikes/session-range?measure=... — the whole session's chain,
         # behind the wicks on every measure rather than gamma alone.
         "load_session_chain_df",
+        # /pairs/transform-marks, as `spx_rows` — served alongside the marks
+        # rather than at its own address. The strike-channel panel is drawn on
+        # the same request as the chart above it, and splitting them would let
+        # a client draw one from a window the other was not measured over.
+        # Read separately because the marks query drops a snapshot missing any
+        # of six legs and the index must not inherit that rule.
+        "load_underlying_history",
     }
     defined = {
         name for name, obj in inspect.getmembers(queries, inspect.isfunction)

@@ -80,6 +80,9 @@ class ViewContext:
     load_latest_atm_iv: Callable[..., list]
     load_contract_hist: Callable[..., pd.DataFrame]
     load_transform_marks: Callable[..., pd.DataFrame]
+    # SPX alone. Read apart from the marks so the strike-channel panel runs
+    # to the close on a session whose front legs stopped being quoted.
+    load_underlying_history: Callable[..., pd.DataFrame]
     # Not a database read but the same seam and the same hazard: this is the
     # MEMOISED scanner. core/scanner.py holds the pure one, and calling that
     # by mistake returns identical rows while re-running 21 offset sweeps on

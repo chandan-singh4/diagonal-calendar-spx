@@ -374,7 +374,26 @@ def render(ctx: ViewContext) -> None:
     # sentiment are defined over the displayed bars, so the numbers moved with
     # it. Showing the whole chain makes them one answer instead of five.
     shown = per_strike
-    totals = gex.summary(shown)          # displayed bars, per the documentation
+    # THE ZERO-GAMMA LEVEL, computed once for the strip and the dashed line
+    # so the two cannot disagree. It re-prices the whole chain at hypothetical
+    # spots (core.gex.zero_gamma_spot, BUG-044); what stood here before
+    # accumulated the strikes it happened to be given, and moved 175 points
+    # when the chain was cut lower with nothing changing in the market.
+    #
+    # OPEN INTEREST, because this page draws no volume-weighted view -- vGEX
+    # is on the React tab, which weights its own flip to match its measure.
+    #
+    # AND THE WHOLE CHAIN, deliberately unscoped by `expiry` (Chandan,
+    # 2026-09-07, quoting the published definition: "all available strikes AND
+    # expiration dates"). The dashed line therefore describes more contracts
+    # than the bars beneath it, which is why the metric is labelled with its
+    # scope rather than left to be assumed.
+    _flip = gex.zero_gamma_spot(
+        chain, ctx.spx_price,
+        r=config.RISK_FREE_RATE, q=config.DIVIDEND_YIELD,
+        day_remainder=gex.day_remainder(ctx.snapshot_ts,
+                                        config.DISPLAY_TIMEZONE))
+    totals = gex.summary(shown, flip_strike=_flip)   # displayed bars, per the documentation
 
     # The derived views, computed ONCE here rather than inside the memoised
     # figure. The headline strip needs the same numbers the chart draws, and
@@ -491,7 +510,7 @@ def _draw_headline(totals: dict, second: dict | None = None,
         _metric("Peak strike",
                 "—" if totals["peak_strike"] is None
                 else fmt.peak_label(totals)),
-        _metric("Gamma flip",
+        _metric("Gamma flip (chain)",
                 "—" if totals["flip_strike"] is None
                 else f"{totals['flip_strike']:,.0f}", _FLIP),
         *extra,
@@ -538,6 +557,10 @@ def _draw_strike_panels(ctx: ViewContext, shown: pd.DataFrame,
 def _strike_figure(_shown: pd.DataFrame, _chain: pd.DataFrame, spot: float,
                    view: str, expiry: str | None, stack: bool,
                    snapshot_id: int, _second: pd.DataFrame | None = None):
+    # NO `flip` PARAMETER. This figure used to take the level and draw it; it
+    # no longer draws it (ADR-056b), so it no longer asks for it. Leaving an
+    # unused argument on a cached function would be an invitation to start
+    # drawing it again, and a stale cache key besides.
     shown, ctx_chain, second = _shown, _chain, _second
     fig = make_subplots(
         rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.14,
@@ -640,10 +663,12 @@ def _strike_figure(_shown: pd.DataFrame, _chain: pd.DataFrame, spot: float,
         font=dict(color=_BRIGHT, size=10), bgcolor="#16283d", borderpad=3,
     )
 
-    flip = gex.flip_strike(shown)
-    if flip is not None and shown["strike"].min() <= flip <= shown["strike"].max():
-        fig.add_vline(x=flip, line=dict(color=_FLIP, width=1, dash="dash"),
-                      row=1, col=1)
+    # NO GAMMA-FLIP LINE HERE, deliberately (ADR-056b). The level is the whole
+    # chain's; these bars are one expiry's. A vertical rule through a bar chart
+    # claims the bars change character AT that price, and for a whole-board
+    # level over one expiry's bars that claim is not true. The number stays in
+    # the headline strip above, labelled with its scope, where no bars sit
+    # beside it to be read against.
 
     # ── Axes a reader can read without hovering ──────────────────────────────
     # Ticks are placed and labelled by _money_ticks rather than left to
@@ -949,13 +974,30 @@ def _draw_caption(totals: dict, expiry: str | None,
         "bigger side divided by the smaller, with the sign showing which one "
         "won. These are Option Alpha's published definitions, so the numbers "
         "should match theirs on the same data.",
-        "**Gamma flip is left blank when the crossing point lands near "
-        "either edge of the data.** The running total starts at the lowest "
-        "price level recorded, so if the record stops before the far "
-        "downside options do, the crossing gets pushed up against that edge "
-        "and is an artefact of where collection stopped, not a real level. "
-        "A blank is the honest answer. This happens often on a same-day "
-        "expiry, where only about ±100 points are collected.",
+        "**Gamma flip is the price at which the whole book’s gamma would "
+        "come to zero — and it is the WHOLE CHAIN, every expiry, even when "
+        "one expiry is selected above.** That is the standard definition and "
+        "the number market commentary refers to; a flip for a single expiry "
+        "is not a figure anyone quotes. It is shown here as a number only, "
+        "not as a line on the chart, because the chart is one expiry and the "
+        "level is the whole board — a line across those bars would say the "
+        "green turns red at that strike, which is not what it means. "
+        "Every option recorded is re-valued at a series of "
+        "hypothetical SPX prices, and this is the price where the amounts "
+        "market makers would have to buy and sell cancel out. Below it their "
+        "hedging is said to push moves further; above it, to hold them in. "
+        "**Changed 2026-09-07.** The old figure added the price levels up "
+        "from the bottom of the recorded range, so it depended on where "
+        "recording stopped — cutting the bottom off one day’s data moved it "
+        "175 points with nothing changing in the market. This one prices "
+        "each level on its own, so a missing far-out option affects it only "
+        "by its own small amount. **It rests on two assumptions:** that "
+        "every option keeps the volatility it is quoted at today, and that "
+        "the number of contracts outstanding does not change as the price "
+        "moves. Both are the standard ones, and both get weaker the further "
+        "the level sits from where SPX is now. Still blank when the total "
+        "never reaches zero within ±10%, or when it would land outside the "
+        "prices recorded.",
         "**Every gamma number here rests on one assumption: that the market "
         "makers on the other side are holding calls and owe puts.** That is "
         "the standard convention, but it is an assumption, not measured "

@@ -105,6 +105,58 @@ function Note({ children }: { children: React.ReactNode }) {
   )
 }
 
+/**
+ * How long an update may take before the page admits to being mid-update.
+ *
+ * WHY THERE IS A DELAY AT ALL (Chandan, 2026-09-07: "charts go dim and say
+ * Updating", reported as the page still refreshing). Ticking an expiry is
+ * answered in about 0.2s, so the dim and the label appeared and vanished
+ * inside a fifth of a second on every single click. Correct, honest, and read
+ * as a flicker -- which is what the whole change was meant to stop. A signal
+ * that fires on every ordinary action is not a signal.
+ *
+ * WHY IT IS NOT SIMPLY REMOVED. The reason for saying it has not gone away:
+ * what is on screen during that moment IS the previous scope's answer, and a
+ * chart that quietly draws the old expiry under the new selection is worse
+ * than a blank one because the reader believes it. The delay does not hide
+ * that -- it waits to see whether the moment is long enough to be noticed. A
+ * slow answer still dims; a fast one never had a stale chart on screen long
+ * enough for anyone to read it.
+ *
+ * 400ms, from the measurement rather than from taste: cold requests to
+ * /mission/gamma run ~0.2s, so an ordinary tick is finished before this
+ * fires, and anything that trips it is genuinely slower than the tab's normal
+ * behaviour.
+ */
+const SETTLE_MS = 400
+
+/**
+ * `active`, but only once it has been true for `delay` milliseconds.
+ *
+ * Goes false the INSTANT `active` does, with no trailing delay: the point is
+ * to suppress a flicker on the way in, and holding a "stale" mark over data
+ * that has already arrived would be the page lying in the other direction.
+ */
+function useSettled(active: boolean, delay: number): boolean {
+  const [elapsed, setElapsed] = useState(false)
+  useEffect(() => {
+    if (!active) return
+    const timer = window.setTimeout(() => setElapsed(true), delay)
+    // Cleared on every change of `active` and on unmount, so a fast update
+    // cannot leave a timer behind that dims a page already current -- and the
+    // flag is reset here rather than in the effect body, which would set
+    // state during a render pass for no gain (oxlint set-state-in-effect).
+    return () => {
+      window.clearTimeout(timer)
+      setElapsed(false)
+    }
+  }, [active, delay])
+  // ANDED WITH `active`, so a stale `elapsed` from the previous update can
+  // never dim a page whose answer has already arrived.
+  return active && elapsed
+}
+
+
 export function GammaTab() {
   const [viewIndex, setViewIndex] = useState(0)
   // GRID BY DEFAULT (Chandan, 2026-09-06): the reason he asked for it was to
@@ -120,6 +172,11 @@ export function GammaTab() {
   // would refuse to do the thing its own Reset button says it does.
   const touched = useRef(false)
   const [stack, setStack] = useState(false)
+  // ON BY DEFAULT, because it is what the tab has always shown and a control
+  // that changes the page the moment it loads is not a preference, it is a
+  // surprise. Not persisted: nothing on this screen writes browser storage
+  // yet, and one toggle is not the reason to start.
+  const [showVolume, setShowVolume] = useState(true)
 
   const view = VIEWS[viewIndex]
   const gamma = useGamma('gamma', expiries)
@@ -138,6 +195,18 @@ export function GammaTab() {
 
   const spec = useMemo(() => view.spec, [view])
 
+  // WHAT IS ON SCREEN IS THE PREVIOUS SCOPE'S ANSWER while this is true, and
+  // the page has to say so. Charts that quietly keep drawing an old expiry
+  // under a new selection are worse than a blank page: the reader believes
+  // them. `isPlaceholderData` is exactly this question -- not `isFetching`,
+  // which is also true for the background refresh that leaves the answer
+  // correct.
+  const restating = gamma.isPlaceholderData || panel.isPlaceholderData
+  // WHAT THE PAGE ACTUALLY SHOWS. `restating` is the truth; `stale` is the
+  // truth that has lasted long enough to be worth interrupting the reader
+  // with. See SETTLE_MS.
+  const stale = useSettled(restating, SETTLE_MS)
+
   // 0 DTE during the session, the next expiry once the day is over. THE RULE
   // IS THE SERVER'S (core/expiry.py:default_scope) because it compares a
   // wall-clock time against the market's timezone, and this browser would
@@ -149,6 +218,10 @@ export function GammaTab() {
     setExpiries([serverDefault])
   }, [serverDefault])
 
+  // TRUE ONLY ON THE FIRST EVER LOAD now. Every later change of expiry or
+  // measure keeps the previous answer on screen (see STEERED in api/client),
+  // so this branch is the empty-page case it was always meant to be rather
+  // than something the reader hits on every tick of the picker.
   if (gamma.isPending) return <Note>Loading the chain…</Note>
   if (gamma.isError) {
     return <Note>Could not read the chain: {(gamma.error as Error).message}</Note>
@@ -163,6 +236,9 @@ export function GammaTab() {
   }
 
   return (
+    // THE TOOLBAR NEVER DIMS, only the panels. The picker is what the reader
+    // is using while this is true, and greying the control they are clicking
+    // to say the charts are stale would be saying it about the wrong thing.
     <div className="px-5 py-4">
       <div className="mb-3 flex flex-wrap items-end gap-4">
         <ExpiryDropdown
@@ -171,6 +247,19 @@ export function GammaTab() {
           selected={expiries}
           onChange={(keys) => { touched.current = true; setExpiries(keys) }}
         />
+
+        {/* SAID, NOT SHOWN BY BLANKING. The charts below are the previous
+            scope's answer for a moment; a reader who is not told that would
+            read them as the selection they just made. It sits beside the
+            picker because that is where the reader is looking when it
+            appears, and it reserves no space when idle -- a permanently
+            present, usually empty label would shift the toolbar every time
+            it filled. */}
+        {stale && (
+          <span className="pb-[6px] text-[11px]" style={{ color: 'var(--text-3)' }}>
+            Updating…
+          </span>
+        )}
 
         <label className="flex flex-col gap-1" hidden={grid}>
           <span className="text-[10px] tracking-wider uppercase" style={{ color: 'var(--text-2)' }}>
@@ -199,6 +288,24 @@ export function GammaTab() {
                style={{ color: 'var(--text-2)' }}>
           <input type="checkbox" checked={stack} onChange={(e) => setStack(e.target.checked)} />
           Stack volume &amp; OI
+        </label>
+
+        {/* THE VOLUME SHADE, ON BOTH VIEWS (Chandan, 2026-09-07: "I want that
+            to be like, I can either choose to have it or not"). It is the one
+            thing on these panels that is CONTEXT rather than the measurement:
+            every cell's bars are the selected Greek, and the violet and blue
+            behind them are contracts traded. Reading six exposures against
+            each other is harder with a seventh series behind all of them, and
+            it is the only series a reader might want gone.
+
+            NOT `hidden={grid}` like the checkbox above it: the shade is drawn
+            in both layouts, so a control that vanished in one would leave it
+            switched off with no way to bring it back. */}
+        <label className="flex items-center gap-2 pb-[6px] text-[12px]"
+               style={{ color: 'var(--text-2)' }}>
+          <input type="checkbox" checked={showVolume}
+                 onChange={(e) => setShowVolume(e.target.checked)} />
+          Volume shade
         </label>
 
         {/* LAYOUT SWITCH, FAR RIGHT (Chandan, 2026-09-06). It is the one
@@ -234,7 +341,14 @@ export function GammaTab() {
           The picker used to sit in a 300px column here; it is now the dropdown
           in the toolbar above, and the panels have the row to themselves. */}
       <div>
-        <div>
+        {/* DIMMED, NOT REPLACED, while the answer on screen belongs to the
+            previous scope. Enough to say "this is not settled yet" from the
+            corner of the eye, not enough to stop the reader comparing it with
+            what they just picked -- which is the whole reason for keeping it
+            drawn. The transition is short: a blink at 200ms reads as a
+            glitch, and anything long enough to watch is worse than blanking. */}
+        <div style={{ opacity: stale ? 0.55 : 1,
+                      transition: 'opacity 120ms linear' }}>
           <HeadlineStrip
             summary={body.summary ?? {}}
             labels={body.labels ?? {}}
@@ -248,6 +362,7 @@ export function GammaTab() {
 
           {grid ? (
             <ExposureGrid gamma={body} expiries={expiries}
+                          showVolume={showVolume}
                           stack={stack} onStack={setStack} />
           ) : usesSecond && panel.isPending ? (
             <Note>Loading {view.label}…</Note>
@@ -264,8 +379,8 @@ export function GammaTab() {
               // by orders of magnitude rather than merely ugly.
               ticks={panel.data?.ticks ?? { tickvals: [], ticktext: [] }}
               spot={body.spot}
-              flipStrike={body.flip_strike ?? null}
               stack={stack}
+              showVolume={showVolume}
             />
           )}
 

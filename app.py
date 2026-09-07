@@ -71,6 +71,7 @@ from services.loaders import (
     _load_prior_session_oi,
     _load_spx_intraday,
     _load_transform_marks,
+    _load_underlying_history,
     compute_transform_scanner,
     invalidate_on_new_snapshot,
 )
@@ -444,6 +445,7 @@ VIEW_CTX = ViewContext(
     load_latest_atm_iv=_load_latest_atm_iv,
     load_contract_hist=_load_contract_hist,
     load_transform_marks=_load_transform_marks,
+    load_underlying_history=_load_underlying_history,
     compute_transform_scanner=compute_transform_scanner,
     mc=MC,
     sc_max_rows=sc_max_rows,

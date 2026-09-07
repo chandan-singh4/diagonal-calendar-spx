@@ -22,7 +22,7 @@ from fastapi.responses import JSONResponse
 import config
 import db
 import schema
-from api import auth, reads, watch
+from api import auth, locks, reads, watch
 from api.cache import SnapshotCache
 
 # The wire format for every timestamp this API emits. Stored timestamps are
@@ -61,9 +61,12 @@ def create_app(db_path: str | None = None,
     temporary directory by a test, and this registry is ~700 KB of real
     accumulated state that a test must never write over.
 
-    READ, NEVER WRITTEN. `api/` remains read-only apart from its one
-    documented exception, the "New" registry — see the module docstring and
-    the note above `computed.non_atm_panel`.
+    READ, WITH TWO NAMED EXCEPTIONS. `api/` is read-only apart from the
+    "New" registry — see the module docstring and the note above
+    `computed.non_atm_panel` — and, since ADR-054, entry locks (api/locks.py).
+    Both write JSON sidecars under `state_dir`; neither writes the database,
+    which this package still opens with PRAGMA query_only=ON. Adding a third
+    is a decision, not a detail.
     """
     resolved = db_path or config.DB_PATH
     resolved_state = str(state_dir) if state_dir is not None else str(config.STATE_DIR)
@@ -167,6 +170,10 @@ def create_app(db_path: str | None = None,
     ctx = reads.ReadContext(resolved, cache, state_dir=resolved_state)
     app.include_router(reads.build_router(ctx))
     app.include_router(reads.build_computed_router(ctx))
+    # The write. Bound to the same ctx as the reads so it lands in whatever
+    # state directory this server was pointed at -- a router that reached for
+    # config.STATE_DIR itself would write the real locks during a test.
+    app.include_router(locks.build_router(ctx))
     app.include_router(watch.build_router(watcher))
     app.state.watcher = watcher
     app.state.cache = cache

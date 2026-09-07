@@ -67,6 +67,7 @@ from datetime import time as dtime
 from typing import Union
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
 
 # The pure analytics core, for the second-order Greeks it alone defines. Both
@@ -81,11 +82,24 @@ SHARES_PER_CONTRACT = 100
 # A one-percent move, expressed as the fraction the spot^2 term is scaled by.
 ONE_PERCENT = 0.01
 
-# How much of each end of the collected strike range is treated as too close
-# to the edge for a gamma flip to be believed. See flip_strike: the running
-# total's baseline is set by where collection STOPPED, so a crossing near the
-# boundary says more about the record than about the market.
-EDGE_GUARD = 0.10
+# How far either side of spot the zero-gamma search looks, as a fraction of
+# spot. +/-10% is far wider than the level has ever sat and still inside the
+# range the collected chain can speak for (~+/-300 points on a 7,700 index).
+# Widening it would not find more levels; it would find crossings in a region
+# where every contract is a distant wing and the answer is noise.
+ZERO_GAMMA_SPAN = 0.10
+
+# The coarse grid the search walks before it refines, as a fraction of spot.
+# 0.1% is ~8 points on SPX: fine enough that a sign change cannot hide between
+# two samples at any plausible curvature, coarse enough to cost a couple of
+# hundred re-pricings of the book rather than thousands.
+ZERO_GAMMA_STEP = 0.001
+
+# Bisection steps once a bracket is found. Each halves the interval, so 40
+# takes an ~8-point bracket to far past the precision the inputs justify, and
+# cheaply: 40 more evaluations, not 40 more grid passes. The limit exists so a
+# pathological curve cannot loop.
+ZERO_GAMMA_REFINE = 40
 
 # The dealer-positioning assumption, in one place. See the module docstring:
 # this is the convention the whole measure rests on.
@@ -198,7 +212,7 @@ def by_strike(chain_df: pd.DataFrame, spot: float,
     installed dealer structure, and "volume" gives vGEX, the same measure over
     TODAY'S traded flow alone (Chandan, 2026-09-06). The columns are named
     `call_gex`/`put_gex`/`net_gex` under both, deliberately: `summary`,
-    `flip_strike`, `cumulative_net` and the tab's whole strike panel all read
+    `summary` and the tab's whole strike panel all read
     those names, and vGEX is the same quantity over a different weight rather
     than a different quantity. The CALLER says which it asked for; nothing
     downstream needs to.
@@ -289,65 +303,205 @@ def window(gex_df: pd.DataFrame, spot: float, count: int) -> pd.DataFrame:
     return gex_df.loc[nearest].sort_values("strike", ignore_index=True)
 
 
-def flip_strike(gex_df: pd.DataFrame) -> float | None:
-    """The strike where CUMULATIVE net gamma exposure crosses zero.
+def _gamma_book(chain_df: pd.DataFrame, expiry: ExpiryScope,
+                day_remainder: float, weight: str):
+    """Every contract the zero-gamma search re-prices, as plain lists.
 
-    Widely called the "gamma flip" or zero-gamma level: below it dealers are
-    said to be short gamma and to amplify moves, above it long gamma and to
-    damp them. It is the one number from this module with a claimed
-    directional meaning, so treat it as the hypothesis it is.
+    Returns (strikes, t_years, ivs, signs, weights) or None if there is
+    nothing to price. Built ONCE and handed to every candidate level: the
+    search evaluates the book a couple of hundred times, and rebuilding a
+    DataFrame per evaluation would turn a fast answer into a slow one for no
+    difference in the result.
 
-    Interpolated linearly between the two strikes that straddle the crossing,
-    because the true level almost never falls exactly on a listed strike and
-    reporting the nearer strike would quantise it to the strike spacing.
-
-    **A TRUNCATED CHAIN MOVES THIS NUMBER, AND ONLY IN ONE DIRECTION.** The
-    running total starts at zero at the lowest strike COLLECTED, not at the
-    lowest strike that exists. Every put below that point is negative gamma
-    left out, so the curve starts too high and the crossing is pushed UP. On
-    the ±300 chain the effect is small; on an 0DTE selection, which the
-    collector only carries out to about ±100, it is large enough to shove the
-    crossing to the top edge of the range — where it was measured at 7821.5
-    on a 7620-7830 chain with spot at 7723.66, which is not a market fact
-    about 7821.5, it is an artefact of where collection stopped.
-    So a crossing landing in the outermost tenth at either end is reported as
-    NO FLIP. That is the honest answer: the flip, if there is one, is off the
-    edge of what was collected and this data cannot locate it. Better a blank
-    than a confident line drawn at the boundary of the record.
-
-    None also when the cumulative total never changes sign — a chain that is
-    long or short gamma throughout has no flip, which is a real market state
-    and not a failure.
+    THE WEIGHT AND EVERY IV ARE FROZEN. See `zero_gamma_spot` for what that
+    assumption is and why it is the honest one to make.
     """
-    if gex_df.empty or "net_gex" not in gex_df.columns:
+    if chain_df is None or chain_df.empty:
+        return None
+    if not {"strike", "right", "iv", "dte"}.issubset(chain_df.columns):
         return None
 
-    cum = cumulative_net(gex_df).to_numpy()
-    strikes = gex_df["strike"].to_numpy()
+    work = chain_df
+    if expiry is not None:
+        if "expiry" not in work.columns:
+            return None
+        work = scope_to(work, expiry)
 
-    crossing = None
-    for i in range(1, len(cum)):
-        lo, hi = cum[i - 1], cum[i]
-        if lo == 0.0:
-            crossing = float(strikes[i - 1])
+    work = work[work["iv"].notna() & work["dte"].notna()].copy()
+    if work.empty:
+        return None
+
+    work["_w"] = (pd.to_numeric(work.get(weight), errors="coerce").fillna(0.0)
+                  if weight in work.columns else 0.0)
+    work["_t"] = [year_fraction(d, day_remainder) for d in work["dte"]]
+    work["_sign"] = work["right"].map(DEALER_SIGN).fillna(0)
+    work = work[work["_t"].notna() & (work["_sign"] != 0)]
+    if work.empty:
+        return None
+
+    # ARRAYS, NOT LISTS. The search prices this book fifty-odd times per
+    # request and the tab fires seven requests on a click; a Python loop over
+    # 3,000 contracts per level made that the slowest thing on the screen.
+    return (
+        work["strike"].to_numpy(dtype=float),
+        work["_t"].to_numpy(dtype=float),
+        work["iv"].to_numpy(dtype=float),
+        work["_sign"].to_numpy(dtype=float),
+        work["_w"].to_numpy(dtype=float),
+    )
+
+
+def _net_gamma(book, candidate: float, r: float, q: float) -> float:
+    """Dealer-signed gamma exposure of the whole book AT `candidate`.
+
+    Same units as `net_gex`: dollars of hedging flow per one-percent move,
+    scaled by `SHARES_PER_CONTRACT * candidate**2 * ONE_PERCENT`. The spot
+    term is the CANDIDATE, not today's price -- the question being asked is
+    what the exposure would be if SPX were there, and the notional behind a
+    contract moves with the index like everything else.
+    """
+    strikes, times, ivs, signs, weights = book
+    scale = SHARES_PER_CONTRACT * (candidate ** 2) * ONE_PERCENT
+    gammas = iv_engine.gamma_many(candidate, strikes, times, ivs, r, q)
+    # nansum, so a contract that cannot be priced is LEFT OUT rather than
+    # counted as a zero -- the array-shaped form of blank-not-zero. The scalar
+    # loop this replaced skipped None the same way.
+    return float(np.nansum(signs * gammas * weights) * scale)
+
+
+def net_gamma_at(chain_df: pd.DataFrame, candidate: float, *,
+                 r: float, q: float, expiry: ExpiryScope = None,
+                 day_remainder: float = 0.0,
+                 weight: str = "open_interest") -> float | None:
+    """The book's total dealer gamma if SPX were at `candidate`.
+
+    Exposed on its own, not left as a private step inside `zero_gamma_spot`,
+    because the level is only as trustworthy as this curve and a reader (or a
+    test) must be able to look at the curve rather than take the crossing on
+    faith. None when the chain cannot be priced at all.
+    """
+    book = _gamma_book(chain_df, expiry, day_remainder, weight)
+    if book is None or candidate is None or candidate <= 0:
+        return None
+    return _net_gamma(book, float(candidate), r, q)
+
+
+def zero_gamma_spot(chain_df: pd.DataFrame, spot: float, *,
+                    r: float, q: float, expiry: ExpiryScope = None,
+                    day_remainder: float = 0.0,
+                    weight: str = "open_interest") -> float | None:
+    """The SPX level at which the book's TOTAL net gamma would be zero.
+
+    The gamma flip, as the term is actually used: below this level dealers are
+    net short gamma and are said to amplify moves, above it net long and to
+    damp them. Chandan chose this definition on 2026-09-07, closing BUG-044.
+
+    **WHY IT REPLACED THE CUMULATIVE CROSSING, which this project shipped for
+    months and which was wrong.** The old `flip_strike` walked up the strikes
+    accumulating `net_gex` and reported where the running total crossed zero.
+    That running total starts at zero AT THE LOWEST STRIKE COLLECTED, which is
+    a fact about the collector and not about the market: every strike below
+    the floor is exposure left out, so the whole curve carried an unknown
+    offset and the crossing moved with it. Measured on snapshot 6387 with
+    nothing changed but where the chain was cut, one expiry's answer ran
+    7846 / 7819 / 7772 / 7672 -- 175 points of movement in one book on one
+    second. The blanks were that fault caught by an edge guard; the numbers
+    that got printed were the same fault NOT caught.
+
+    **WHY THIS ONE DOES NOT HAVE THAT PROBLEM.** There is no running total and
+    no baseline. Each candidate level is priced independently: every contract
+    in the chain is re-valued there through Black-Scholes and the
+    dealer-signed gammas are summed. A missing far strike changes the total by
+    its own gamma at that level ONCE, instead of shifting a running total that
+    every strike above it then inherits. That is the whole difference, and it
+    is a bound rather than an escape: measured at a week to expiry, a strike
+    300 points out still carries about 5% of an at-the-money contract's gamma
+    (tests/test_second_order_greeks.py). An omission NEAR THE MONEY still
+    matters and always will. What it no longer does is accumulate.
+
+    **THE TWO ASSUMPTIONS, STATED because they are the whole exposure.**
+    (1) STICKY STRIKE: each contract keeps the implied volatility it is quoted
+    at today. Real skew moves as spot moves, so a level 200 points away is
+    priced with today's smile rather than the one that would exist there.
+    (2) FROZEN INVENTORY: open interest does not change as spot moves. Both
+    are the standard assumptions behind every published zero-gamma figure --
+    which is much of the point of adopting the standard definition -- and both
+    get weaker the further the level sits from spot.
+
+    Also inherited, and unchanged: the dealer-sign convention (see the module
+    docstring). If dealers are not long calls and short puts, this has the
+    wrong sign, and so does every other figure on the tab.
+
+    **HOW IT IS FOUND.** The book is priced on a grid of ZERO_GAMMA_STEP
+    across +/-ZERO_GAMMA_SPAN of spot, and the sign change NEAREST SPOT is
+    bisected to a level. Nearest rather than lowest: a book can cross zero more
+    than once, and the crossing that governs today's hedging is the one the
+    index would reach first.
+
+    **NONE, NEVER A NUMBER, when:** the chain cannot be priced; total gamma
+    never changes sign across the searched band (a book long or short gamma
+    throughout has no flip, which is a real market state); or the crossing
+    lands outside the collected strike range, where there are no contracts to
+    speak for it. A blank stays the honest answer -- it is just no longer the
+    answer for a chain that merely stops early on the downside.
+    """
+    if spot is None or spot <= 0:
+        return None
+    book = _gamma_book(chain_df, expiry, day_remainder, weight)
+    if book is None:
+        return None
+
+    spot = float(spot)
+    step = spot * ZERO_GAMMA_STEP
+    if step <= 0:
+        return None
+    steps = int(ZERO_GAMMA_SPAN / ZERO_GAMMA_STEP)
+
+    # Walked outward from spot in BOTH directions at once, so the first
+    # bracket found is the nearest one and no sorting of candidates is needed.
+    here = _net_gamma(book, spot, r, q)
+    if here == 0.0:
+        return spot
+
+    bracket = None
+    for i in range(1, steps + 1):
+        for direction in (1, -1):
+            near = spot + direction * (i - 1) * step
+            far = spot + direction * i * step
+            lo = here if i == 1 else _net_gamma(book, near, r, q)
+            hi = _net_gamma(book, far, r, q)
+            if hi == 0.0:
+                return float(far)
+            if (lo < 0) != (hi < 0):
+                bracket = (near, lo, far)
+                break
+        if bracket is not None:
             break
-        if (lo < 0) != (hi < 0):
-            if hi == lo:                      # cannot happen with a sign change
-                crossing = float(strikes[i])  # pragma: no cover
-            else:
-                frac = -lo / (hi - lo)
-                crossing = float(strikes[i - 1]
-                                 + frac * (strikes[i] - strikes[i - 1]))
+
+    if bracket is None:
+        return None
+
+    # Bisection rather than one linear interpolation across the step: net
+    # gamma is not linear in spot -- it is a sum of bell curves -- so a
+    # straight line between two samples is right only where the curve happens
+    # to be straight, which near a crossing it is not.
+    a, fa, b = bracket
+    for _ in range(ZERO_GAMMA_REFINE):
+        mid = 0.5 * (a + b)
+        fm = _net_gamma(book, mid, r, q)
+        if fm == 0.0:
+            a = b = mid
             break
+        if (fa < 0) != (fm < 0):
+            b = mid
+        else:
+            a, fa = mid, fm
+    level = 0.5 * (a + b)
 
-    if crossing is None:
+    strikes = book[0]
+    if not (min(strikes) <= level <= max(strikes)):
         return None
-
-    low, high = float(strikes[0]), float(strikes[-1])
-    guard = EDGE_GUARD * (high - low)
-    if guard > 0 and not (low + guard <= crossing <= high - guard):
-        return None
-    return crossing
+    return float(level)
 
 
 def flow_ratio(gex_df: pd.DataFrame) -> float | None:
@@ -375,7 +529,8 @@ def flow_ratio(gex_df: pd.DataFrame) -> float | None:
     return float(net[net > 0].sum()) / total
 
 
-def summary(gex_df: pd.DataFrame) -> dict:
+def summary(gex_df: pd.DataFrame, *,
+            flip_strike: float | None = None) -> dict:
     """The headline figures above the chart.
 
     **PASS THE DISPLAYED WINDOW, NOT THE WHOLE CHAIN.** Option Alpha computes
@@ -403,7 +558,14 @@ def summary(gex_df: pd.DataFrame) -> dict:
                    positive. A count of bars, not a share of dollars -- "55%
                    of 40 bars nearest the money are positive".
       peak_strike  Where absolute exposure is greatest.
-      flip_strike  See flip_strike().
+      flip_strike  PASSED IN, not computed here. It is the zero-gamma
+                   level, and finding it needs the whole option chain,
+                   a rate and a dividend yield -- none of which a
+                   per-strike frame contains (see zero_gamma_spot).
+                   Defaulting to None is deliberate: a caller that
+                   cannot supply it gets a blank, which is the honest
+                   answer, rather than a number derived from the frame
+                   by some other route that would be wrong again.
 
     Every value is None when it cannot be computed, never 0 -- a chain with no
     gamma and a perfectly balanced one are different states, and a zero shown
@@ -451,25 +613,8 @@ def summary(gex_df: pd.DataFrame) -> dict:
         total_bars=total_bars,
         peak_strike=peak_strike,
         peak_side="Call" if peak_net > 0 else "Put",
-        flip_strike=flip_strike(gex_df),
+        flip_strike=flip_strike,
     )
-
-
-def cumulative_net(gex_df: pd.DataFrame) -> pd.Series:
-    """Running total of net exposure from the lowest strike upward.
-
-    The curve whose zero crossing IS `flip_strike` — literally: that function
-    calls this one, so there is a single definition of the running total
-    rather than a cumsum here and an identical cumsum there that could drift.
-    The chart that drew this curve was removed; the definition stays because
-    the flip is computed from it.
-
-    Returned as a Series aligned to the frame so a caller can plot it against
-    `strike` without another groupby.
-    """
-    if gex_df.empty:
-        return pd.Series(dtype="float64")
-    return gex_df["net_gex"].cumsum()
 
 
 def dollar_scale(spot: float) -> float:

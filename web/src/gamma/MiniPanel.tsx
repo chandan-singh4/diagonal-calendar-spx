@@ -32,7 +32,7 @@ import { useCallback, useEffect, useRef } from 'react'
 
 import type { AxisTicks, SessionRangeRow, StrikeRow } from '../api/types'
 import {
-  BG, BRIGHT, CALL, CALL_VOL_EDGE, CALL_VOL_FILL, CALL_WICK, FLIP, GRID, INK,
+  BG, BRIGHT, CALL, CALL_VOL_EDGE, CALL_VOL_FILL, CALL_WICK, GRID, INK,
   NET_WICK,
   BUTTON, HOVER, type PanelSpec, PUT, PUT_VOL_EDGE, PUT_VOL_FILL, PUT_WICK,
   wickTrace,
@@ -46,6 +46,14 @@ export interface MiniPanelProps {
    *  be drawing delta while the shade behind it is the chain's traded volume —
    *  one chain, one volume, whichever Greek is in front of it. */
   volumeRows: StrikeRow[]
+  /** Whether to draw the volume shade at all — the tab's toggle.
+   *
+   *  SEPARATE FROM `spec.shade`, which is the PANEL's own refusal: the book's
+   *  volume cell must never draw volume behind volume, whatever the toggle
+   *  says. This one is the reader's preference across every cell that could
+   *  show it. Two different questions, and collapsing them into one flag would
+   *  let the toggle put a volume shade behind the volume chart. */
+  showVolume: boolean
   /** The strike span EVERY cell in the grid is drawn across, decided once by
    *  the grid and handed to all six.
    *
@@ -60,7 +68,6 @@ export interface MiniPanelProps {
   spec: PanelSpec
   ticks: AxisTicks
   spot: number
-  flipStrike: number | null
   /** Maximise handler. Omitted (Detail view) hides the button. */
   onBig?: () => void
   /** Is this panel currently maximised? */
@@ -69,7 +76,7 @@ export interface MiniPanelProps {
 }
 
 export function MiniPanel({
-  rows, ranges, volumeRows, xRange, spec, ticks, spot, flipStrike, height,
+  rows, ranges, volumeRows, showVolume, xRange, spec, ticks, spot, height,
   onBig, big = false,
 }: MiniPanelProps) {
   const host = useRef<HTMLDivElement>(null)
@@ -135,7 +142,11 @@ export function MiniPanel({
     // panel, so the shade reads the same way wherever the eye lands.
     const volStrikes = volumeRows.map((row) => row.strike)
     let volPeak = 0
-    for (const [name, fill, edge, side] of spec.shade === false ? [] : [
+    // WITH THE SHADE OFF, `volPeak` stays 0 and `yaxis2` gets no range -- the
+    // exact state that once broke the reset button, because relayout THROWS on
+    // an undefined value. That path is handled (see `reset` above); this is the
+    // control that makes it a normal state rather than a rare one.
+    for (const [name, fill, edge, side] of (spec.shade === false || !showVolume) ? [] : [
       ['put_volume', PUT_VOL_FILL, PUT_VOL_EDGE, -1],
       ['call_volume', CALL_VOL_FILL, CALL_VOL_EDGE, 1],
     ] as const) {
@@ -296,13 +307,6 @@ export function MiniPanel({
       type: 'line', x0: spot, x1: spot, xref: 'x', yref: 'y domain', y0: 0, y1: 1,
       line: { color: '#8fa9c4', width: 1, dash: 'dot' },
     }]
-    if (flipStrike !== null && strikes.length > 0 &&
-        flipStrike >= Math.min(...strikes) && flipStrike <= Math.max(...strikes)) {
-      shapes.push({
-        type: 'line', x0: flipStrike, x1: flipStrike, xref: 'x', yref: 'y domain',
-        y0: 0, y1: 1, line: { color: FLIP, width: 1, dash: 'dash' },
-      })
-    }
 
     // A STACKED COUNT SITS ON THE FLOOR; everything else is centred on zero.
     // See PanelSpec.floor — centring a series with nothing below zero would
@@ -407,7 +411,7 @@ export function MiniPanel({
     // its container had AT DRAW TIME. Without a redraw the panel would fill
     // the screen with a chart still drawn for a grid cell — tick labels and
     // margins sized for 19rem, stretched.
-  }, [rows, ranges, volumeRows, xRange, spec, ticks, spot, flipStrike, height])
+  }, [rows, ranges, volumeRows, showVolume, xRange, spec, ticks, spot, height])
 
   // Double-click is Plotly's own reset and would AUTORANGE, undoing the
   // centred zero the grid depends on. It is turned off above and routed here

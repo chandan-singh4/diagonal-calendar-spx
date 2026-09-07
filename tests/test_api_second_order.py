@@ -60,6 +60,101 @@ def chain() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+@pytest.fixture
+def lopsided_chain() -> pd.DataFrame:
+    """Two expiries whose flips are nowhere near each other, or the board's.
+
+    The near expiry is put-heavy and the far one call-heavy, so scoping the
+    level to one of them gives a materially different answer from the chain —
+    which is the whole point of the check below. A fixture where the three
+    agreed would pass whatever the code did.
+    """
+    # Volume is NOT proportional to open interest here, deliberately: it makes
+    # the vGEX case a real second case rather than the same arithmetic scaled,
+    # and the two weights do land on different levels (6,147 against 5,943).
+    layout = [
+        ("2026-09-11", 7, [(5800, "P", 9000, 200), (5900, "P", 9000, 400),
+                           (6000, "P", 3000, 900), (6000, "C", 3000, 900),
+                           (6100, "C", 9000, 300), (6200, "C", 9000, 100)]),
+        ("2026-09-18", 14, [(5800, "P", 2000, 600), (5900, "P", 3000, 800),
+                            (6000, "P", 2000, 700), (6000, "C", 4000, 500),
+                            (6100, "C", 6000, 200), (6200, "C", 12000, 150)]),
+    ]
+    rows = []
+    for expiry, dte, contracts in layout:
+        for strike, right, oi, volume in contracts:
+            # `gamma` is the broker's stored figure and is what the BARS are
+            # built from; the flip re-prices from `iv` instead. Both columns
+            # are needed or the panel comes back empty and its summary blanks
+            # every figure including the one under test.
+            rows.append(dict(expiry=expiry, dte=dte, strike=float(strike),
+                             right=right, iv=18.5, gamma=0.001,
+                             open_interest=oi, volume=volume))
+    return pd.DataFrame(rows)
+
+
+@pytest.mark.parametrize("served,weight", [
+    (computed.gamma_exposure, "open_interest"),
+    (computed.volume_gamma_exposure, "volume"),
+])
+def test_the_flip_is_the_whole_chains_even_when_one_expiry_is_drawn(
+        lopsided_chain, served, weight):
+    """**THE SCOPE IS NOT THE PANEL'S** (Chandan, 2026-09-07, quoting the
+    published definition: "all available strikes AND EXPIRATION DATES in the
+    chain").
+
+    THE FAULT THIS PINS. The flip was scoped to whichever expiry the picker
+    had selected, so a single-expiry level was being quoted under a name that
+    means the whole board. On the live record that put the line at 7,545 for
+    Sep 18 alone where the chain's own level was 7,671 — 145 points, and
+    Chandan spotted it from the chart: "there is no way the gamma flip is so
+    on the left."
+
+    The BARS stay scoped to the selection. Only the level is chain-wide, which
+    is why the label on both screens carries "(chain)".
+    """
+    # AFTER_CLOSE so the day remainder is a known zero and the comparison
+    # below is against the same arithmetic, not a wall clock.
+    spot = 6000.0
+    result = served(lopsided_chain, spot, "2026-09-11",
+                    r=config.RISK_FREE_RATE, q=config.DIVIDEND_YIELD,
+                    snapshot_ts=AFTER_CLOSE, display_tz=config.DISPLAY_TIMEZONE)
+
+    whole = gex.zero_gamma_spot(lopsided_chain, spot, weight=weight,
+                                r=config.RISK_FREE_RATE,
+                                q=config.DIVIDEND_YIELD)
+    scoped = gex.zero_gamma_spot(lopsided_chain, spot, expiry="2026-09-11",
+                                 weight=weight, r=config.RISK_FREE_RATE,
+                                 q=config.DIVIDEND_YIELD)
+
+    assert whole is not None and scoped is not None
+    # Without this the test could pass on a build that still scopes the level.
+    assert abs(whole - scoped) > 1.0, "fixture no longer separates the two"
+
+    assert result["flip_strike"] == pytest.approx(whole)
+    assert result["summary"]["flip_strike"] == pytest.approx(whole)
+    # And the bars are still the expiry's, so the panel and the level
+    # deliberately describe different sets of contracts.
+    assert len(result["by_strike"]) == 5   # 5 strikes on that expiry alone
+
+
+def test_both_screens_say_which_scope_the_flip_belongs_to():
+    """A level quoted without its scope reads as belonging to the bars beside
+    it, and every other figure in that strip IS the selected expiry. The word
+    is the only thing standing between the reader and that assumption, so it
+    is pinned rather than left to survive the next edit."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    strip = (root / "web" / "src" / "gamma" / "HeadlineStrip.tsx").read_text(
+        encoding="utf-8")
+    page = (root / "views" / "gex.py").read_text(encoding="utf-8")
+
+    assert 'label="Gamma flip (chain)"' in strip
+    assert "'vGEX flip (chain)'" in strip
+    assert '_metric("Gamma flip (chain)"' in page
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # The arithmetic is core/'s, not the server's
 # ─────────────────────────────────────────────────────────────────────────────

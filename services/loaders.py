@@ -91,6 +91,18 @@ def _load_transform_marks(front: str, back: str, call_s: float, put_s: float,
     return queries.load_transform_marks(config.DB_PATH, front, back,
                                          call_s, put_s, days=days)
 
+@st.cache_data(show_spinner=False, max_entries=8)
+def _load_underlying_history(days: int, snapshot_id: int) -> pd.DataFrame:
+    """SPX over the window, with no option chain involved.
+
+    Separate from _load_transform_marks because the marks query drops any
+    snapshot missing one of the six legs, and the index was riding on those
+    rows -- so a 0DTE afternoon ended the SPX panel an hour early. Keyed on
+    days alone (plus the snapshot, as all of these are): it does not depend on
+    the strike pair, so switching strikes reuses it.
+    """
+    return queries.load_underlying_history(config.DB_PATH, days=days)
+
 @st.cache_data(show_spinner=False, max_entries=32)
 def _load_latest_atm_iv(expiry: str, snapshot_id: int, n: int = 2) -> list:
     return queries.load_latest_atm_iv(config.DB_PATH, expiry, n)
@@ -189,6 +201,7 @@ _SNAPSHOT_SCOPED = (
     _load_chain_df,
     _load_spx_intraday,
     _load_transform_marks,
+    _load_underlying_history,
     _load_latest_atm_iv,
     _load_diagonal_hist,
     _load_intraday_strike_metrics,

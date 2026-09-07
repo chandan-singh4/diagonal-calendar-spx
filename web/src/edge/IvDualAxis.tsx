@@ -18,6 +18,7 @@ import { useEffect, useRef } from 'react'
 
 import type { AtmPairRow, RangeBreak } from '../api/types'
 import { marketOpenShapes } from './marketOpens'
+import { TIME_AXIS_MARGIN } from './timeAxis'
 
 const FRONT = '#548ce8'
 const BACK = '#a374e0'
@@ -70,7 +71,7 @@ export function IvDualAxis({ rows, rangebreaks, marketOpens,
     const layout: Partial<Plotly.Layout> = {
       paper_bgcolor: BG, plot_bgcolor: BG,
       font: { color: INK, size: 11 },
-      margin: { l: 58, r: 58, t: 12, b: 40 },
+      margin: TIME_AXIS_MARGIN,
       hovermode: 'x unified',
       hoverlabel: { bgcolor: '#111c2e', bordercolor: '#1a2d45',
                     font: { color: BRIGHT, size: 12 } },

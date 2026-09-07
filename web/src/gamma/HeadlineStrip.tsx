@@ -70,7 +70,10 @@ export function HeadlineStrip({ summary, labels, second, measure }: HeadlineStri
     extra.push(
       { label: 'Net vGEX', value: second.labels.net_gex ?? '—',
         colour: signColour(second.summary.net_gex) },
-      { label: 'vGEX flip', value: second.labels.flip_strike ?? '—', colour: FLIP },
+      // (chain), like the gamma one beside it: the level is the whole
+      // board's even when one expiry is selected. See api/computed.py.
+      { label: 'vGEX flip (chain)', value: second.labels.flip_strike ?? '—',
+        colour: FLIP },
     )
   } else if (second && measure === 'vanna') {
     extra.push(
@@ -123,7 +126,14 @@ export function HeadlineStrip({ summary, labels, second, measure }: HeadlineStri
       {/* The label already reads "7,720 (Put)" — the side is joined to the
           strike server-side, so this does not pair a number with a word. */}
       <Metric label="Peak strike" value={labels.peak_strike ?? '—'} />
-      <Metric label="Gamma flip" value={labels.flip_strike ?? '—'} colour={FLIP} />
+      {/* THE SCOPE IS IN THE LABEL because it differs from every other
+          figure in this strip. Net GEX, the ratio and the peak all describe
+          the selected expiry; the flip describes the whole chain, which is
+          what the published definition means by it (Chandan, 2026-09-07).
+          A level quoted without its scope is how the number gets read as
+          belonging to the bars beside it. */}
+      <Metric label="Gamma flip (chain)" value={labels.flip_strike ?? '—'}
+              colour={FLIP} />
       {extra.map((item) => (
         <Metric key={item.label} label={item.label} value={item.value} colour={item.colour} />
       ))}

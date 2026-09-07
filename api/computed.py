@@ -210,7 +210,9 @@ def new_since_previous(db_path: str, snapshot_id: int,
 
 
 def gamma_exposure(chain_df: pd.DataFrame, spot: float,
-                   expiry: gex.ExpiryScope = None) -> dict[str, Any]:
+                   expiry: gex.ExpiryScope = None, *,
+                   r: float, q: float,
+                   snapshot_ts: str, display_tz: str) -> dict[str, Any]:
     """Gamma by strike, plus the flip level and the summary figures.
 
     `expiry` scopes to one contract by its DISPLAY KEY, so the third Friday's
@@ -218,6 +220,17 @@ def gamma_exposure(chain_df: pd.DataFrame, spot: float,
     The scope matters enough that it is echoed back in the response — a gamma
     figure for one expiry and one for all twenty are different numbers and
     look identical on a screen.
+
+    `r`, `q`, `snapshot_ts` and `display_tz` ARE REQUIRED, AND THEY ARE NEW
+    (2026-09-07, BUG-044). Nothing in the per-strike frame needs them; the
+    zero-gamma level does, because it re-prices the whole chain at
+    hypothetical spots rather than accumulating the strikes it was given
+    (`core.gex.zero_gamma_spot`). Required rather than defaulted for the same
+    reason `second_order_exposure` requires them: they are assumptions this
+    figure rests on and are not in the record, and a default would hide that
+    at every call site. The timestamp buys the same thing it buys charm --
+    the fraction of the last day still to run, which on a 0DTE expiry is the
+    difference between a level and a blank.
 
     SUMMARY IS COMPUTED OVER EVERY STRIKE, matching views/gex.py. The ratio
     and sentiment are defined over the bars actually shown, and the dashboard
@@ -227,17 +240,40 @@ def gamma_exposure(chain_df: pd.DataFrame, spot: float,
     reason neither could explain.
     """
     gex_df = gex.by_strike(chain_df, spot, expiry=expiry)
+    # THE FLIP IS THE WHOLE CHAIN'S, NOT THIS PANEL'S -- note the absent
+    # `expiry`, which is the one difference between this call and the bars
+    # above it. The published definition Chandan brought on 2026-09-07 says
+    # "all available strikes AND EXPIRATION DATES in the chain", and it is the
+    # figure commentary means: a single-expiry flip is not a number anyone
+    # quotes. Scoping it to the selection put the line 145 points from where
+    # he expected it (7,545 for Sep 18 alone against 7,671 for the board),
+    # and he was reading the chart correctly.
+    #
+    # The consequence has to be carried on screen rather than hidden: the
+    # dashed line describes MORE contracts than the bars it is drawn over. The
+    # headline calls it "Gamma flip (chain)" for that reason.
+    #
+    # Computed ONCE and passed into the summary rather than computed in both
+    # places: the headline strip and the dashed line must be the same level,
+    # and two calls to a search this expensive would be two chances for them
+    # to differ as well as twice the work.
+    flip = gex.zero_gamma_spot(
+        chain_df, spot, r=r, q=q,
+        day_remainder=gex.day_remainder(snapshot_ts, display_tz))
     return {
         "expiry": expiry,
         "spot": spot,
-        "flip_strike": gex.flip_strike(gex_df),
-        "summary": gex.summary(gex_df),
+        "flip_strike": flip,
+        "summary": gex.summary(gex_df, flip_strike=flip),
         "by_strike": gex_df,
     }
 
 
 def volume_gamma_exposure(chain_df: pd.DataFrame, spot: float,
-                          expiry: gex.ExpiryScope = None) -> dict[str, Any]:
+                          expiry: gex.ExpiryScope = None, *,
+                          r: float, q: float,
+                          snapshot_ts: str,
+                          display_tz: str) -> dict[str, Any]:
     """vGEX -- gamma weighted by TODAY'S VOLUME instead of open interest.
 
     ADDED 2026-09-06 at Chandan's request. GEX describes the structure that is
@@ -254,15 +290,30 @@ def volume_gamma_exposure(chain_df: pd.DataFrame, spot: float,
 
     NO `assumptions` BLOCK, for the same reason gamma and delta have none:
     this weights two columns the broker sent and rests on nothing inferred.
+    THE FLIP LEVEL IS THE EXCEPTION and always was -- see `gamma_exposure` on
+    why `r` and `q` are required here too. It is a re-pricing, so it rests on
+    them; the bars do not.
+
+    THE FLIP HERE IS WEIGHTED BY VOLUME, matching the measure it belongs to.
+    A level found from open interest, quoted on a panel of today's flow, would
+    be the one figure on the screen describing a different book. Its SCOPE,
+    though, is the whole chain -- see `gamma_exposure`.
     """
     gex_df = gex.by_strike(chain_df, spot, expiry=expiry,
                            weight=gex.WEIGHTS["vgex"])
+    # WHOLE CHAIN, exactly as the gamma one -- see its note. Still weighted by
+    # VOLUME, because the comparison between the two flips is the entire use
+    # of vGEX and a weight difference is the only thing that may separate them.
+    flip = gex.zero_gamma_spot(
+        chain_df, spot, r=r, q=q,
+        day_remainder=gex.day_remainder(snapshot_ts, display_tz),
+        weight=gex.WEIGHTS["vgex"])
     return {
         "measure": "vgex",
         "expiry": expiry,
         "spot": spot,
-        "flip_strike": gex.flip_strike(gex_df),
-        "summary": gex.summary(gex_df),
+        "flip_strike": flip,
+        "summary": gex.summary(gex_df, flip_strike=flip),
         "flow_ratio": gex.flow_ratio(gex_df),
         "by_strike": gex_df,
     }

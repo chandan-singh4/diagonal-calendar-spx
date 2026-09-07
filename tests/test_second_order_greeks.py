@@ -63,6 +63,111 @@ def _bs_delta(spot, strike, t_years, sigma, r, q, right):
 # ─────────────────────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("spot,strike,days,iv,right", CASES)
+def test_gamma_is_the_derivative_of_delta_by_spot(spot, strike, days, iv,
+                                                  right):
+    """Checked against a numerical derivative of the delta written out above,
+    for the same reason vanna and charm are: an analytic formula agreeing with
+    itself proves nothing. Added 2026-09-07 with `zero_gamma_spot`, which is
+    the only caller -- the per-strike panels use the broker's gamma, so an
+    error here would surface in one number and nowhere else."""
+    t = iv_engine.year_fraction(days) if hasattr(iv_engine, "year_fraction") \
+        else gex.year_fraction(days)
+    sigma = iv / 100.0
+    h = 0.01
+    numeric = ((_bs_delta(spot + h, strike, t, sigma, R, Q, right)
+                - _bs_delta(spot - h, strike, t, sigma, R, Q, right))
+               / (2 * h))
+    assert iv_engine.gamma(spot, strike, t, iv, R, Q) == pytest.approx(
+        numeric, rel=1e-4)
+
+
+def test_the_one_gamma_is_the_put_gamma_as_well_as_the_call_gamma():
+    """Put-call parity fixes their delta difference at e^(-qT), which does not
+    depend on spot, so differentiating by spot annihilates it. This is why
+    `gamma` takes no `right` -- and why core.gex has to impose the dealer sign
+    itself rather than reading one off the number.
+
+    Checked against the numerical PUT derivative specifically. Comparing the
+    function to itself would pass on any formula at all."""
+    t, sigma, h = 21 / 365.0, 0.12, 0.01
+    numeric_put = ((_bs_delta(SPOT + h, 7800.0, t, sigma, R, Q, "P")
+                    - _bs_delta(SPOT - h, 7800.0, t, sigma, R, Q, "P"))
+                   / (2 * h))
+    assert iv_engine.gamma(SPOT, 7800.0, t, 12.0, R, Q) == pytest.approx(
+        numeric_put, rel=1e-4)
+
+
+def test_the_fast_path_and_the_single_contract_agree_exactly():
+    """`gamma_many` exists ONLY to be faster (core.gex prices the whole book
+    fifty-odd times per request). The moment it is a second opinion rather
+    than a second shape, the screen shows one number and the definition says
+    another, and nothing errors. Both call `_gamma_raw`, and this is what
+    holds them to it.
+
+    Checked across every case in CASES plus rows that cannot be priced, since
+    the two disagree in KIND there by design: None for a scalar, nan for an
+    array entry that has to exist."""
+    t = [days / 365.0 for _, _, days, _, _ in CASES]
+    strikes = [strike for _, strike, _, _, _ in CASES]
+    ivs = [iv for _, _, _, iv, _ in CASES]
+
+    many = iv_engine.gamma_many(SPOT, strikes, t, ivs, R, Q)
+    for i, (k, years, iv) in enumerate(zip(strikes, t, ivs, strict=True)):
+        one = iv_engine.gamma(SPOT, k, years, iv, R, Q)
+        assert one is not None
+        assert many[i] == pytest.approx(one, rel=1e-12)
+
+    # An expired contract: blank in both shapes, spelled differently.
+    dead = iv_engine.gamma_many(SPOT, [7700.0], [0.0], [12.0], R, Q)
+    assert math.isnan(dead[0])
+    assert iv_engine.gamma(SPOT, 7700.0, 0.0, 12.0, R, Q) is None
+
+
+def test_an_unpriceable_contract_is_left_out_of_the_book_not_counted_as_zero():
+    """`core.gex._net_gamma` sums with nansum. A nan treated as 0 would say a
+    contract has no gamma when what is true is that we cannot say -- the
+    blank-not-zero rule in array form. The totals differ, so this is a real
+    check rather than a restatement."""
+    priced = iv_engine.gamma_many(SPOT, [7700.0, 7750.0], [0.02, 0.02],
+                                  [12.0, 12.0], R, Q)
+    partial = iv_engine.gamma_many(SPOT, [7700.0, 7750.0], [0.02, 0.0],
+                                   [12.0, 12.0], R, Q)
+    import numpy as np
+    assert np.nansum(partial) < np.nansum(priced)
+    assert np.nansum(partial) == pytest.approx(priced[0])
+
+
+def test_gamma_is_positive_everywhere_and_concentrated_at_the_money():
+    """Every long option gains delta as spot rises, and the gain is
+    concentrated at the strike. This is what limits the damage a truncated
+    chain does to the zero-gamma level -- but only limits it: measured here,
+    the 300-point wing still carries about 5% of an at-the-money contract's
+    gamma at a week to expiry, so the bound pinned is 10%, not "nothing".
+    The claim that survives is that a missing wing enters the total ONCE, at
+    its own small weight, instead of shifting a running total that every
+    strike above it inherits."""
+    t = 7 / 365.0
+    at_money = iv_engine.gamma(SPOT, SPOT, t, 12.0, R, Q)
+    wing = iv_engine.gamma(SPOT, SPOT - 300, t, 12.0, R, Q)
+    assert at_money > 0 and wing > 0
+    assert wing < 0.10 * at_money
+
+
+@pytest.mark.parametrize("kwargs", [
+    dict(spot=0.0, strike=7700.0, t_years=0.1, iv_pct=12.0),
+    dict(spot=SPOT, strike=0.0, t_years=0.1, iv_pct=12.0),
+    dict(spot=SPOT, strike=7700.0, t_years=0.0, iv_pct=12.0),
+    dict(spot=SPOT, strike=7700.0, t_years=0.1, iv_pct=0.0),
+    dict(spot=SPOT, strike=7700.0, t_years=0.1, iv_pct=None),
+])
+def test_gamma_is_blank_rather_than_zero_where_it_is_undefined(kwargs):
+    """An expired contract does not have a gamma of zero; it does not have
+    one. A zero here would be summed into the book's total as a real
+    measurement of nothing."""
+    assert iv_engine.gamma(r=R, q=Q, **kwargs) is None
+
+
+@pytest.mark.parametrize("spot,strike,days,iv,right", CASES)
 def test_vanna_is_the_derivative_of_delta_by_volatility(spot, strike, days,
                                                         iv, right):
     """dDelta/dSigma, per ONE VOL POINT — the unit `vega` is stored in."""

@@ -5,6 +5,456 @@ what broke, and what remains.
 
 ----
 
+## 2026-09-07 (session 17k) — the flip stops being a line
+
+Chandan: *"Please remove gamma flip from the chart under gamma exposure."*
+
+**Done, and it is the right end of the argument.** ADR-056a had made the level whole-chain
+while still drawing it as a dashed rule across one expiry's bars, and a vertical line through a
+bar chart says one thing louder than any label can deny: *the bars change character HERE*. That
+is exactly the reading Chandan made in the first place — "that's where all the green turns to
+red" — and for a whole-board level over a single expiry's bars it is not true. The "(chain)"
+label was doing all the work of contradicting the line beside it.
+
+**Removed from both screens**, single view and grid cells and the Streamlit page, and the
+`flipStrike` / `flip` parameters went with it rather than being left unused — an unused prop is
+an invitation to start drawing it again. The SPOT rule stays on every panel; spot genuinely is
+a property of the bars underneath it.
+
+**The number stays** on the headline strip as "Gamma flip (chain)", and the server still
+computes and serves `flip_strike`. Only the drawing stopped. Recorded as ADR-056b.
+
+Also written up this session: **ADR-056b**, the vectorisation entry above, and **DEBT-043** for
+the 128-calls-per-request session ranges.
+
+----
+
+## 2026-09-07 (session 17j) — the whole-chain flip made every request pay for it, seven times a click
+
+Chandan: *"I chose a date under expiration, and the dashboard is updating, and it's been over a
+minute easily."*
+
+**Measured before touching anything.** The Gamma tab in grid mode fires **seven requests** on
+one tick of the picker — five measures plus the session ranges — and each is a fresh cache
+entry because the scope changed. Timed as the browser actually issues them, in parallel:
+**13.7s**, with the gamma-family requests at 0.6s each and contending for one CPU.
+
+**The flip I added was doing 170,000 calls into `iv_engine` per request.** `zero_gamma_spot`
+prices the whole book at fifty-odd candidate levels; a Python loop over 3,216 contracts at each
+level is fine once and expensive when it is on every request, and ADR-056a had just made it
+whole-chain — so it no longer got smaller when an expiry was selected.
+
+**Vectorised, without a second copy of the formula.** `iv_engine.gamma_many` prices a whole
+chain at one level in one numpy call; `gamma` and `gamma_many` both call `_gamma_raw`, so there
+is ONE expression to be right or wrong. A fast path with its own arithmetic would be a second
+definition that only the slow screen could ever contradict — and a test now pins the two
+together contract by contract, including the case where they disagree in KIND by design (None
+for a scalar, nan for an array entry that has to exist).
+
+**nansum, not sum.** An unpriceable contract is left out of the book's total rather than
+counted as a zero — the blank-not-zero rule in array form, and the same thing the scalar loop
+did by skipping None.
+
+**Result: the burst went 13.7s → 3.8s**, and the test suite itself from 243s to 96s.
+
+**What is left is not mine, and it is now the whole of it.** `/strikes/session-range` is 3.8s
+of the 3.8s: it calls `gex.by_strike` **128 times**, once per snapshot of the session, and
+redoes that for every new expiry selection. The 410,000-row session frame is already cached and
+shared; the per-scope recomputation is not. One vectorised groupby over (snapshot, strike)
+would replace the loop. **Not attempted today** — it is a change to a shipped number, so it
+wants its own pass with an old-against-new comparison on a full live session.
+
+**Worth recording as a cause of the report itself:** the data service was restarted twice
+during his session, to deploy the flip work. A request in flight across a restart waits, and
+that is indistinguishable on screen from a slow one.
+
+----
+
+## 2026-09-07 (session 17i) — the flip was answering a narrower question than its name (ADR-056a)
+
+Chandan, on the new level, from the Sep 18 panel: *"there is no way the gamma flip is so on
+the left ... it should be somewhere around seven six fifty. That's where all the green turns
+to red."*
+
+**The arithmetic was right; the scope was wrong.** At 7,650 on that expiry the nearby strikes
+contribute −0.79B and −0.25B, and the calls above contribute +1.17B and +1.83B — the book is
+still long **+1.96B** there, so it genuinely does not reach zero until 7,545. Where the bars
+change sign is where INDIVIDUAL STRIKES flip, which is a different question from where the
+total does.
+
+**But he was reading the chart correctly.** The level he pointed at, ~7,650, is almost exactly
+the whole chain's flip: **7,671**. The number on screen was a single-expiry figure wearing a
+name that means the board — and, as his own cited definition puts it, "all available strikes
+**and expiration dates** in the chain".
+
+**So the flip now ignores the expiry picker.** Bars stay scoped to the selection, the level
+does not. vGEX keeps its volume weight, because a weight difference is the only thing that
+should ever separate the two flips.
+
+**The cost is stated rather than hidden:** the dashed line describes more contracts than the
+bars under it, and it is the only figure in that strip that does. Both screens now read
+**"Gamma flip (chain)"**, and a test pins the word — a level quoted without its scope is read
+as belonging to the bars beside it, which is the misreading being fixed.
+
+**Six breaks, all caught:** both flips reverted to following the picker, the vGEX flip
+silently switched to open interest, and each of the three labels dropped its scope. The
+fixture needed two goes — the first had symmetric open interest, so the scoped and whole-chain
+levels were the same number and the check would have passed on any build. It now separates
+them by 50 points, with volume deliberately not proportional to open interest so the vGEX case
+is a real second case.
+
+**Live:** Sep 18, Sep 11 and the whole board all report **7,671** with bar counts 80, 78 and
+101 — the level shared, the panels not. vGEX reads 7,714. Suite: 1,554 passed.
+
+----
+
+## 2026-09-07 (session 17h) — the honest signal was firing on every click, so it read as a flicker
+
+Chandan, on the dropdown fix: *"I tried refreshing the page and it is still refreshing."* Asked
+what he was actually seeing, the answer was **"charts go dim and say Updating"** — so the fix
+had worked, the page was no longer unmounting, and what was left was the mark that says the
+charts are mid-update.
+
+**The mark was correct and still wrong to show.** An expiry is answered in about 0.2s, so the
+dim and the label appeared and vanished inside a fifth of a second on every single tick of the
+picker. **A signal that fires on every ordinary action is not a signal** — it is a flicker, and
+a flicker is what the whole change existed to remove.
+
+**Delayed rather than deleted, at 400ms.** The reason for the mark has not gone away: what is
+on screen in that moment IS the previous scope's answer, and a chart quietly drawing the old
+expiry under a new selection is worse than a blank one, because the reader believes it. So the
+mark waits to see whether the moment lasts long enough to be noticed. An ordinary tick is
+finished before the timer fires and nothing moves; a genuinely slow answer still dims and still
+says so. The number comes from the measurement — 0.2s cold — not from taste.
+
+It clears the instant the data arrives, with no trailing delay, and the flag is ANDed with the
+live one so a timer left over from a previous update cannot dim a page that is already current.
+
+**Four breaks, all caught:** the dim reverted to the immediate flag; the label reverted; the
+delay removed entirely; and the delayed flag repointed at `isFetching`, which would dim on the
+background refresh that leaves the answer correct — the same flicker with a different cause.
+**The first version of the check was weak**: it asserted the constant was NAMED, which a build
+that never used it would still pass. It now pins the call itself.
+
+**Also found, and worth saying out loud: seven Vite dev servers were running**, on ports 5173,
+5174, 5175, 5177, 5180 and 5199, all serving the same folder, all listening on IPv6 only —
+which is why `127.0.0.1:5173` answers nothing while `localhost:5173` works. Nothing was killed;
+they are only a way to end up debugging a different tab from the one you fixed.
+
+----
+
+## 2026-09-07 (session 17g) — the gamma flip is now a level, not a running total (ADR-056, BUG-044 closed)
+
+Chandan chose option (c): *"C is the real answer and I'll go with that."* The one of the three
+that is a different piece of work rather than a patch, and the one that makes the number mean
+what its label says.
+
+### What replaced what
+
+`flip_strike` accumulated `net_gex` up the strikes and reported the zero crossing. The total
+started at zero **at the lowest strike collected**, so the answer was set by where the
+collector stopped — 175 points of movement on one book on one second, trimming nothing but
+the bottom of the chain.
+
+`zero_gamma_spot` asks the question the label already claimed to answer: **at what SPX level
+would the book's total dealer gamma be zero?** Every contract is re-priced there through
+Black-Scholes, the dealer-signed gammas are summed, and the sign change nearest spot is
+bisected. There is no running total and no baseline, so **a missing far strike enters the sum
+once at its own weight instead of shifting a total every strike above it inherits.**
+
+**That is a bound, not an escape, and the test says so.** A strike 300 points out still
+carries ~5% of an at-the-money contract's gamma at a week to expiry — measured, not assumed,
+and the check pins 10% rather than "nothing" because the honest number is 5% and not zero.
+An omission near the money still matters and always will.
+
+### What it looks like on the real record
+
+Snapshot 6387, the same one BUG-044 was measured on:
+
+* **Blanks: 8 of 20 → 2 of 21.**
+* **The levels moved from above spot to around it.** They used to cluster 100–200 points
+  above 7,718 and disagree between adjacent expiries by more than the market could justify.
+  They now run 7,533–7,834 across the board, with the whole-board figure at 7,671.
+* **Trimming the chain to 7560 now moves a near expiry by 2–8 points**, against 27–175 before.
+  Trimming to 7640 still moves it, and that is correct rather than a residual fault: 7640 is
+  78 points below spot, and cutting there removes near-the-money gamma, which genuinely
+  changes the answer.
+* **A 0DTE expiry mid-session pins to spot**: 7,724.7 against a spot of 7,724.89 at 13:00.
+  A book with all its gamma at the money should flip where the money is; the old method had
+  0DTE among its worst cases.
+
+### The old number was deleted, not deprecated
+
+`flip_strike` and `cumulative_net` are gone, and **`summary` now TAKES the level instead of
+computing one**. `summary(df)` with nothing passed returns `flip_strike=None`. That shape is
+the point: the previous signature is exactly how a wrong number reached the screen, because
+computing it from the frame in front of you was the easy thing to do. A caller that forgets
+now gets a blank.
+
+For the same reason `computed.gamma_exposure` and `volume_gamma_exposure` now **require**
+`r`, `q`, `snapshot_ts` and `display_tz`. They are assumptions absent from the record, and a
+default would hide them at every call site — the rule `second_order_exposure` already lived by.
+
+### Proved by breaking it
+
+Five breaks, all caught: the dealer sign inverted; the root returned unrefined at the grid
+point; the out-of-range guard disabled; the tail dropped so truncation moves the answer
+again; and `summary` inventing a flip instead of blanking. **The out-of-range check was
+vacuous on the first attempt** — the chain built for it had no crossing at all, so it
+returned None for the wrong reason and passed with the guard removed. Replaced with a book
+whose puts outweigh its calls three to one, which does cross, two hundred points above the
+highest strike collected.
+
+### Live
+
+Data service restarted and verified: the whole board serves 7,671 against the 7,830 it was
+serving before, matching the offline computation exactly. **Cold request 0.2s** — the search
+finds its bracket within a few grid steps. The wire key is unchanged, so both screens pick
+the new number up; the React tab needs only a reload.
+
+----
+
+## 2026-09-07 (session 17f) — the picker's two complaints were one bug, and the gamma flip is measuring the wrong thing
+
+### Selecting an expiry emptied the page, and the dropdown was collateral
+
+*"the whole page refreshes ... and the dropdown goes away, and I have to click on the dropdown
+again."* **Two symptoms, one cause, and the second hid the first.** Ticking an expiry makes a
+new query key; a new key has no cached data; `isPending` is true; and GammaTab returned a bare
+"Loading the chain…" for the entire tab — unmounting the toolbar, and with it the open picker.
+
+**The picker has no close-on-select and never did.** Anyone debugging the dropdown on its own
+would have found nothing wrong with it. It was being unmounted along with everything else and
+coming back with its state reset.
+
+`keepPreviousData` on the two hooks the picker re-keys (`useGamma`, `useSessionRange`) keeps the
+last answer drawn while the new one loads, so nothing unmounts. The panels dim to 55% and an
+"Updating…" appears beside the picker, because **a chart still showing the previous scope under
+a new selection is worse than a blank one — the reader believes it.** That is
+`isPlaceholderData`, deliberately not `isFetching`: the latter is also true during the
+background refresh that leaves the answer correct, and dimming then would cry wolf every 30
+seconds.
+
+**Applied to those two hooks and not globally.** Keeping stale data is right where the reader
+changed the question. It would be wrong on a background refresh of live prices, where showing
+an old chain under a fresh timestamp is how someone trades on a price that has moved.
+
+**A check that could not fail, caught by breaking it.** The first version asserted
+`"isPlaceholderData" in tab` against the whole file — and passed on a build where the only
+mention left was the COMMENT explaining it. Now it strips comment lines first. This is the
+second time this session a check has been saved by the rule that every check must be proved by
+breaking the code.
+
+### The gamma flip is an artefact of where collection stopped (BUG-044)
+
+Chandan: *"not available for some of the expiry dates and for some of the expiry dates, it's
+completely incorrect."* **Both halves are the same defect.**
+
+`flip_strike` finds where the RUNNING TOTAL of net exposure crosses zero, and that total starts
+at zero **at the lowest strike collected** — an arbitrary baseline. Every strike below the floor
+is exposure left out, so the curve carries an unknown offset and the crossing moves with it.
+The module's own docstring warns about this; what was not known is how large it is.
+
+**Measured on snapshot 6387, same book, trimming only the bottom of the chain:**
+
+    2026-09-16   as collected 7846 · from 7560 7819 · from 7600 7772 · from 7640 7672
+    2026-09-14   as collected 7848 · from 7600 7798 · from 7640 7773
+    2026-09-22   as collected 7773 · from 7600 7708 · from 7640 7697
+
+**175 points of movement with no change in the market.** And the tails are not negligible: net
+exposure at the three lowest collected strikes still runs 1.5–39% of the peak. The flips cluster
+100–200 points above spot and disagree between adjacent expiries by more than the market could
+justify.
+
+**The blanks are the same cause showing its hand.** `EDGE_GUARD` rejects a crossing landing in
+the outer 10% of the range — the code correctly refusing a number it knows is an artefact. It
+cannot tell that the ones it does report are artefacts too. Eight of twenty expiries returned
+none, and the screen says nothing about why.
+
+**Logged, not fixed.** The three ways out are materially different pieces of work and one of
+them changes what the number means, so it is Chandan's call. **Nothing was changed in
+`core/gex.py`.**
+
+----
+
+## 2026-09-07 (session 17e) — the volume shade became a choice
+
+**Chandan, on the Gamma Exposure grid:** *"those charts also contain call volume and put
+volume in the form of a shade... I want that to be like, I can either choose to have it or
+not."* A **Volume shade** checkbox in the tab toolbar now governs all six grid cells and the
+detail view's top panel.
+
+**Why one control and not six.** The shade is ONE series drawn six times — the chain has one
+traded volume, and `ExposureGrid` already takes it from the gamma response for every cell for
+that reason. Six switches would let the grid disagree with itself about whether today's volume
+is worth showing.
+
+**Two flags, not one, and the difference matters.** `spec.shade === false` is the PANEL's
+refusal — the book's volume cell must never draw volume behind volume, whatever the reader
+prefers. `showVolume` is the reader's preference across every cell that could show it.
+Collapsing them is the tempting simplification and would let the toggle put a volume shade
+behind the volume chart; a check pins that MiniPanel still asks both.
+
+**It makes a rare state common, and that state was already a bug once.** With the shade off,
+`volPeak` stays 0 and `yaxis2` gets no range — exactly the condition that used to make the ⟲
+reset button silently do nothing, because `relayout` throws on an undefined value. That was
+fixed earlier with `if (at.y2)`; this toggle turns the fixed path into an everyday one.
+
+**On by default**, because it is what the tab has always shown; a control that changes the page
+the moment it loads is not a preference, it is a surprise. **Not persisted** — nothing on this
+screen writes browser storage yet, and one toggle is not the reason to start.
+
+**Two breaks, two caught:** a panel drawing the shade without reading the toggle, and the two
+flags collapsed into one.
+
+----
+
+## 2026-09-07 (session 17d) — the lock had nowhere to be seen, and the chart did not change when one was held
+
+**Chandan locked an entry, changed the strike, and the position vanished.** It had not: the
+lock was in `entry_locks.json` the whole time (Put 7700 / Call 7725, 11 Sep → 14 Sep, entry
+$9.30, 13:09). **The new screen had shipped the write and none of the ways to read it back.**
+
+**Two gaps, both parity with the old screen rather than new ideas.**
+
+**"All Locks" is now page chrome on Calendar Edge**, listing every live lock with View and
+Remove. `ui/locks.py` had already worked out why it belongs at page level and not beside a
+chart — it manages positions ACROSS combos — and the same reasoning applies here. View sets
+all four fields at once: a half-applied selection is a combo nobody locked, and the chart
+would fetch marks for it and show it as unlocked.
+
+**The chart now switches to position management**, which is three changes, not one:
+
+* the locked entry as a **fixed dashed line** with its price on it (`xref: 'paper'`, so it
+  spans the figure — the entry price did not stop applying when the marks did);
+* the live diagonal **dimmed and renamed** "Live Diagonal Mark (hypothetical)", because it is
+  a price the trader is not paying and leaving it labelled "Diagonal Mark" beside the real
+  entry invites reading the wrong line as the position;
+* the tooltip's fourth line becomes the **signed** "Live Difference (vs. entry)" — signed, and
+  it must be, because a position under water is the fact most worth reading.
+
+The gap band is dropped under a lock, as `views/edge.py` drops it: shading the distance to a
+diagonal nobody holds, as the most prominent thing on the chart, is a quantity that means
+nothing to someone already in the position.
+
+**The check is a parity scan, and it is the right shape here.** Both screens must use the same
+two wordings for the same quantities. A silent divergence would be the worst kind — both charts
+look right and answer different questions under the same heading. Two breaks, two caught:
+dropping the rename, and drawing the entry line unlabelled.
+
+**Not built, and said rather than assumed:** correcting a locked entry price. The old screen's
+popover has it; nothing here asked for it, and the API deliberately does not expose an update
+(ADR-054, "As built").
+
+----
+
+## 2026-09-07 (session 17c) — the SPX line was gated on an option quote, and three charts shared a range but not a frame
+
+**Two faults, both reported from Chandan's own screen, neither of them a bug report.**
+
+### The SPX panel stopped an hour before the market did
+
+*"the SPX, I mean, that's just the market data. That goes to four PM irrespective of what?"*
+He was right, and the cause was one column in the wrong query. `get_transform_mark_history`
+drops any snapshot missing one of the six option legs — correct, since a diagonal cannot be
+priced without all six — and `s.underlying_price` was riding on those same rows. On a 0DTE
+afternoon the front legs stop being quoted around 15:00, so **the index inherited an
+exclusion rule that has nothing to do with it.**
+
+**Measured on the live record**, Put 7620 / Call 7720, front 2026-09-04: the last marks row
+is 14:50; SPX is present in **all 42** complete snapshots through 16:01. `db.get_underlying_history`
+now answers that question on its own, and both screens draw the panel from it. The crossing
+markers moved onto it too — a crossing is an event in the index, and deriving it from rows
+that end at 14:50 would silently drop every crossing after that, on exactly the sessions
+where they matter most. Verified identical on the real data before and after: six events,
+unchanged.
+
+**The marks themselves still stop at 14:50, and that is correct.** Chandan worked this out
+himself before writing: the front legs were genuinely unpriceable. Two checks pin the
+exclusion rule so this fix cannot quietly relax it.
+
+### The three charts shared a range but not a frame (ADR-055)
+
+**This was reported four times and "fixed" three times.** Every attempt went to the x-axis
+RANGE, which the three charts already agreed on. The actual difference was one grep away:
+
+    GapChart      margin: { l: 58, r: 20 }
+    IvChart       margin: { l: 58, r: 20 }
+    IvDualAxis    margin: { l: 58, r: 58 }   <- room for its Ratio axis
+
+Plotly maps a range onto the plotting area, and the plotting area is the container minus the
+margins. Same range, a plot area 38 px narrower, so the bottom chart's 16:01 sat 38 px left
+of the 16:01 above it. **A correct range inside a different frame is still a misaligned
+chart.**
+
+One `timeAxis.ts` now holds the frame, at the WIDEST requirement — sharing at `r: 20` would
+have aligned all three and clipped the Ratio labels off the bottom one.
+
+**The old Streamlit screen had this right from the day it was written** (`_SYNC_MARGIN_L/_R`
+in `views/edge.py`, with a comment giving the reason). The rebuild lost it. **A rule that
+lives only in one screen's source is a rule the rewrite will drop** — so it is now a check
+that reads all three chart files and fails if any writes its own margin.
+
+**The lesson is worth more than the fix.** Three attempts tested the wrong thing because the
+symptom named an innocent cause. **When a fix does not take, re-measure the symptom instead
+of refining the fix.**
+
+### Nine deliberate breaks, nine caught — and two of the project's own guards fired
+
+Including all three new ones: reverting `IvDualAxis` to its own margin, narrowing the shared
+frame to `r: 20`, and adding a fourth time chart outside the roster each fail the check that
+exists for them. The source-scan approach is deliberate — a visual check needs a browser and
+a human eye, and this is precisely the fault that survived four of those.
+
+**Two checks written months ago caught the new query without being asked.**
+`test_every_dataaccess_read_has_an_endpoint` failed because `load_underlying_history` was not
+in the served inventory, and `test_every_history_read_shares_the_window` failed because its
+exact count of `_WINDOW_CLAUSE` uses went from 4 to 5. Both were right to fail: the first made
+me state where the read is served, the second made me confirm the new query uses the shared
+window rather than inventing one. **An exact count is a better guard than a lower bound**, and
+this is what it buys.
+
+Final: **1,530 checks pass.** Verified on the live service after restarting it — marks last at
+14:50, SPX last at 16:01, axis to 16:15.
+
+----
+
+## 2026-09-07 (session 17b) — the data service writes for the first time, and only one file
+
+**The new screen can now lock an entry.** Chandan approved the write and narrowed it in the same
+breath — *"let's hold on to journal for now, keep it entry lock alone"* — so the data service may
+create and clear entry locks and nothing else. `data/dashboard.db` is still read-only to `api/`;
+locks are a ~1 KB JSON sidecar beside it.
+
+**Built:** `api/locks.py` (GET/POST/DELETE `/locks`), included by `create_app` and bound to the
+same `state_dir` the reads use; `useLocks`/`useCreateLock`/`useClearLock` in the React client, the
+app's first non-GET requests; `web/src/edge/EntryLockBar.tsx` above the Diagonal chart, where the
+Streamlit page puts the same control.
+
+**Three implementation choices, all recorded under ADR-054:** a second POST for an already-locked
+combo is refused with 409 rather than overwriting `locked_at` (a double-tapped button must not
+destroy the time the position was taken); DELETE is idempotent, because the screen retries and a
+retry must not report a failure for work that was done; and correcting a fill price is left
+unbuilt, since nothing on the new screen asks for it yet.
+
+**The expiry purge runs on every route, not just the list.** Filtering only what is displayed
+would tidy the popover while create and delete carried on seeing a dead lock — the exact shape of
+BUG-021.
+
+**Eight deliberate breaks, eight caught,** across 13 new checks in `tests/test_api_locks.py`. The
+eighth was the one worth the care: proving the boundary check works meant making the route read
+`config.STATE_DIR` instead of the injected directory, which would have written the LIVE
+`entry_locks.json` that the collector reads to choose its strikes. It was run with `STATE_DIR`
+pointed at a scratch directory; the real file's timestamp was checked before and after and did not
+move. **A check that can only be proved by damaging the record is proved somewhere else.**
+
+**Why the mutation/query split is load-bearing here.** The React client sets
+`refetchOnWindowFocus: true`, which is safe only because every query is a GET that changes
+nothing — the same reasoning that split `/mission/new` into a look and a record (BUG-040). A lock
+created by tabbing back to the browser would be a position the trader never took.
+
+----
+
 ## 2026-09-07 (session 17) — the collector spent ten weeks deleting the number zero
 
 **Chandan found it from a chart, not from an alarm.** He asked why the Calendar Edge marks for a

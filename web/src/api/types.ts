@@ -499,8 +499,8 @@ export interface MarksResponse {
    *  strings. Empty on a single-session window, where one marker at the left
    *  edge adds no information — that rule is the server's, not this file's. */
   market_opens: string[]
-  /** The [start, end] a single session's x-axis is drawn on, or null when the
-   *  window spans several days and the fullest series anchors it instead.
+  /** The [start, end] the x-axis is drawn on, for EVERY window, or null only
+   *  when there is nothing on record to draw.
    *  Naive wall-clock, the server's decision (core.series.session_axis_range).
    *  A chart left to autorange ends where its DATA ends, so an afternoon of
    *  missing marks drew a short trading day instead of a visible gap. */
@@ -512,6 +512,16 @@ export interface MarksResponse {
   put_strike: number
   days: number
   rows: MarkRow[]
+  /** SPX at every complete snapshot in the window, read SEPARATELY from the
+   *  marks and drawn as the lower panel.
+   *
+   *  WHY IT IS NOT JUST `rows[].spx`. It was, and the lower panel stopped an
+   *  hour before the market did. A marks row needs all six option legs
+   *  priceable; on a 0DTE afternoon the front legs stop being quoted around
+   *  15:00, the row is dropped, and the index went with it -- even though it
+   *  is recorded on the snapshot and never stopped. `rows[].spx` is still
+   *  there and still correct for the marks tooltip; this is the full line. */
+  spx_rows: SpxRow[]
   /** The 5-point line. Read, never written here — DEBT-031 already has four
    *  copies of it in Python and a fifth in TypeScript would be the worst one. */
   threshold: number
@@ -704,4 +714,43 @@ export interface HistoricalStatsResponse {
   back: string
   current: number | null
   windows: HistoricalWindow[]
+}
+
+/**
+ * One entry lock — the price a diagonal was actually filled at.
+ *
+ * SHAPED BY PYTHON, NOT BY THIS FILE. Every field here is stored verbatim in
+ * `entry_locks.json` by `state/entry_locks.py`, including `key`, which the
+ * server sends rather than letting the client build: the key has a format
+ * (whole-number strikes) and a client that spelled it itself would eventually
+ * address a lock the file does not have under that name.
+ *
+ * `journal_trade_id` is always null today. The Journal is out of scope
+ * (Chandan, 2026-09-07); `mode: 'monitor_and_log'` records the intention so
+ * the eventual Journal row can be built from this record instead of a second
+ * copy of the same fill.
+ */
+export interface EntryLock {
+  key: string
+  lock_id: string
+  front_expiry: string
+  back_expiry: string
+  put_strike: number
+  call_strike: number
+  entry_diagonal_mark: number
+  locked_at: string
+  mode: 'monitor_only' | 'monitor_and_log'
+  journal_trade_id: string | null
+}
+
+export interface LocksResponse {
+  locks: EntryLock[]
+  count: number
+}
+
+/** One reading of the index. `timestamp` is naive wall-clock New York, the
+ *  same convention every chart series uses (DEBT-030). */
+export interface SpxRow {
+  timestamp: string
+  spx: number | null
 }

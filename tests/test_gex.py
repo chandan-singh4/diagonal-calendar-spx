@@ -34,7 +34,11 @@ def _chain(rows: list[dict]) -> pd.DataFrame:
          "right": r["right"],
          "gamma": r.get("gamma", 0.001),
          "open_interest": r.get("oi", 1000),
-         "volume": r.get("vol", 0)}
+         "volume": r.get("vol", 0),
+         # Only the zero-gamma search reads these two; every other measure
+         # weights the broker's own `gamma` and ignores them.
+         "iv": r.get("iv", 15.0),
+         "dte": r.get("dte", 7)}
         for r in rows
     ])
 
@@ -176,24 +180,136 @@ def test_a_window_wider_than_the_chain_hides_nothing():
 # The gamma flip — the one figure here with a claimed directional meaning
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_the_flip_is_interpolated_between_the_straddling_strikes():
-    """Reporting the nearer listed strike would quantise the level to the
-    strike spacing — 5 points on SPX, which is most of a day's range."""
-    df = pd.DataFrame({"strike": [7600.0, 7700.0], "net_gex": [-100.0, 300.0]})
-    # Cumulative runs -100 then +200. Zero sits 100/300 of the way across the
-    # 100-point gap, so the flip is 7633.33 and NOT either listed strike.
-    assert gex.flip_strike(df) == pytest.approx(7600.0 + 100.0 / 3.0)
+# The rate and yield every re-pricing needs. Held here as one pair rather than
+# typed at each call so a test cannot accidentally prove the level is stable
+# under a change of assumption by using two different assumptions.
+RQ = dict(r=0.04, q=0.012)
 
 
-def test_a_chain_that_never_changes_sign_has_no_flip():
-    """A real market state, not a failure — and None is the honest answer, not
-    the lowest strike."""
-    df = pd.DataFrame({"strike": [7600.0, 7700.0], "net_gex": [100.0, 300.0]})
-    assert gex.flip_strike(df) is None
+def _two_sided_book(strikes_and_sides, oi=5000):
+    """A book whose dealer gamma is negative low and positive high.
+
+    Puts below and calls above, which is the ordinary SPX shape and the one
+    that has a crossing at all. Every contract is given the same IV and DTE:
+    the point of these tests is where the total reaches zero, and a smile
+    would only make the arithmetic harder to check by hand.
+    """
+    return _chain([{"strike": k, "right": side, "oi": oi}
+                   for k, side in strikes_and_sides])
 
 
-def test_an_empty_frame_has_no_flip():
-    assert gex.flip_strike(gex.by_strike(pd.DataFrame(), SPOT)) is None
+FULL_BOOK = [(7400, "P"), (7500, "P"), (7600, "P"),
+             (7800, "C"), (7900, "C"), (8000, "C")]
+
+
+def test_the_level_is_where_total_gamma_actually_reaches_zero():
+    """The definition, checked against itself. `zero_gamma_spot` finds a root;
+    `net_gamma_at` evaluates the function it is a root of. If those two ever
+    disagree the screen draws a line where nothing happens."""
+    chain = _two_sided_book(FULL_BOOK)
+    level = gex.zero_gamma_spot(chain, SPOT, **RQ)
+    assert level is not None
+
+    here = gex.net_gamma_at(chain, level, **RQ)
+    scale = abs(gex.net_gamma_at(chain, SPOT + 300, **RQ))
+    # Relative to the size of the exposure either side, not to zero: the
+    # totals run to billions of dollars, so "small" has to be measured
+    # against them rather than against an absolute tolerance.
+    assert abs(here) < 1e-6 * scale
+
+
+def test_below_the_level_dealers_are_short_gamma_and_above_it_long():
+    """The direction the whole number is read for. Getting this inverted would
+    leave every figure plausible and every conclusion backwards."""
+    chain = _two_sided_book(FULL_BOOK)
+    level = gex.zero_gamma_spot(chain, SPOT, **RQ)
+    assert gex.net_gamma_at(chain, level - 50, **RQ) < 0
+    assert gex.net_gamma_at(chain, level + 50, **RQ) > 0
+
+
+def test_cutting_the_bottom_off_the_chain_barely_moves_the_level():
+    """**THE WHOLE REASON THIS REPLACED THE CUMULATIVE CROSSING** (BUG-044,
+    Chandan 2026-09-07). The old flip accumulated net exposure from the lowest
+    strike COLLECTED, so trimming the bottom of one real chain moved it
+    7846 -> 7819 -> 7772 -> 7672: 175 points, with nothing changing in the
+    market. This one prices each level independently, so a far put affects the
+    total only by its own gamma there — which, 300+ points out of the money,
+    is a fraction of a percent.
+
+    Ten points of tolerance is deliberately loose. The claim being pinned is
+    "the answer no longer depends on where collection stopped", not a
+    particular number; a tight bound here would fail on an ordinary change to
+    the search grid and say nothing about the fault."""
+    deep = _two_sided_book([(7000, "P"), (7100, "P"), (7200, "P")] + FULL_BOOK)
+    trimmed = _two_sided_book(FULL_BOOK)
+
+    with_tail = gex.zero_gamma_spot(deep, SPOT, **RQ)
+    without_tail = gex.zero_gamma_spot(trimmed, SPOT, **RQ)
+    assert with_tail is not None and without_tail is not None
+    assert abs(with_tail - without_tail) < 10.0
+
+
+def test_a_book_that_never_changes_sign_has_no_level():
+    """Long gamma everywhere is a real market state, not a failure — and None
+    is the honest answer, not the nearest strike to spot."""
+    calls = _chain([{"strike": k, "right": "C", "oi": 5000}
+                    for k in (7400, 7600, 7800, 8000)])
+    assert gex.zero_gamma_spot(calls, SPOT, **RQ) is None
+
+
+def test_a_level_outside_the_collected_strikes_is_not_reported():
+    """There are no contracts out there to speak for it. This is the one guard
+    the old flip had that was worth keeping — it just now fires on a genuinely
+    unsupported answer rather than on the artefact the method created."""
+    # Everything collected sits at 7400-7500 and the puts outweigh the calls
+    # three to one, so the total stays negative through spot and only turns
+    # positive somewhere above 7700 -- two hundred points clear of the highest
+    # strike in the book. Whatever is happening up there, this chain did not
+    # measure it.
+    lopsided = _chain([
+        {"strike": 7400, "right": "P", "oi": 3000},
+        {"strike": 7500, "right": "C", "oi": 1000},
+    ])
+    assert gex.net_gamma_at(lopsided, 7700, **RQ) < 0
+    assert gex.net_gamma_at(lopsided, 7900, **RQ) > 0   # the crossing is real
+    assert gex.zero_gamma_spot(lopsided, SPOT, **RQ) is None
+
+
+def test_a_chain_with_no_volatility_or_expiry_columns_cannot_be_repriced():
+    """Both are required to re-price an option, and neither is inferable. A
+    chain missing them gets a blank, never a level from the columns present."""
+    bare = pd.DataFrame({"strike": [7700.0], "right": ["C"], "gamma": [0.001]})
+    assert gex.zero_gamma_spot(bare, SPOT, **RQ) is None
+    assert gex.net_gamma_at(bare, SPOT, **RQ) is None
+
+
+def test_an_empty_chain_has_no_level():
+    assert gex.zero_gamma_spot(pd.DataFrame(), SPOT, **RQ) is None
+    assert gex.zero_gamma_spot(_chain([]), SPOT, **RQ) is None
+
+
+def test_the_volume_weighted_level_is_a_different_number():
+    """vGEX draws today's flow, and its flip must describe the same book its
+    bars do. A level found from open interest sitting over volume bars would
+    be the one thing on the panel describing something else."""
+    chain = _chain([
+        {"strike": 7500, "right": "P", "oi": 5000, "vol": 10},
+        {"strike": 7600, "right": "P", "oi": 5000, "vol": 9000},
+        {"strike": 7800, "right": "C", "oi": 5000, "vol": 9000},
+        {"strike": 7900, "right": "C", "oi": 5000, "vol": 10},
+    ])
+    by_oi = gex.zero_gamma_spot(chain, SPOT, **RQ)
+    by_volume = gex.zero_gamma_spot(chain, SPOT, weight="volume", **RQ)
+    assert by_oi is not None and by_volume is not None
+    assert by_oi != by_volume
+
+
+def test_an_expired_contract_is_left_out_rather_than_priced_at_zero_time():
+    """`year_fraction` returns None past expiry and this must drop the row.
+    Pricing it would divide by a zero time to expiry."""
+    chain = _two_sided_book(FULL_BOOK)
+    chain.loc[:, "dte"] = 0
+    assert gex.zero_gamma_spot(chain, SPOT, **RQ) is None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -313,27 +429,6 @@ def test_the_header_still_says_na_when_the_chain_carries_no_gamma():
 # The panels added for the intraday and positioning charts.
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_the_cumulative_curve_crosses_zero_exactly_where_the_flip_is():
-    """These two are one claim stated twice — the curve is drawn, the flip is
-    labelled, and a reader takes the label to be where the line crosses. If
-    they ever disagree the chart lies without erroring, so pin them together
-    rather than separately."""
-    df = gex.by_strike(_chain([
-        {"strike": 7600, "right": "P", "gamma": 0.002},
-        {"strike": 7700, "right": "C", "gamma": 0.001},
-        {"strike": 7800, "right": "C", "gamma": 0.003},
-    ]), SPOT)
-    curve = gex.cumulative_net(df)
-    flip = gex.flip_strike(df)
-    below = df.loc[curve.lt(0.0), "strike"].max()
-    above = df.loc[curve.gt(0.0), "strike"].min()
-    assert below < flip < above
-
-
-def test_the_cumulative_curve_is_empty_rather_than_absent_for_an_empty_chain():
-    assert gex.cumulative_net(gex.by_strike(_chain([]), SPOT)).empty
-
-
 def test_the_dollar_scale_is_the_same_constant_by_strike_already_applies():
     """dollar_scale exists so the SQL aggregation can be scaled outside this
     module. The moment it drifts from what by_strike does, the intraday panels
@@ -421,32 +516,18 @@ def test_key_strikes_asks_for_more_than_exist_and_gets_what_there_is():
     assert gex.key_strikes(gex.by_strike(_chain([]), SPOT)) == []
 
 
-def test_a_crossing_at_the_edge_of_the_collected_range_is_no_flip_at_all():
-    """The running total starts at zero at the lowest strike COLLECTED, so
-    every put below that point is negative gamma left out and the crossing is
-    pushed up. Measured on live 0DTE data — a 7620-7830 chain with spot at
-    7723.66 — that put the "flip" at 7821.5, nine points from the top of the
-    record. A number produced by where collection stopped is not a level."""
-    edge = gex.by_strike(_chain([
-        {"strike": 7600, "right": "P", "gamma": 0.0100},
-        {"strike": 7700, "right": "P", "gamma": 0.0100},
-        {"strike": 7790, "right": "P", "gamma": 0.0100},   # still short here
-        {"strike": 7800, "right": "C", "gamma": 0.9000},   # flips at the top
+def test_the_summary_blanks_the_flip_it_was_not_given():
+    """The level cannot be derived from a per-strike frame, so `summary` takes
+    it or reports nothing. This is what makes the old wrong number
+    UNREACHABLE rather than merely unused: a caller that forgets gets a blank,
+    which is honest, instead of a figure computed from the frame in front of
+    it, which is how the fault shipped in the first place."""
+    df = gex.by_strike(_chain([
+        {"strike": 7700, "right": "C"},
+        {"strike": 7600, "right": "P"},
     ]), SPOT)
-    assert gex.flip_strike(edge) is None
-
-
-def test_a_crossing_well_inside_the_range_is_still_reported():
-    """The guard must not swallow the real thing: same shape, crossing in the
-    middle of the collected strikes rather than against the boundary."""
-    inside = gex.by_strike(_chain([
-        {"strike": 7500, "right": "P", "gamma": 0.9000},
-        {"strike": 7700, "right": "C", "gamma": 0.9000},
-        {"strike": 7900, "right": "C", "gamma": 0.0001},
-    ]), SPOT)
-    flip = gex.flip_strike(inside)
-    assert flip is not None
-    assert 7500 < flip < 7900
+    assert gex.summary(df)["flip_strike"] is None
+    assert gex.summary(df, flip_strike=7654.5)["flip_strike"] == 7654.5
 
 
 # ─────────────────────────────────────────────────────────────────────────────
