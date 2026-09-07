@@ -246,7 +246,8 @@ def trades_db(temp_db) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def make_raw_chain(expiries=None, spot=6000.0, *, iv=18.4,
-                   strikes=None, missing_iv_strikes=(), duplicate_contracts=False):
+                   strikes=None, missing_iv_strikes=(), duplicate_contracts=False,
+                   zero_quote_strikes=()):
     """Build a raw Schwab option-chain response.
 
     Args:
@@ -263,6 +264,13 @@ def make_raw_chain(expiries=None, spot=6000.0, *, iv=18.4,
                             The database's unique constraint drops the second
                             copy, which is the case where offered and stored
                             counts diverge (ADR-022 / DEBT-008).
+        zero_quote_strikes: strikes quoted as the market quotes a contract it
+                            has given up on -- bid 0.00, ask 0.05, delta and
+                            gamma 0.0. Every one of those zeros is a REAL
+                            measurement, and BUG-041 was the collector reading
+                            them as absences. This is the afternoon shape of
+                            any 0DTE strike the market has left behind, and it
+                            is the commonest shape in the record after 15:00.
     """
     if expiries is None:
         expiries = [("2026-08-07", 7), ("2026-08-21", 21)]
@@ -276,6 +284,19 @@ def make_raw_chain(expiries=None, spot=6000.0, *, iv=18.4,
             # Schwab keys expiries as "YYYY-MM-DD:DTE".
             exp_key = f"{expiry}:{dte}"
             def _contract(strike):
+                if strike in zero_quote_strikes:
+                    return {
+                        "bid":          0.0,
+                        "ask":          0.05,
+                        "last":         0.0,
+                        "totalVolume":  100,
+                        "openInterest": 1000,
+                        "volatility":   None if strike in missing_iv_strikes else iv,
+                        "delta":        0.0,
+                        "gamma":        0.0,
+                        "theta":        -0.5,
+                        "vega":         0.2,
+                    }
                 return {
                     "bid":          9.0,
                     "ask":          11.0,

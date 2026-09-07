@@ -316,12 +316,43 @@ def _midsession_gap_reason(prev_utc: datetime, now_utc: datetime,
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _safe_float(val) -> float | None:
-    """Return float(val), or None if val is null, NaN, zero, or unconvertible."""
+    """Return float(val), or None if val is null, NaN, or unconvertible.
+
+    ZERO IS A VALUE, NOT AN ABSENCE (BUG-041). This function used to discard
+    0.0 as well, and that cost real data every single session: a 0DTE option
+    the market has given up on is quoted 0.00 x 0.05, and that bid of zero is
+    the most informative number of the afternoon -- it says the contract is
+    dead. Eating it made `mark` null, which blanked the Calendar Edge chart
+    from about 15:05 to the close on every expiry day. The same filter emptied
+    gamma on far strikes near expiry, dropping 42% of the 0DTE strikes off the
+    Gamma tab (core/gex.py drops rows whose gamma is null, correctly, because
+    a null there is supposed to mean UNKNOWN).
+
+    In 18.9M stored rows there was not one exact 0.0 in bid, ask, mark, last,
+    delta or gamma, while volume and open interest -- which never passed
+    through here -- held millions. A chain always quotes some strike at zero;
+    finding none was the filter, not the market.
+
+    IV is the one field where zero really does mean "no market"; it uses
+    _iv_or_none below.
+    """
     try:
         v = float(val)
-        return v if (v == v and v != 0.0) else None   # v != v is the NaN check
+        return v if v == v else None   # v != v is the NaN check
     except (TypeError, ValueError):
         return None
+
+
+def _iv_or_none(val) -> float | None:
+    """Implied volatility, where a reported 0.0 means "not priced", not "flat".
+
+    An option with zero implied volatility is not a cheap option, it is one the
+    broker could not value. Storing it would drag every average toward nothing
+    and look like data. This is the ONE field where the old zero-rejecting rule
+    was right, so it keeps it (BUG-041).
+    """
+    v = _safe_float(val)
+    return None if (v is None or v == 0.0) else v
 
 
 def _safe_int(val) -> int | None:
@@ -367,7 +398,7 @@ def _get_approx_atm_iv_pct(chain_df: pd.DataFrame, underlying_price: float) -> f
         return None
     calls["_dist"] = (calls["strike"] - underlying_price).abs()
     nearest = calls.nsmallest(1, "_dist")
-    return _safe_float(nearest["iv"].iloc[0]) if not nearest.empty else None
+    return _iv_or_none(nearest["iv"].iloc[0]) if not nearest.empty else None
 
 
 def _build_option_rows(filtered_df: pd.DataFrame,
@@ -388,7 +419,7 @@ def _build_option_rows(filtered_df: pd.DataFrame,
     rows = []
 
     for _, row in filtered_df.iterrows():
-        iv_pct = _safe_float(row.get("iv"))
+        iv_pct = _iv_or_none(row.get("iv"))
         if iv_pct is None:
             continue   # No IV → illiquid or no market; not worth storing
 
@@ -479,8 +510,8 @@ def _compute_atm_iv_records(filtered_df: pd.DataFrame,
         call_rows = atm_rows[atm_rows["side"] == "CALL"]
         put_rows  = atm_rows[atm_rows["side"] == "PUT"]
 
-        call_iv_pct = _safe_float(call_rows["iv"].iloc[0] if not call_rows.empty else None)
-        put_iv_pct  = _safe_float(put_rows["iv"].iloc[0]  if not put_rows.empty  else None)
+        call_iv_pct = _iv_or_none(call_rows["iv"].iloc[0] if not call_rows.empty else None)
+        put_iv_pct  = _iv_or_none(put_rows["iv"].iloc[0]  if not put_rows.empty  else None)
 
         # Convert to decimal
         atm_call_iv = call_iv_pct / 100.0 if call_iv_pct is not None else None

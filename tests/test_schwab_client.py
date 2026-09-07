@@ -53,19 +53,29 @@ class TestSafeFloat:
         assert schwab_client._safe_float(raw) is None
 
     def test_zero_becomes_none(self):
-        """PINNING A DELIBERATE QUIRK, and it is worth understanding.
+        """PINNING A QUIRK THAT IS NOW SCOPED TO THE UNDERLYING QUOTE ONLY.
 
-        Zero is treated as 'no value', not as the number zero. For Schwab that
-        is usually right — an absent IV or an unquoted leg comes back as 0.0,
-        and storing it as a real zero would drag every average down and look
-        like data.
+        Zero is treated as 'no value', not as the number zero. For the SPX
+        quote — the only thing this function still serves (get_spx_quote and
+        the last-price fallback) — that is right: an index does not trade at
+        zero, so a zero there is a broken feed.
 
-        But a deep out-of-the-money option genuinely CAN be bid 0.00, and that
-        real zero is also discarded, leaving bid=None. Downstream this reads as
-        'no quote' rather than 'quoted worthless'. It matches the settled rule
-        (show nothing rather than zero) and is harmless for the near-the-money
-        strikes this strategy trades, so it is left alone — but it is a real
-        loss of information, and this test is where that is written down.
+        THE PARAGRAPH THAT USED TO FOLLOW WAS WRONG, AND EXPENSIVELY SO. It
+        said the same rule was 'harmless for the near-the-money strikes this
+        strategy trades'. It was not. The collector had its OWN copy of this
+        function and applied it to bid, ask, last and all four greeks, so every
+        genuine 0.00 in the option chain was erased for ten weeks: 191,855 null
+        bids and 977,220 null gammas, none of which were ever absent. That is
+        BUG-041, and it was found from a chart going blank at 15:05, not from
+        any check here.
+
+        The lesson worth keeping: this test correctly described a loss of
+        information and then editorialised that it did not matter. The
+        measurement that would have settled it — are there ANY exact zeros in
+        the stored rows? — cost one query and was never run. The answer was
+        zero out of 18.9 million.
+
+        Chain fields now go through _value_or_none (below), which keeps zeros.
         """
         assert schwab_client._safe_float(0.0) is None
         assert schwab_client._safe_float(0) is None

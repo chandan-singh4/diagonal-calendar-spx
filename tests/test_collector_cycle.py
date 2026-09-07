@@ -284,6 +284,70 @@ class TestDegradedData:
         assert 6100.0 not in stored
         assert stored == {5950.0, 6000.0, 6050.0}
 
+    def test_a_zero_bid_is_a_price_not_an_absence(self, fake_client, temp_db,
+                                                   patch_schwab):
+        """BUG-041. A 0DTE contract the market has given up on is quoted
+        0.00 x 0.05, and that zero bid is the most informative number of the
+        afternoon: it says the option is dead.
+
+        The collector used to discard it, because `_safe_float` treated 0.0 as
+        "no value". `mark` then went null, and the Calendar Edge chart blanked
+        from roughly 15:05 to the close on every expiry day -- which is how
+        this was found, from the chart, not from an alarm.
+
+        ASSERTING ON mark AS WELL AS bid, deliberately. A fix that stored the
+        zero bid but still failed to derive a mark from it would leave the
+        chart exactly as broken, and a bid-only check would pass.
+        """
+        patch_schwab(raw_chain=make_raw_chain(
+            spot=6000.0, zero_quote_strikes={5900.0, 6100.0}))
+        snap_id = run(fake_client, temp_db)
+
+        dead = [r for r in option_rows(temp_db, snap_id) if r["strike"] == 5900.0]
+        assert dead, "no rows at the dead strike -- the assertions below would pass vacuously"
+        for r in dead:
+            assert r["bid"] == 0.0, "a quoted zero was stored as a blank"
+            assert r["mark"] == pytest.approx(0.025), "no mark derived from a zero bid"
+
+        alive = [r for r in option_rows(temp_db, snap_id) if r["strike"] == 6000.0]
+        assert alive and all(r["bid"] == 9.0 for r in alive),             "ordinary quotes stopped being stored"
+
+    def test_a_zero_greek_is_stored_so_the_strike_keeps_its_bar(
+            self, fake_client, temp_db, patch_schwab):
+        """BUG-041, the half that cost more than the marks.
+
+        Gamma decays to a genuine 0.0 on far strikes near expiry. Stored as
+        null it means UNKNOWN, and `core/gex.py` correctly drops unknown-gamma
+        rows -- so 42% of the 0DTE strikes vanished off the Gamma tab, taking
+        186,432 contracts of open interest with them. The module's rule was
+        right; it was being fed a lie.
+
+        Checked on delta too: the same filter ate both.
+        """
+        patch_schwab(raw_chain=make_raw_chain(
+            spot=6000.0, zero_quote_strikes={5900.0}))
+        snap_id = run(fake_client, temp_db)
+
+        far = [r for r in option_rows(temp_db, snap_id) if r["strike"] == 5900.0]
+        assert far, "no rows at the far strike -- vacuous otherwise"
+        for r in far:
+            assert r["gamma"] == 0.0, "a measured zero gamma was stored as unknown"
+            assert r["delta"] == 0.0, "a measured zero delta was stored as unknown"
+
+    def test_zero_iv_is_still_no_market(self, fake_client, temp_db,
+                                         patch_schwab):
+        """The ONE field where the old zero-rejecting rule was right, pinned so
+        the BUG-041 fix cannot be over-applied later.
+
+        An option with zero implied volatility is not a calm option, it is one
+        the broker could not value. Storing it would drag every IV average
+        toward nothing. Unlike a zero bid, a zero IV is not a measurement.
+        """
+        patch_schwab(raw_chain=make_raw_chain(spot=6000.0, iv=0.0))
+        snap_id = run(fake_client, temp_db)
+
+        assert option_rows(temp_db, snap_id) == [],             "a zero IV was stored as real volatility"
+
     def test_a_chain_with_no_usable_iv_is_marked_failed(self, fake_client,
                                                          temp_db, patch_schwab):
         patch_schwab(raw_chain=make_raw_chain(
