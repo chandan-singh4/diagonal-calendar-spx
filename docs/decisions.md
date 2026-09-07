@@ -7,6 +7,51 @@ it was recorded here.
 
 ---
 
+## ADR-054 — The new screen may write entry locks, and nothing else
+**Date:** 2026-09-07 · **Status:** Accepted · **Decided by:** Chandan
+
+**Context.** ADR-052 settled that a web address which reads must never write. The new
+screen needs to lock an entry — the price a diagonal was actually filled at — because
+until it can, Chart 1 cannot switch from "what would this cost today" to "how does my
+fixed entry compare to the live Transform Order Mark", which is the whole point of
+holding one. Chandan approved the write, then narrowed it: **"hold on to journal for now,
+keep it entry lock alone."**
+
+**The decision.** The data service may create, update and clear **entry locks only**.
+It may not write the `trades` table, and no Journal row is created from the new screen.
+`journal_trade_id` stays null, exactly as `state/entry_locks.py` was built to allow.
+
+**Why this is a smaller step than it sounds.** Entry locks are **not in the database**.
+They live in `entry_locks.json`, a sidecar, written through `state.store.write_json`,
+which writes a temp file and `os.replace`s it — atomic, so a reader sees the whole old
+file or the whole new one. **`data/dashboard.db` stays read-only to the API**, so the
+irreplaceable record is untouched by this decision. That is most of the risk removed
+before any code is written.
+
+**The module already anticipated this.** `state/entry_locks.py` says in its own header:
+"do not build yet — the Journal is out of scope … each lock carries a stable `lock_id`
+and a `journal_trade_id` that stays null under Monitor Only." Chandan's narrowing is the
+path that file was designed for, so the shape needs no negotiation.
+
+**Consequences honoured deliberately.**
+
+- **Writing a lock is not inert.** `collector.py` reads the locks to decide which strikes
+  to keep fetching (`core.pins.from_locks`), so a lock written from the new screen changes
+  what the collector collects. It is a small, bounded effect — it pins strikes rather than
+  dropping any — but "reads never write" was also protecting this, and it no longer is.
+- **Last-writer-wins between the two screens.** `create` is load-modify-save on a whole
+  dict. The atomic write prevents a torn file; it does not prevent a lost update if the old
+  dashboard and the data service both save within the same instant. Accepted for now:
+  locking an entry is a deliberate human action taken a few times a day on one machine, and
+  both screens are live only until the migration finishes. **If the two ever write
+  concurrently in practice, this is the thing that breaks, and it breaks silently.**
+- **ADR-052 is narrowed, not withdrawn.** Every read endpoint stays safe to repeat. The
+  write path is separate, explicit, and confined to one sidecar file.
+- **Journal integration remains unscoped**, and the forward-compatible hook stays unused
+  rather than being half-built against a guess.
+
+---
+
 ## ADR-053 — Expiry countdowns follow the reader's clock, but only on the newest board
 **Date:** 2026-09-07 · **Status:** Accepted · **Decided by:** Chandan
 

@@ -60,10 +60,12 @@ cannot fail is worse than none.**
    hole**: six figures it needs are computed inside the old screen's startup code, served nowhere.
 2. **The lower half of the Gamma Exposure tab is still unbuilt** — the time panels, the 0DTE flow
    board, dealer structure, net flow and the replay.
-3. **One question waits on Chandan.** He has approved the new screen **logging entries** — the data
-   service may write. **What it may write is not yet settled**: the entry lock alone, or full
-   journal rows with fills and prices. Those are different amounts of trust and the second touches
-   `trades`. Nothing is built until that is answered. (Calendar Edge was compared and approved.)
+3. **Entry locks are scoped and ready to build (ADR-054).** The data service may write **entry
+   locks only** — not the `trades` table, no Journal row. Smaller than it sounds: locks live in
+   `entry_locks.json`, a sidecar, not in the database, so `data/dashboard.db` stays read-only to
+   the API. Two things to honour while building: the collector READS these locks to choose which
+   strikes to fetch, so writing one is not inert; and `create` is load-modify-save on one dict, so
+   two screens saving at the same instant lose an update silently.
 4. **Restart the data service, then look at Calendar Edge** — `api/reads.py` changed and it does
    not reload itself. Check on both Today and 5D: every session runs to 16:15, the 16:00-16:02
    closing readings are now drawn, and a session that lost its afternoon shows blank space rather
@@ -94,7 +96,9 @@ copies disagreeing at exactly 5.00. **DEBT-036** — `pinned_pairs.json` is dead
   live until the last tab moves, so a stall leaves a working screen (`docs/m6_migration_plan.md`).
 - **No formula may exist in the new language.** Rounding rules, key formats, thresholds and date
   comparisons live in Python, under test; a missing label is a field on the answer.
-- **Reading never writes** (ADR-052) — a read must be safe to repeat; the new screen retries.
+- **Reading never writes** (ADR-052), **narrowed by ADR-054**: the data service may write entry
+  locks, a sidecar file, and nothing else. The database stays read-only to the API. A read must
+  still be safe to repeat; the new screen retries.
   **Countdowns follow the clock only on the newest day's data** (ADR-053).
 - **The two third-Friday contracts are different options the record distinguishes** (ADR-046/047),
   and the morning one is over at the opening print at 9:30 New York (ADR-048).
