@@ -134,6 +134,7 @@ export function EdgeTab({ initial = null }: { initial?: EdgeSelection | null }) 
             callStrike={eCall ?? 0}
             threshold={marks.data.threshold}
             marketOpens={marks.data.market_opens ?? []}
+            sessionAxisRange={marks.data.session_axis_range ?? null}
           />
           <p className="mt-1 text-[11px]" style={{ color: 'var(--text-3)' }}>
             Green shading marks every stretch when the position could have been
@@ -161,6 +162,7 @@ export function EdgeTab({ initial = null }: { initial?: EdgeSelection | null }) 
             bands={atm.data.bands}
             rangebreaks={atm.data.rangebreaks}
             marketOpens={atm.data.market_opens ?? []}
+            sessionAxisRange={atm.data.session_axis_range ?? null}
           />
           <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-[11px]">
             {atm.data.bands.map((band) => (
@@ -174,6 +176,7 @@ export function EdgeTab({ initial = null }: { initial?: EdgeSelection | null }) 
             rows={atm.data.rows}
             rangebreaks={atm.data.rangebreaks}
             marketOpens={atm.data.market_opens ?? []}
+            sessionAxisRange={atm.data.session_axis_range ?? null}
           />
 
           {/* Present exactly when there is too little history to trust a

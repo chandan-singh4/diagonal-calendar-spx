@@ -270,6 +270,16 @@ def build_router(ctx: ReadContext) -> APIRouter:
                                        threshold=TSCAN_THRESHOLD,
                                        market_opens=series.market_open_lines(
                                            df["timestamp"] if not df.empty else []),
+                                       # The window a single session's x-axis
+                                       # is drawn on, or null across several
+                                       # days (BUG-041). Served, not derived:
+                                       # left to autorange the chart ended
+                                       # where the DATA ended, so an afternoon
+                                       # of missing marks read as a short
+                                       # trading day. Same definition the old
+                                       # screen draws on.
+                                       session_axis_range=series.session_axis_range(
+                                           df["timestamp"] if not df.empty else []),
                                        **rest)
 
     @router.get("/pairs/atm-pair",
@@ -322,6 +332,8 @@ def build_router(ctx: ReadContext) -> APIRouter:
             rangebreaks=series.SESSION_RANGEBREAKS,
             scatter_domain=domain,
             market_opens=series.market_open_lines(
+                df["timestamp"] if not df.empty else []),
+            session_axis_range=series.session_axis_range(
                 df["timestamp"] if not df.empty else []),
             sample_warning=warning)
 

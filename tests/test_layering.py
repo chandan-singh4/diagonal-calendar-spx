@@ -847,3 +847,36 @@ def test_the_positioning_cache_retires_when_the_frame_changes_shape():
         "the columns argument must be the real column tuple — a literal "
         "copied here would stop tracking the frame it is supposed to describe")
     assert isinstance(dealer.VERDICT_COLUMNS, tuple), "must be hashable"
+
+
+# ── DEBT-031: one threshold, not a literal per screen ───────────────────────
+
+def test_the_calendar_edge_page_never_writes_the_threshold_as_a_literal():
+    """THE FAILURE THIS PREVENTS IS SILENT AND VISIBLE AT ONCE.
+
+    `views/edge.py` held FIVE copies of 5.0: the shading test, the badge that
+    names it, the caption that explains it, the progress bar's denominator and
+    the ETA's target. `core.scanner.TSCAN_THRESHOLD` is 5.0 today, so every
+    copy agreed and nothing looked wrong. The moment the threshold moved, the
+    chart would have shaded one number while the badge above it named another
+    and the progress bar filled toward a third -- on the same screen, at the
+    same time.
+
+    The React chart never had this problem: it is served the value and the
+    project's rule forbids it a copy. This check holds the old screen to the
+    same standard while both are live.
+
+    SCANNING THE SOURCE, not the behaviour, is deliberate. A behavioural test
+    would need the threshold to actually change to notice, which is exactly
+    the moment it is too late.
+    """
+    import re
+
+    source = (ROOT / "views" / "edge.py").read_text(encoding="utf-8")
+    body = " ".join(line for line in source.splitlines()
+                    if not line.lstrip().startswith("#"))
+
+    offenders = re.findall(r"(?<![\w.])5\.0(?![\w])|\$5\.00", body)
+    assert not offenders, (
+        f"{len(offenders)} literal copies of the transform threshold in "
+        "views/edge.py -- import TSCAN_THRESHOLD from core.scanner instead")

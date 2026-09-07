@@ -499,6 +499,12 @@ export interface MarksResponse {
    *  strings. Empty on a single-session window, where one marker at the left
    *  edge adds no information — that rule is the server's, not this file's. */
   market_opens: string[]
+  /** The [start, end] a single session's x-axis is drawn on, or null when the
+   *  window spans several days and the fullest series anchors it instead.
+   *  Naive wall-clock, the server's decision (core.series.session_axis_range).
+   *  A chart left to autorange ends where its DATA ends, so an afternoon of
+   *  missing marks drew a short trading day instead of a visible gap. */
+  session_axis_range: [string, string] | null
   count: number
   front: string
   back: string
@@ -547,6 +553,8 @@ export interface AtmPairResponse {
   scatter_domain: [number, number] | null
   /** As on MarksResponse — see there. */
   market_opens: string[]
+  /** As on MarksResponse — see there. */
+  session_axis_range: [string, string] | null
   /** Present exactly when there is too little history to trust a percentile.
    *  A string, not a count — the wording is iv_engine's. */
   sample_warning: string | null

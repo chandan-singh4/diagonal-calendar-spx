@@ -46,6 +46,16 @@ export interface GapChartProps {
   threshold: number
   /** 09:30 for each trading day, from the response. */
   marketOpens: string[]
+  /** The window to draw the time axis on, from the response, or null to let
+   *  Plotly fit the data (which is right across several days).
+   *
+   *  WHY THIS IS NOT OPTIONAL. Autoranging a single session ends the axis at
+   *  the last row, so a day whose marks stopped at 15:05 drew an axis stopping
+   *  at 15:05 and the missing hour was invisible -- it read as a short trading
+   *  day. Pinning the session makes the absence show as empty space. The
+   *  window itself is Python's (core.series.session_axis_range); the old
+   *  screen draws on the same one. */
+  sessionAxisRange: [string, string] | null
 }
 
 function column(rows: MarkRow[], name: keyof MarkRow): (number | null)[] {
@@ -92,6 +102,7 @@ function eligibleBands(rows: MarkRow[], threshold: number): [string, string][] {
 
 export function GapChart({
   rows, rangebreaks, crossings, putStrike, callStrike, threshold, marketOpens,
+  sessionAxisRange,
 }: GapChartProps) {
   const host = useRef<HTMLDivElement>(null)
 
@@ -209,8 +220,11 @@ export function GapChart({
     const axisBase = { gridcolor: GRID, tickfont: { color: INK, size: 10 }, linecolor: GRID }
     // The two panels share one time axis, so a zoom on either moves both.
     // `matches` takes Plotly's own axis-name union, hence the cast.
+    // `range` only when the server sent one: a fixed window is right for one
+    // session and wrong across several, and that call is made in Python.
+    const xRange = sessionAxisRange ?? undefined
     const xBase = {
-      ...axisBase, rangebreaks,
+      ...axisBase, rangebreaks, range: xRange,
       matches: (hasSpx ? 'x2' : undefined) as Plotly.LayoutAxis['matches'],
     }
 
@@ -238,7 +252,7 @@ export function GapChart({
       yaxis: { ...axisBase, domain: hasSpx ? [0.40, 1] : [0, 1], title: { text: 'Mark' } },
       ...(hasSpx
         ? {
-            xaxis2: { ...axisBase, rangebreaks, domain: [0, 1], anchor: 'y2' },
+            xaxis2: { ...axisBase, rangebreaks, range: xRange, domain: [0, 1], anchor: 'y2' },
             yaxis2: { ...axisBase, domain: [0, 0.26], title: { text: 'SPX' } },
           }
         : {}),
@@ -246,7 +260,8 @@ export function GapChart({
     }
 
     void Plotly.react(node, traces, layout, { displayModeBar: false, responsive: true })
-  }, [rows, rangebreaks, crossings, putStrike, callStrike, threshold, marketOpens])
+  }, [rows, rangebreaks, crossings, putStrike, callStrike, threshold, marketOpens,
+      sessionAxisRange])
 
   useEffect(() => {
     const node = host.current

@@ -21,9 +21,10 @@ from plotly.subplots import make_subplots
 
 import config
 import iv_engine
-from core.scanner import add_mark_columns
+from core.scanner import TSCAN_THRESHOLD, add_mark_columns
 from core import series
-from core.series import market_open_lines, merge_atm_pair, strike_crossings
+from core.series import (market_open_lines, merge_atm_pair, session_axis_range,
+                         strike_crossings)
 from core.charts import (
     SESSION_RANGEBREAKS,
     banded_ratio_traces,
@@ -124,10 +125,22 @@ def render(ctx: ViewContext) -> None:
     # every chart's x-axis to the *fuller* series (ATM IV) makes the missing
     # portion show as an honest gap in Chart 1 rather than a silently
     # shifted, seemingly-synced axis.
-    if period_label == "Today":
-        _shared_range = [f"{ctx.session_date} 09:30", f"{ctx.session_date} 16:15"]
-    elif not atm_merged.empty:
-        _shared_range = [atm_merged["timestamp"].min(), atm_merged["timestamp"].max()]
+    # WHOLE SESSIONS, NOT DATA EXTENTS (BUG-041), for every window and not just
+    # "Today". The paragraph above explains why the multi-day anchor used to be
+    # the fuller ATM series; `session_axis_range` supersedes that reasoning
+    # rather than contradicting it. Anchoring to a series still lets each
+    # SESSION end where that series ends, so Chart 1's missing afternoons
+    # stayed invisible on a 5D view -- and the axis moved depending on which
+    # query returned more rows. The clock does not move, and it makes the same
+    # missing stretch show as blank space on every chart at once.
+    # The React charts are served the identical window; a second copy written
+    # over there would be the one nobody updates.
+    if not atm_merged.empty:
+        _shared_range = session_axis_range(atm_merged["timestamp"])
+    elif period_label == "Today":
+        # No overlapping readings yet -- before the first poll of a session, or
+        # for a pair that has never both existed. The axis is still the day.
+        _shared_range = session_axis_range([f"{ctx.session_date} 09:30"])
     else:
         _shared_range = None
 
@@ -170,7 +183,7 @@ def render(ctx: ViewContext) -> None:
             '<div class="sh" style="margin-top:.4rem">'
             '<span class="sh-ico">🟢</span>'
             '<span class="sh-ttl">Diagonal vs. Transform Order Mark</span>'
-            '<span class="sh-bdg g">Shaded = Transform Gap ≥ 5</span>'
+            f'<span class="sh-bdg g">Shaded = Transform Gap ≥ {TSCAN_THRESHOLD:g}</span>'
             '</div>',
             unsafe_allow_html=True,
         )
@@ -304,8 +317,15 @@ def render(ctx: ViewContext) -> None:
             _perf_build0 = _perf_counter()
             fig_gap = go.Figure()
 
-            # Shade every contiguous region where Transform Gap >= 5
-            _flag = (_gap_df["transform_gap"] >= 5.0).reset_index(drop=True)
+            # Shade every contiguous region where the gap reached the
+            # threshold. THE NUMBER IS core.scanner's, not a literal (DEBT-031).
+            # It was written 5.0 here, which made this the one copy that would
+            # have kept shading at 5 after the threshold moved -- and the badge
+            # above it said "≥ 5" in prose for the same reason. The React
+            # chart already reads the served value; this is the old screen
+            # catching up, so the two screens cannot disagree about which
+            # stretches were tradeable.
+            _flag = (_gap_df["transform_gap"] >= TSCAN_THRESHOLD).reset_index(drop=True)
             _ts_list = _gap_df["timestamp"].reset_index(drop=True).tolist()
             _region_start = None
             for i in range(len(_flag)):
@@ -622,7 +642,11 @@ def render(ctx: ViewContext) -> None:
                 _since_entry = _gap_df[_gap_df["timestamp"] >= _locked_at_naive]
                 if not _since_entry.empty:
                     _live_diff_now = float(_since_entry.iloc[-1]["transform_mark"]) - float(_lock["entry_diagonal_mark"])
-                    _pct_to_threshold = max(0.0, min(1.0, _live_diff_now / 5.0))
+                    # DEBT-031: the threshold is core.scanner's everywhere on
+                    # this page now. A progress bar filling toward 5 while the
+                    # shading marked a different number would be worse than
+                    # either being wrong on its own.
+                    _pct_to_threshold = max(0.0, min(1.0, _live_diff_now / TSCAN_THRESHOLD))
 
                     _win_min = st.session_state.get("momentum_window_min", 30)
                     _win_start = _since_entry["timestamp"].iloc[-1] - pd.Timedelta(minutes=_win_min)
@@ -640,7 +664,8 @@ def render(ctx: ViewContext) -> None:
                     with _pcol1:
                         st.progress(_pct_to_threshold,
                                     text=f"Live Difference: ${_live_diff_now:+.2f}  ·  "
-                                         f"{_pct_to_threshold*100:.0f}% of the way to threshold ($5.00)")
+                                         f"{_pct_to_threshold*100:.0f}% of the way to threshold "
+                                         f"(${TSCAN_THRESHOLD:.2f})")
                     with _pcol2:
                         if _slope_per_hr is None:
                             st.caption(f"Not enough data yet in the last {_win_min} min to read momentum.")
@@ -650,8 +675,8 @@ def render(ctx: ViewContext) -> None:
                             _mcolor = "#10d4a3" if _closing else "#f05252"
                             _label = "closing" if _closing else "widening" if _slope_per_hr < 0 else "flat"
                             _eta_txt = ""
-                            if _closing and _live_diff_now < 5.0:
-                                _hrs_to_go = (5.0 - _live_diff_now) / _slope_per_hr
+                            if _closing and _live_diff_now < TSCAN_THRESHOLD:
+                                _hrs_to_go = (TSCAN_THRESHOLD - _live_diff_now) / _slope_per_hr
                                 if 0 < _hrs_to_go < 24:
                                     _mins_to_go = _hrs_to_go * 60
                                     _eta_txt = (f"  ·  ~{_mins_to_go:.0f} min to threshold "
@@ -665,8 +690,8 @@ def render(ctx: ViewContext) -> None:
             st.caption(
                 "**Green shading marks every stretch of time when the "
                 "position could have been transformed** — that is, when the "
-                "iron condor was worth at least 5 points more than the "
-                "diagonal you are holding, which is the threshold this "
+                f"iron condor was worth at least {TSCAN_THRESHOLD:g} points more "
+                "than the diagonal you are holding, which is the threshold this "
                 "dashboard treats as worth acting on. "
                 + ("Hover the chart for Live Diagonal Mark, Transform Order Mark, and Live Difference vs. entry."
                    if _lock is not None else

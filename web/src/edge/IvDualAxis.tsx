@@ -32,9 +32,13 @@ export interface IvDualAxisProps {
   rangebreaks: RangeBreak[]
   /** 09:30 for each trading day, from the response. */
   marketOpens: string[]
+  /** The window to draw the time axis on, or null to fit the data. See
+   *  GapChart for why a single session is pinned (BUG-041). */
+  sessionAxisRange: [string, string] | null
 }
 
-export function IvDualAxis({ rows, rangebreaks, marketOpens }: IvDualAxisProps) {
+export function IvDualAxis({ rows, rangebreaks, marketOpens,
+                            sessionAxisRange }: IvDualAxisProps) {
   const host = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -70,7 +74,8 @@ export function IvDualAxis({ rows, rangebreaks, marketOpens }: IvDualAxisProps) 
       hovermode: 'x unified',
       hoverlabel: { bgcolor: '#111c2e', bordercolor: '#1a2d45',
                     font: { color: BRIGHT, size: 12 } },
-      xaxis: { rangebreaks, gridcolor: GRID, tickfont: { color: INK, size: 10 } },
+      xaxis: { rangebreaks, range: sessionAxisRange ?? undefined,
+               gridcolor: GRID, tickfont: { color: INK, size: 10 } },
       yaxis: { title: { text: 'IV %' }, side: 'left', gridcolor: GRID,
                tickfont: { color: INK, size: 10 } },
       yaxis2: { title: { text: 'Ratio' }, side: 'right', overlaying: 'y',
@@ -81,7 +86,7 @@ export function IvDualAxis({ rows, rangebreaks, marketOpens }: IvDualAxisProps) 
     }
 
     void Plotly.react(node, traces, layout, { displayModeBar: false, responsive: true })
-  }, [rows, rangebreaks, marketOpens])
+  }, [rows, rangebreaks, marketOpens, sessionAxisRange])
 
   useEffect(() => {
     const node = host.current

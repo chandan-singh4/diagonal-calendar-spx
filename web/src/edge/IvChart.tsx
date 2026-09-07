@@ -33,9 +33,13 @@ export interface IvChartProps {
   rangebreaks: RangeBreak[]
   /** 09:30 for each trading day, from the response. */
   marketOpens: string[]
+  /** The window to draw the time axis on, or null to fit the data. See
+   *  GapChart for why a single session is pinned (BUG-041). */
+  sessionAxisRange: [string, string] | null
 }
 
-export function IvChart({ rows, bands, rangebreaks, marketOpens }: IvChartProps) {
+export function IvChart({ rows, bands, rangebreaks, marketOpens,
+                         sessionAxisRange }: IvChartProps) {
   const host = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -97,16 +101,18 @@ export function IvChart({ rows, bands, rangebreaks, marketOpens }: IvChartProps)
                     font: { color: BRIGHT, size: 12 } },
       legend: { orientation: 'h', yanchor: 'bottom', y: 1.02, xanchor: 'left', x: 0,
                 font: { size: 10 }, bgcolor: 'rgba(0,0,0,0)' },
-      xaxis: { ...axisBase, rangebreaks, domain: [0, 1], anchor: 'y',
+      xaxis: { ...axisBase, rangebreaks, range: sessionAxisRange ?? undefined,
+               domain: [0, 1], anchor: 'y',
                matches: 'x2', showticklabels: false },
       yaxis: { ...axisBase, domain: [0.42, 1], title: { text: 'IV %' } },
-      xaxis2: { ...axisBase, rangebreaks, domain: [0, 1], anchor: 'y2' },
+      xaxis2: { ...axisBase, rangebreaks, range: sessionAxisRange ?? undefined,
+                domain: [0, 1], anchor: 'y2' },
       yaxis2: { ...axisBase, domain: [0, 0.34], title: { text: 'Ratio' } },
       shapes,
     }
 
     void Plotly.react(node, traces, layout, { displayModeBar: false, responsive: true })
-  }, [rows, bands, rangebreaks, marketOpens])
+  }, [rows, bands, rangebreaks, marketOpens, sessionAxisRange])
 
   useEffect(() => {
     const node = host.current

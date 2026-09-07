@@ -28,9 +28,19 @@ import pandas as pd
 # others -- a second copy written from scratch in TypeScript would be a copy
 # of the conclusion without the evidence, and the first person to "fix" it
 # would reintroduce a bug that took a day of bisecting to find.
+#
+# THE EVENING BOUND IS 16.25, NOT 16 (BUG-042). It used to start collapsing at
+# 16:00 -- but ADR-049 moved collection to 16:02 for a specific reason: the
+# 15:59 reading is not the close, and treating it as one had every "closing"
+# price wrong by 2.39 points for 51 trading days. Those 16:00-16:02 readings
+# then landed INSIDE the collapsed band and were drawn nowhere. The rangebreak
+# was written in July and simply never revisited when ADR-049 landed.
+# 16.25 is 16:15, which is also MARKET_AXIS_END_TIME below, so a single
+# session's axis now ends exactly where the break begins. The cost is ~13
+# minutes of blank at the right of each session, 3% of its width.
 SESSION_RANGEBREAKS = [
     dict(bounds=["sat", "mon"]),
-    dict(bounds=[16, 9.5], pattern="hour"),
+    dict(bounds=[16.25, 9.5], pattern="hour"),
 ]
 
 
@@ -281,6 +291,51 @@ HISTORICAL_WINDOWS = [("Today", 1), ("5 Days", 5), ("10 Days", 10), ("20 Days", 
 # chart (DEBT-030), so this is a naive time too and the two match without a
 # conversion at the drawing site.
 MARKET_OPEN_TIME = "09:30"
+
+# Where a single-session x-axis STOPS. 16:15, not 16:00: collection runs to
+# 16:02 (ADR-049) and the extra quarter-hour keeps the last reading off the
+# frame's right edge, where it would be half-clipped.
+MARKET_AXIS_END_TIME = "16:15"
+
+
+def session_axis_range(timestamps) -> list[str] | None:
+    """The x-axis a chart should be drawn on: whole sessions, not data extents.
+
+    WHY THIS EXISTS (BUG-041). Left to autorange, a chart ends where its DATA
+    ends -- so a session whose prices stopped at 15:05 drew an axis stopping at
+    15:05, and the missing hour looked like a short trading day rather than
+    like missing data. Chandan found the collector's zero-eating bug from that
+    chart, but only because he knew the market shuts at 16:00; the chart itself
+    was not telling him anything was absent.
+
+    An axis pinned to the whole session makes absence LOOK like absence: the
+    line stops and empty space follows it to the close.
+
+    EVERY WINDOW, NOT JUST ONE DAY. This first returned None for a multi-day
+    window, on the reasoning that several sessions should anchor to the fullest
+    series available. That was wrong and Chandan's 5-day screenshot is why:
+    anchoring to a series means every session still ENDS where that series
+    ends, so each day's missing tail stayed invisible -- the same defect as the
+    single-day case, repeated five times. Anchoring to the clock instead gives
+    every session its full width and any hole in it shows as empty space.
+
+    It also removes a subtler trap. The old multi-day anchor was whichever
+    series happened to be fuller, so the axis MOVED depending on which query
+    returned more rows -- two charts of the same window could disagree about
+    where 09:30 sits. A clock does not move.
+
+    The first and last SESSIONS PRESENT set the ends, not the calendar between
+    them: a window whose first day is a holiday starts at the first day that
+    has readings. `SESSION_RANGEBREAKS` collapses the nights in between.
+    """
+    import pandas as pd
+
+    if timestamps is None or len(timestamps) == 0:
+        return None
+    days = sorted(pd.to_datetime(pd.Series(list(timestamps))).dt.date.dropna().unique())
+    if not days:
+        return None
+    return [f"{days[0]} {MARKET_OPEN_TIME}", f"{days[-1]} {MARKET_AXIS_END_TIME}"]
 
 
 def market_open_lines(timestamps) -> list[str]:

@@ -12,8 +12,11 @@ import pandas as pd
 import pytest
 
 from core.series import (
+    MARKET_AXIS_END_TIME,
+    SESSION_RANGEBREAKS,
     market_open_lines,
     merge_atm_pair,
+    session_axis_range,
     ratio_bands,
     strike_crossings,
 )
@@ -189,3 +192,83 @@ def test_an_empty_window_asks_for_no_lines_rather_than_raising():
     """A pair with no overlapping readings is a real state, not a fault."""
     assert market_open_lines([]) == []
     assert market_open_lines(None) == []
+
+
+# ── session_axis_range (BUG-041: an axis that hides missing data) ───────────
+
+def test_a_single_session_is_drawn_on_the_WHOLE_session_not_on_its_data():
+    """THE POINT OF THE WHOLE FUNCTION, so the readings deliberately stop early.
+
+    These end at 15:05 -- the real shape of 2026-09-04, where the collector's
+    zero-eating bug (BUG-041) blanked every mark from 15:10 to the close. Left
+    to autorange, the chart drew an axis ending at 15:05 and the missing hour
+    was INVISIBLE: it read as a short trading day. Chandan caught it anyway,
+    but only because he knows when the market shuts.
+
+    Asserting on the END is what makes this test able to fail. A version
+    returning the data's own max would still produce a plausible-looking pair
+    and pass any check that only asserted the start.
+    """
+    stamps = pd.to_datetime(["2026-09-04 09:35", "2026-09-04 12:00",
+                             "2026-09-04 15:05"])
+    assert session_axis_range(stamps) == ["2026-09-04 09:30", "2026-09-04 16:15"]
+
+
+def test_several_days_span_first_open_to_last_close():
+    """A multi-day window is anchored to the clock too, and Chandan's 5D
+    screenshot is why: anchored to a SERIES, every session still ends where
+    that series ends, so each day's missing tail stayed invisible -- the
+    single-day defect repeated once per day.
+
+    Note the readings deliberately stop at 13:20 on the last day. The end must
+    still be 16:15."""
+    stamps = pd.to_datetime(["2026-09-04 09:35", "2026-09-04 15:55",
+                             "2026-09-08 09:31", "2026-09-08 13:20"])
+    assert session_axis_range(stamps) == ["2026-09-04 09:30", "2026-09-08 16:15"]
+
+
+def test_the_ends_are_the_sessions_present_not_the_calendar_between_them():
+    """A holiday or a weekend at either end must not stretch the axis over a
+    day with no readings; SESSION_RANGEBREAKS collapses the nights between."""
+    stamps = pd.to_datetime(["2026-09-01 10:00", "2026-09-03 10:00"])
+    assert session_axis_range(stamps) == ["2026-09-01 09:30", "2026-09-03 16:15"]
+
+
+def test_an_empty_window_has_no_session_to_draw():
+    assert session_axis_range([]) is None
+    assert session_axis_range(None) is None
+
+
+# ── the evening rangebreak vs. the closing print (BUG-042) ──────────────────
+
+def _evening_break_starts_at() -> float:
+    """The hour the axis starts collapsing, from the served constant."""
+    hour_breaks = [b for b in SESSION_RANGEBREAKS if b.get("pattern") == "hour"]
+    assert len(hour_breaks) == 1, "expected exactly one hour-pattern break"
+    return hour_breaks[0]["bounds"][0]
+
+
+def test_the_closing_print_is_not_inside_the_collapsed_evening():
+    """ADR-049 MOVED COLLECTION TO 16:02 FOR A REASON, and this guards it.
+
+    The 15:59 reading is not the close. Treating it as one had every closing
+    price wrong by 2.39 points for 51 trading days, which is what ADR-049 was
+    written to stop. But the rangebreak still began collapsing the axis at
+    16:00, so the 16:00, 16:01 and 16:02 readings -- the settled print itself
+    -- were drawn nowhere on any chart using these breaks.
+
+    Nothing failed. The data was collected, stored, and silently not shown:
+    the class of fault this project keeps finding, where the record is right
+    and the picture of it is wrong.
+
+    16.05 is 16:03, one minute past the last scheduled poll.
+    """
+    assert _evening_break_starts_at() >= 16.05, (
+        "the axis collapses over the closing print ADR-049 exists to capture")
+
+
+def test_a_single_session_axis_ends_where_the_break_begins():
+    """The two constants have to agree, or the axis reserves space Plotly then
+    collapses -- which is what made the old 16:15 endpoint decorative."""
+    end_h, end_m = (int(part) for part in MARKET_AXIS_END_TIME.split(":"))
+    assert end_h + end_m / 60 == pytest.approx(_evening_break_starts_at())
