@@ -29,11 +29,36 @@ def _titles(fig) -> list[str]:
             if a.text and not a.text[0].isdigit()]
 
 
-def _figure(shown, view_name="Net Gamma", stack=False):
+def _second(view_name):
+    """The derived frame the two second-order views are handed, or None.
+
+    render() computes these and passes them in rather than letting the figure
+    build them, so a figure test has to supply one too. Shaped like
+    core.gex.vanna_by_strike's output; the numbers are arbitrary because what
+    is under test here is the LAYOUT. They are deliberately DISTINCT from the
+    gamma fixture's numbers, so "drew the wrong frame" is a failure rather
+    than a coincidence.
+    """
+    if view_name == "Vanna Exposure":
+        return pd.DataFrame({"strike": STRIKES,
+                             "call_vex": [11.0, 12.0, 13.0],
+                             "put_vex": [21.0, 22.0, 23.0],
+                             "net_vex": [-10.0, -10.0, -10.0],
+                             "abs_vex": [32.0, 34.0, 36.0]})
+    if view_name == "Charm Exposure":
+        return pd.DataFrame({"strike": STRIKES,
+                             "call_cex": [31.0, 32.0, 33.0],
+                             "put_cex": [41.0, 42.0, 43.0],
+                             "net_cex": [72.0, 74.0, 76.0],
+                             "abs_cex": [72.0, 74.0, 76.0]})
+    return None
+
+
+def _figure(shown, view_name="Net Gamma", stack=False, second=None):
     # __wrapped__ steps past @st.cache_data: this asks what the function
     # DRAWS, and a cache hit would answer a different question.
     return view._strike_figure.__wrapped__(
-        shown, shown, 7750.0, view_name, None, stack, 1)
+        shown, shown, 7750.0, view_name, None, stack, 1, second)
 
 
 def test_volume_is_drawn_above_open_interest():
@@ -96,11 +121,53 @@ def test_the_mirror_toggle_flips_puts_in_both_lower_panels():
     assert list(shown["put_oi"]) in below(stacked, "y4")
 
 
-@pytest.mark.parametrize("view_name", ["Call vs Put", "Abs Gamma",
-                                       "Net Gamma", "Delta Exposure"])
-def test_every_gamma_view_still_draws_three_panels(view_name):
-    """The gamma view changes only the top panel. Delta Exposure takes a
-    different code path to build it, which is why it is worth asking whether
-    the two panels underneath survive the trip."""
-    fig = _figure(_shown(), view_name=view_name)
-    assert _titles(fig) == ["Gamma Exposure", "Volume", "Open Interest"]
+@pytest.mark.parametrize("view_name", view._VIEWS)
+def test_every_view_still_draws_three_panels(view_name):
+    """The view picker changes only the top panel.
+
+    Every one of these builds that panel differently — Delta Exposure and the
+    two second-order views each take their own path — which is exactly why it
+    is worth asking whether the two panels underneath survive the trip.
+
+    THE TOP HEADING IS NO LONGER ALWAYS "Gamma Exposure". It used to be, on
+    every view including Delta Exposure, which meant a delta chart sat under
+    a gamma label. The heading now follows the view (views/gex._PANEL_TITLE),
+    and this test reads from that map rather than restating it — a second
+    copy here would only pin that the two copies had been edited together.
+    """
+    fig = _figure(_shown(), view_name=view_name,
+                  second=_second(view_name))
+    assert _titles(fig) == [view._PANEL_TITLE[view_name],
+                            "Volume", "Open Interest"]
+
+
+@pytest.mark.parametrize("view_name,call_col", [
+    ("Vanna Exposure", "call_vex"),
+    ("Charm Exposure", "call_cex"),
+])
+def test_the_second_order_views_draw_the_frame_they_are_handed(view_name,
+                                                               call_col):
+    """The bars come from `second`, not from the gamma frame beside it.
+
+    Worth its own test because the failure is invisible from the outside: if
+    the frame stopped being threaded through render(), the top panel would go
+    blank while the heading, the two lower panels and the axes all still drew
+    correctly — a chart that looks finished and shows nothing.
+    """
+    second = _second(view_name)
+    fig = _figure(_shown(), view_name=view_name, second=second)
+    top = [list(t.y) for t in fig.data if t.yaxis in (None, "y")]
+    assert list(second[call_col]) in top
+    # And NOT the gamma column, which is what a stale branch would draw.
+    assert list(_shown()["call_gex"]) not in top
+
+
+def test_a_second_order_view_with_no_frame_draws_an_empty_panel_not_a_crash():
+    """The honest failure mode. Vanna needs IV, and a snapshot can lack it.
+
+    An exception here would take the whole tab down — including the gamma
+    panels, which are fine and are what the reader came for.
+    """
+    fig = _figure(_shown(), view_name="Vanna Exposure", second=None)
+    assert _titles(fig) == [view._PANEL_TITLE["Vanna Exposure"],
+                            "Volume", "Open Interest"]

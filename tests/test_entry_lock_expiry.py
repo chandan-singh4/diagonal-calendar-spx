@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -278,3 +278,66 @@ def test_a_key_that_is_neither_a_date_nor_a_label_still_raises():
     human rather than quietly treating it as expired."""
     with pytest.raises(ValueError):
         expiry_rule.is_expired("not a date at all", _et(2026, 8, 22, 10, 0))
+
+
+# ── Which expiry the Gamma tab opens on ──────────────────────────────────────
+# core.expiry_rule.default_scope. Chandan, 2026-09-06: "after eight PM, the default
+# should be for the next DTE... during live market hours, I should be able to
+# see zero DTE by default."
+
+_BOARD = [
+    {"key": "2026-09-04", "dte": 0},
+    {"key": "2026-09-08", "dte": 4},
+    {"key": "2026-09-18 (AM)", "dte": 14},
+    {"key": "2026-09-18", "dte": 14},
+]
+
+
+def _utc(y, m, d, hh, mm=0):
+    return datetime(y, m, d, hh, mm, tzinfo=timezone.utc)
+
+
+def test_during_market_hours_the_default_is_todays_expiry():
+    # 14:00 UTC = 10:00 ET, an hour into the session.
+    assert expiry_rule.default_scope(_BOARD, _utc(2026, 9, 4, 14),
+                                date(2026, 9, 4)) == "2026-09-04"
+
+
+def test_the_default_rolls_forward_at_eight_pm_eastern_and_not_before():
+    # 23:59 UTC = 19:59 ET -- one minute short of the roll.
+    assert expiry_rule.default_scope(_BOARD, _utc(2026, 9, 4, 23, 59),
+                                date(2026, 9, 4)) == "2026-09-04"
+    # 00:00 UTC next day = 20:00 ET -- the roll itself.
+    assert expiry_rule.default_scope(_BOARD, _utc(2026, 9, 5, 0, 0),
+                                date(2026, 9, 4)) == "2026-09-08"
+
+
+def test_stale_data_rolls_forward_whatever_the_clock_says():
+    # Saturday lunchtime: the newest session on disk is Friday's, so its
+    # "0 DTE" has already settled. Judging by the clock alone would show a
+    # contract that no longer exists all weekend.
+    assert expiry_rule.default_scope(_BOARD, _utc(2026, 9, 5, 16),
+                                date(2026, 9, 4)) == "2026-09-08"
+
+
+def test_the_nearest_expiry_wins_and_not_the_first_in_the_list():
+    shuffled = list(reversed(_BOARD))
+    assert expiry_rule.default_scope(shuffled, _utc(2026, 9, 5, 0),
+                                date(2026, 9, 4)) == "2026-09-08"
+
+
+def test_a_board_with_no_zero_dte_falls_back_to_the_whole_board():
+    # SPX lists a 0 DTE most days but not every day. Inventing the next one
+    # instead would answer a different question from the one asked.
+    board = [o for o in _BOARD if o["dte"] > 0]
+    assert expiry_rule.default_scope(board, _utc(2026, 9, 4, 14),
+                                date(2026, 9, 4)) is None
+
+
+def test_an_empty_board_has_no_default():
+    assert expiry_rule.default_scope([], _utc(2026, 9, 4, 14), date(2026, 9, 4)) is None
+
+
+def test_a_naive_now_is_a_caller_bug():
+    with pytest.raises(ValueError):
+        expiry_rule.default_scope(_BOARD, datetime(2026, 9, 4, 14), date(2026, 9, 4))

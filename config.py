@@ -182,3 +182,30 @@ def validate():
             f"Missing required .env values: {', '.join(missing)}. "
             f"Copy .env.example to .env and fill them in."
         )
+
+# ---------------------------------------------------------------------------
+# Second-order Greeks (Vanna / Charm)
+# ---------------------------------------------------------------------------
+#
+# THESE TWO ARE ASSUMPTIONS, NOT MEASUREMENTS, and they live here so that is
+# obvious. Vanna and Charm are computed rather than fetched (iv_engine.vanna,
+# iv_engine.charm) and every Black-Scholes input they need is in the record
+# EXCEPT the carry pair below. Neither is recoverable from what is collected:
+# put-call parity on the stored mid-prices returns nonsense discount factors,
+# and inverting the stored delta and gamma fails because gamma is kept to
+# three decimals — one significant figure at SPX's ~0.003. The long comment
+# at the top of iv_engine's second-order section has the measurements.
+#
+# WHAT THE ERROR COSTS. For a diagonal calendar it is second-order and largely
+# self-cancelling: both legs are priced off the same r and q, so a wrong value
+# shifts front and back together and the DIFFERENCE — which is what the
+# strategy trades — barely moves. Treat the absolute level of a single
+# contract's charm as approximate; treat the shape across strikes as sound.
+
+# Annualised risk-free rate, as a decimal. Roughly the 1-3 month T-bill.
+# Worth revisiting when the front of the curve moves by more than ~50bp.
+RISK_FREE_RATE = 0.040
+
+# Annualised SPX dividend yield, as a decimal. The index's trailing yield has
+# sat near 1.2% for some time; it moves slowly and does not need watching.
+DIVIDEND_YIELD = 0.012

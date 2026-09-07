@@ -26,6 +26,36 @@ def resolve(state_dir, filename: str) -> Path:
     return Path(state_dir).resolve() / filename
 
 
+def fingerprint(state_dir, filename: str) -> tuple[int, int] | None:
+    """(mtime_ns, size) for a sidecar file, or None when it is not there.
+
+    ADDED FOR THE SERVER'S CACHE (DEBT-041). `api/` memoises answers on the
+    snapshot id, which is the right key for anything derived from the
+    database: the record changes when the collector writes, and on nothing
+    else. The eligibility registry breaks that assumption in both directions —
+    it is rewritten by a DIFFERENT process (the Streamlit page), so it can
+    change while the snapshot has not, and it can equally stay frozen for days
+    across many snapshots if that page is never opened.
+
+    So an answer built from it is stale when EITHER the snapshot or this file
+    moves, and this is the cheap half of that key: one stat() rather than a
+    700 KB read and hash.
+
+    WHAT IT CANNOT SEE, stated because a fingerprint invites more trust than
+    it earns: two writes within the same filesystem timestamp tick that leave
+    the size identical. `write_json` replaces the file wholesale on a registry
+    rewritten roughly once per snapshot, so that window is not one this
+    project can reach — but it is a window, and the honest thing is to say so
+    rather than to call this a content hash.
+    """
+    path = resolve(state_dir, filename)
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (stat.st_mtime_ns, stat.st_size)
+
+
 def read_json(state_dir, filename: str, *, default: dict | None = None) -> dict:
     """Load a sidecar file, returning `default` ({}) when it does not exist.
 

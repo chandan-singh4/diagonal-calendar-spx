@@ -77,6 +77,26 @@ def atm_iv(chain_df: pd.DataFrame, expiry: str, underlying_price: float) -> floa
     return float(ivs.mean())
 
 
+def iv_index(chain_df: pd.DataFrame) -> float:
+    """One number for "how expensive is this whole chain right now".
+
+    THE MEAN OF MEANS IS NOT THE MEAN, and that is the point rather than a
+    slip. Averaging every contract in one pass would weight an expiry by how
+    many strikes happen to be listed for it, so a heavily-quoted weekly would
+    drown out a thin monthly and the number would move when the chain's shape
+    moved rather than when volatility did. Grouping by expiry first gives each
+    expiry one vote.
+
+    ONE DEFINITION, TWO CALLERS -- the "IV Index (avg)" figure in
+    `views/edge.py` and the served headline in `api.computed.edge_headline`.
+    It lived only in the view until 2026-09-06, when the React tab needed the
+    same figure and the choice was to copy the expression or to name it.
+
+    Returns a percent, because `chain_df["iv"]` is stored as one.
+    """
+    return float(chain_df.groupby("expiry")["iv"].mean().mean())
+
+
 # ---------------------------------------------------------------------------
 # Term structure
 # ---------------------------------------------------------------------------
@@ -190,6 +210,40 @@ def range_stats(series: pd.Series, current_value: float) -> RangeStats:
     else:
         pct = max(0.0, min(100.0, (current_value - low) / (high - low) * 100))
     return RangeStats(low=low, high=high, current=current_value, position_pct=pct)
+
+
+# Where a percentile stops being unremarkable. Below the 25th the current
+# ratio is near the bottom of everything on record for this window; above the
+# 75th, near the top. The middle is called MID rather than left blank, because
+# "we looked and it is ordinary" and "we did not look" are different answers.
+#
+# THE COLOURS ARE NOT A RECOMMENDATION. Green on HIGH means the front leg is
+# expensive relative to its own history -- the condition this strategy looks
+# for -- and NOT that the trade is good. Favorability is unvalidated; see
+# `interpret_curve` above and DOCUMENTATION.md 3.1.
+PERCENTILE_LOW = 25.0
+PERCENTILE_HIGH = 75.0
+
+
+def percentile_band(pct: float) -> tuple[str, str]:
+    """("HIGH" | "MID" | "LOW", colour) for a percentile rank.
+
+    ONE DEFINITION, TWO CALLERS -- the Historical Statistics panel in
+    `views/historical.py` and the served windows in
+    `api.computed.historical_stats`. The boundaries are a claim about when a
+    reading is worth noticing, and two screens holding separate copies is two
+    screens that will eventually disagree about whether today is unusual.
+
+    NaN -- no history at all -- is MID and grey. An unknown percentile must
+    not paint green.
+    """
+    if pct != pct:  # NaN
+        return "MID", "#6d8fa8"
+    if pct > PERCENTILE_HIGH:
+        return "HIGH", "#10d4a3"
+    if pct < PERCENTILE_LOW:
+        return "LOW", "#f05252"
+    return "MID", "#6d8fa8"
 
 
 # NOTE: trade_quality_score() was removed 2026-07-25 (M0.11). It was never
@@ -598,3 +652,186 @@ def theta_differential(
         net_daily_theta_ct=net_ct,
         available=net is not None,
     )
+
+
+# ---------------------------------------------------------------------------
+# Second-order Greeks — Vanna and Charm
+# ---------------------------------------------------------------------------
+#
+# WHY THESE ARE COMPUTED AND NOT FETCHED. Schwab returns delta, gamma, theta
+# and vega; almost no broker publishes the second-order pair. They are not
+# extra market data, though — they are closed-form functions of the SAME five
+# Black-Scholes inputs the first-order Greeks come from, four of which
+# (strike, spot, time, IV) are already in `option_rows` at full precision.
+#
+# THE RECORD SUPPORTS THIS. Measured on the live database 2026-09-04, the
+# stored Greeks are one internally consistent Black-Scholes set: across 2,760
+# near-the-money contracts the identity vega = S^2 * sigma * T * gamma held to
+# a median ratio of 1.0011 once vega was read as per-vol-POINT. So anything
+# derived here lands on the same surface as what the dashboard already draws,
+# rather than on a second, subtly different one.
+#
+# WHAT IS ASSUMED, STATED RATHER THAN BURIED. `r` and `q` are not in the
+# record and are not recoverable from it:
+#
+#   * Put-call parity would give the forward exactly (SPX is European and both
+#     sides are collected at all 80 strikes) but not from these prices. Fitted
+#     across the full strike range on 2026-09-04's 4-DTE expiry it returned a
+#     discount factor of 0.9936 over four days — a ~65% rate. The mid-prices
+#     are too wide relative to the signal.
+#   * Inverting the stored delta and gamma for d1 and the carry rate is
+#     mathematically clean and dead on arrival in practice: `gamma` is stored
+#     to three decimals and SPX gamma is ~0.003, so it carries ONE significant
+#     figure — 4,000 sampled rows held 13 distinct gamma values. The implied
+#     carry came back at ±200%, which is rounding noise and nothing else.
+#
+# So both are caller-supplied constants (config.RISK_FREE_RATE,
+# config.DIVIDEND_YIELD). For a diagonal calendar the error is second-order
+# and largely cancels between the two legs, because both are priced off the
+# same r and q; it would matter much more for an outright long-dated position.
+#
+# UNITS, chosen to match what is already stored rather than what the textbook
+# prints. Analytic vanna is per 1.00 of vol and analytic charm is per YEAR;
+# the dashboard's vega is per vol POINT and its theta is per DAY. Both are
+# converted here, so "vanna" reads against "vega" and "charm" against "theta"
+# without a mental scale factor. See VANNA_PER_VOL_POINT / CHARM_PER_DAY.
+
+# One vol point is 1/100th of 1.00 of volatility. Dividing by this turns the
+# textbook per-unit-vol figure into the per-vol-point figure `vega` uses.
+VANNA_PER_VOL_POINT = 100.0
+
+# Calendar days in the year fraction `T` is measured in. Dividing by this
+# turns the textbook per-year figure into the per-day figure `theta` uses.
+CHARM_PER_DAY = 365.0
+
+
+def _norm_pdf(x: float) -> float:
+    """Standard normal density. Written out rather than pulled from SciPy:
+    this module has no dependency beyond pandas and is not going to grow one
+    for two lines of arithmetic."""
+    return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
+
+
+def _norm_cdf(x: float) -> float:
+    """Standard normal CDF, via the error function in the standard library."""
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def _d1_d2(spot: float, strike: float, t_years: float, sigma: float,
+           r: float, q: float) -> tuple[float, float] | None:
+    """The two Black-Scholes moneyness terms, or None if they are undefined.
+
+    None rather than a number whenever an input makes the formula meaningless:
+    a non-positive spot, strike, time or volatility. That is the project's
+    blank-not-zero rule — an expired contract does not have a vanna of zero,
+    it does not have one at all — and it is what keeps `nan` out of the frames
+    these feed.
+    """
+    if (spot is None or strike is None or t_years is None or sigma is None
+            or spot <= 0 or strike <= 0 or t_years <= 0 or sigma <= 0):
+        return None
+    vol_t = sigma * math.sqrt(t_years)
+    d1 = (math.log(spot / strike)
+          + (r - q + 0.5 * sigma * sigma) * t_years) / vol_t
+    return d1, d1 - vol_t
+
+
+def vanna(spot: float, strike: float, t_years: float, iv_pct: float,
+          r: float, q: float) -> float | None:
+    """dDelta/dSigma — how much an option's delta moves per vol point.
+
+    THE SAME FOR CALLS AND PUTS, and that is a fact rather than a
+    simplification. Put-call parity fixes Delta_call - Delta_put at e^(-qT),
+    which contains no sigma, so differentiating by sigma annihilates it and
+    both sides have identical vanna. This is why `right` is not a parameter,
+    and why core.gex.vanna_by_strike has to impose the dealer sign convention
+    the way gamma does — the number itself carries no side.
+
+        vanna = -e^(-qT) * phi(d1) * d2 / sigma
+
+    Sign reads as: POSITIVE means the option's delta RISES when implied
+    volatility rises. That happens for strikes ABOVE the forward, where d2 is
+    negative; for strikes below it d2 is positive and vanna is negative, so
+    rising vol pulls delta down. Note the direction of that sentence — d2 is
+    negative for HIGH strikes, which is the opposite of the way "above the
+    money" reads, and is the easiest thing on this page to state backwards.
+
+    `iv_pct` is a PERCENTAGE, per this module's convention (18.5 means 18.5%).
+    The result is per ONE VOL POINT, matching how `vega` is stored, so a vanna
+    of 0.004 means "delta moves by 0.004 if IV goes from 18.5 to 19.5".
+
+    Returns None when the inputs do not define an option — see _d1_d2.
+    """
+    if iv_pct is None:
+        return None
+    sigma = float(iv_pct) / 100.0
+    terms = _d1_d2(spot, strike, t_years, sigma, r, q)
+    if terms is None:
+        return None
+    d1, d2 = terms
+    raw = -math.exp(-q * t_years) * _norm_pdf(d1) * d2 / sigma
+    return raw / VANNA_PER_VOL_POINT
+
+
+def charm(spot: float, strike: float, t_years: float, iv_pct: float,
+          r: float, q: float, right: str) -> float | None:
+    """dDelta/dTime — how much an option's delta drifts per day that PASSES.
+
+    THE SIGN CONVENTION, spelled out because published ones contradict each
+    other and a reader cannot tell which is meant from the number alone. This
+    is the derivative with respect to CALENDAR TIME MOVING FORWARD, not with
+    respect to time-to-expiry, so it answers the question actually being asked:
+
+        POSITIVE  ->  this option's delta will be HIGHER tomorrow
+        NEGATIVE  ->  this option's delta will be LOWER tomorrow
+
+    which is the same direction-of-reading as theta (negative = you lose value
+    as the day passes). The textbook form below is ALREADY this derivative —
+    it is defined as -dDelta/dTau — so nothing is negated on the way out.
+
+        dDelta/dT = ±q e^(-qT) N(±d1)
+                    - e^(-qT) phi(d1) [2(r-q)T - d2 sigma sqrt(T)]
+                      / (2 T sigma sqrt(T))
+
+    with the upper sign for calls and the lower for puts. Unlike vanna, charm
+    DOES differ between the two sides — parity's e^(-qT) term does depend on
+    time — though only by q e^(-qT), which is small. `right` is therefore a
+    real parameter here, and its absence from vanna() is not an oversight.
+
+    THIS BLOWS UP AS EXPIRY APPROACHES. The 1/(T sqrt(T)) factor is unbounded,
+    which is not a defect in the formula — an at-the-money option's delta
+    really does lurch on its last day — but it does mean the figure is only as
+    good as the precision of `t_years`. The database stores `dte` as whole
+    days, so a 0DTE charm computed from that alone describes a contract the
+    arithmetic believes has a full day left. See core.gex.year_fraction, which
+    is where the fractional day is put back.
+
+    Per DAY, matching `theta`. `iv_pct` is a percentage, per module convention.
+    Returns None when the inputs do not define an option — see _d1_d2.
+    """
+    if iv_pct is None or right not in ("C", "P"):
+        return None
+    sigma = float(iv_pct) / 100.0
+    terms = _d1_d2(spot, strike, t_years, sigma, r, q)
+    if terms is None:
+        return None
+    d1, d2 = terms
+    vol_t = sigma * math.sqrt(t_years)
+    discount = math.exp(-q * t_years)
+
+    if right == "C":
+        carry = q * discount * _norm_cdf(d1)
+    else:
+        carry = -q * discount * _norm_cdf(-d1)
+
+    decay = (discount * _norm_pdf(d1)
+             * (2.0 * (r - q) * t_years - d2 * vol_t)
+             / (2.0 * t_years * vol_t))
+
+    # (carry - decay) IS -dDelta/dTau, i.e. already the derivative with
+    # respect to calendar time moving forward — verified against a central
+    # finite difference of the Black-Scholes delta in tests/test_second_order
+    # _greeks.py. No further negation: adding one here inverts the answer
+    # while leaving the magnitude right, which is the failure this project
+    # keeps meeting and the reason that test exists.
+    return (carry - decay) / CHARM_PER_DAY

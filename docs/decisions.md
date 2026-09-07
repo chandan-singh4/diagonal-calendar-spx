@@ -7,6 +7,78 @@ it was recorded here.
 
 ---
 
+## ADR-053 — Expiry countdowns follow the reader's clock, but only on the newest board
+**Date:** 2026-09-07 · **Status:** Accepted · **Decided by:** Chandan
+
+**Context.** Every option row carries the `dte` the collector computed when it was
+recorded. On Sunday 2026-09-06 the Gamma tab's expiry picker showed "Tue, Sep 8 — 4 DTE",
+because 4 is what Friday's snapshot stored. The number was not corrupt; it was simply
+being read as if it meant "days from now" when it means "days from when this was taken".
+Chandan spotted it on his own screen: "given that we have the live time on the dashboard,
+it should use that and automatically adjust."
+
+**The decision.** The countdown is re-based against the reader's own New York date —
+**but only when the snapshot being shown is the newest one on record.** An older session
+being replayed keeps the countdowns it was taken with. Chandan chose this over re-basing
+everything, and it is the right way round for a reason worth stating: the filter windows
+(This Week, Next 2 Weeks, OpEx) are measured from the same anchor, so re-basing a board
+from three weeks ago would empty every window and leave the picker offering nothing.
+
+**Consequences honoured deliberately.**
+
+* **A settled expiry reads a negative number**, not 0. Clamping it would leave last
+  Friday's contract sitting in the 0DTE bucket — the one bucket a trader acts on.
+* **The anchor never moves backwards** from the session's own date, so a snapshot taken
+  in the future (a replay fixture, a clock skew) cannot produce countdowns that grow.
+* **The anchor is part of the cache key.** Without it the first request of the day freezes
+  that day's countdowns into the cache and every later reader is served them under the new
+  date — the original bug reintroduced one layer up, where it is harder to see, because
+  the endpoint computes the right answer and then declines to use it.
+* **A naive clock is refused rather than guessed at.** `countdown_anchor` raises without a
+  timezone, since "today" differs by a day either side of midnight and the wrong guess is
+  invisible.
+
+**Alternatives rejected.** Computing it in the browser from `expiry - today` — that is a
+date comparison, and it may not exist in TypeScript (`docs/m6_migration_plan.md`).
+Recomputing `dte` in the database on read — it would rewrite a recorded fact, and the
+stored number is honest about what it is.
+
+**Scope.** Both places a countdown is shown: the Gamma tab's picker and Calendar Edge's
+front/back dropdowns, through one shared helper. The **Streamlit** dashboard has not been
+changed and still shows the stored countdown.
+
+---
+
+## ADR-052 — A web address that reads must never write, and the default decides
+**Date:** 2026-09-05 · **Status:** Accepted · **Closes:** BUG-040
+
+**Context.** `GET /mission/new` took a `record` flag that defaulted to **true**, so merely
+reading it advanced the eligibility registry in the database. It was found the worst way:
+I called it to inspect its response shape while inventorying the API, and it wrote 53 rows
+into a table that had been empty — **my read created the first-ever recording**, which is
+now the baseline every later "what is new" comparison measures from. Nothing was corrupted
+and the dashboard would have recorded that snapshot anyway, but state changed that should
+not have, and the standing rule is to ask before any write.
+
+**Why the default was the whole fault.** `computed.new_since_previous` was well covered,
+and there `record` is an explicit argument whose default never applies. The writing GET was
+therefore invisible to every test: the layer that chose the default had no test at all.
+
+**The decision.** Reading never writes. `GET /mission/new` no longer accepts `record` at
+any value; `POST /mission/new/record` does the recording. Verified against the live record
+on the real server: three GETs, registry unchanged.
+
+**Why this matters more under M6 than it did under Streamlit.** TanStack Query retries
+failed GETs and refetches on window focus. A React screen would have advanced the registry
+on every refocus and every network blip — a slow corruption of the one baseline the "new"
+badge is measured against, with nothing anywhere reporting it.
+
+**The general rule now standing.** A read must be safe to retry, because the new screen's
+data library retries on its own. Where a read genuinely needs a side effect, it goes behind
+its own verb — this ADR is the precedent DEBT-042 is expected to follow.
+
+---
+
 ## ADR-051 — Schema changes are versioned, forward-only, and loud
 **Date:** 2026-09-03 · **Status:** Accepted · **Completes:** M3.3
 

@@ -1,0 +1,73 @@
+/*
+ * The palette, copied from assets/theme.css so the two screens agree while
+ * both are running.
+ *
+ * A COPY AND NOT AN IMPORT, and that is a decision rather than laziness.
+ * assets/theme.css is written for Streamlit's DOM — it is full of `.stApp`
+ * and `[data-testid=...]` selectors and `!important`, none of which mean
+ * anything here — so importing it would drag in a hundred rules that match
+ * nothing in order to share twenty values. What is duplicated is the token
+ * block at the top, which is stable: these hex values have not changed since
+ * the theme was written.
+ *
+ * If they diverge, THIS file is the one that is wrong: Streamlit is the live
+ * dashboard until M6 finishes.
+ */
+:root {
+  --bg: #060b12;
+  --bg-card: #0c1421;
+  --bg-raised: #111c2e;
+  --bg-hover: #172340;
+  --bg-input: #080e18;
+  --border: rgba(255, 255, 255, 0.056);
+  --border-hi: rgba(93, 163, 255, 0.42);
+  --border-green: rgba(16, 212, 163, 0.3);
+  --text: #dde6f1;
+  --text-2: #6d8fa8;
+  --text-3: #2f4459;
+  --green: #10d4a3;
+  --red: #f05252;
+  --blue: #5b9cff;
+  --amber: #f0a429;
+  --purple: #9575cd;
+  --mono: 'JetBrains Mono', 'Roboto Mono', ui-monospace, monospace;
+  --sans: 'Inter', system-ui, sans-serif;
+  --r: 10px;
+  --r-sm: 6px;
+  --r-lg: 14px;
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --shadow: 0 1px 4px rgba(0, 0, 0, 0.65), 0 4px 18px rgba(0, 0, 0, 0.35);
+  --glow-green: 0 0 24px rgba(16, 212, 163, 0.18);
+
+  /* The green row fill from the Streamlit scanner table (views/scanner.py's
+     _ts_row_style). It is not in the token block there — it is written inline
+     — so it is named here rather than repeated at each use. */
+  --row-ready: #0a1d14;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  /* The Streamlit tab renders at a smaller base size than a browser default;
+     matching it here stops the two screens looking like different products
+     when they are compared side by side, which is how they will be read for
+     as long as both run. */
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Numbers line up only in a monospaced face, and a scanner is almost entirely
+   numbers. `tabular-nums` matters as much as the family: without it a column
+   of prices jitters as digits change on refresh. */
+.mono {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}

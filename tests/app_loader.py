@@ -105,7 +105,12 @@ _DISPLAY_FUNCS = (
     "fmt_eta",               # "~18 min"
     "card_key",              # a card's identity across reruns
 )
-_DISPLAY_CONSTS = ("SPARK_BARS", "_RATIO_THRESHOLDS", "_RATIO_BANDS")
+# REPOINTED 2026-09-06: the ratio band table moved from core/charts.py to
+# core/series.py, so the read-only API could serve the regime boundaries
+# without importing plotly, and lost its leading underscore on the way -- it
+# is read outside its own module now. The loader finds definitions by name
+# across core/, so the move itself needed no change here; the RENAME did.
+_DISPLAY_CONSTS = ("SPARK_BARS", "RATIO_THRESHOLDS", "RATIO_BANDS")
 
 # The Mission Control layer — reads the database, so unlike the two above it
 # needs db and config in its namespace. See DEBT-026 / ADR-030.

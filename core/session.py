@@ -111,6 +111,59 @@ def expected_interval(session: str | None, event_secs: int, normal_secs: int) ->
     return event_secs if session in EVENT_SESSIONS else normal_secs
 
 
+# How late is late, once. Chandan's threshold is "over 5 minutes midday, over
+# a minute in the first and last half hour" -- which is exactly the collector's
+# polling interval, so it arrives as `expected_interval` rather than as a
+# second copy of those numbers.
+#
+# WHY TWO STAGES AND NOT ONE. At a 300-second cadence the age reaches 300
+# seconds immediately before every new price lands -- that is the cadence
+# working, not failing. Turning red exactly on the threshold would flash red
+# once per cycle, all day, and a warning that fires when nothing is wrong is
+# one you stop reading by Wednesday. So the threshold Chandan named turns the
+# reading AMBER (it is now later than it should be), and half as long again
+# turns it RED (it is now late enough that something is wrong).
+RED_MULTIPLE = 1.5
+
+# When the newest price stops being fresh, regardless of the cadence. This is
+# a different question from lateness: the dot is about STALENESS, and after
+# hours the collector is idle by design, so a red dot overnight is expected
+# rather than a fault.
+_STALE_AMBER_SECS = 600
+_STALE_RED_SECS = 3600
+
+
+def staleness_thresholds(expected: int | None) -> tuple[int, int, bool]:
+    """(amber_at, red_at, market_closed) for an age in seconds.
+
+    ONE DEFINITION, TWO CALLERS -- the liveness strip in `ui/header.py` and
+    the served header in `api.computed.header`. Both draw the same colours
+    from the same age, and a second copy of RED_MULTIPLE is how the two
+    screens would start disagreeing about whether the collector is late.
+
+    When the market is shut there is no such thing as late, so the thresholds
+    come back as -1 and the flag says why. Saying "collector idle" beats a red
+    number every evening -- an alarm that cries wolf nightly is one nobody
+    reads on the morning it means something.
+    """
+    if expected is None:
+        return -1, -1, True
+    return expected, int(expected * RED_MULTIPLE), False
+
+
+def staleness_level(age_secs: float) -> str:
+    """"green", "amber" or "red" for how old the newest price is.
+
+    ONE DEFINITION, TWO CALLERS -- the header dot in `ui/header.py` and the
+    served header in `api.computed.header`.
+    """
+    if age_secs < _STALE_AMBER_SECS:
+        return "green"
+    if age_secs < _STALE_RED_SECS:
+        return "amber"
+    return "red"
+
+
 def seconds_until_open(now_et: datetime, holidays: set[str]) -> float | None:
     """Seconds from `now_et` until today's 09:30 open, or None if not waiting.
 

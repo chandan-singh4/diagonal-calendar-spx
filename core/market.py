@@ -15,6 +15,7 @@ from dataclasses import dataclass
 import pandas as pd
 
 from core import gex
+from core.format import peak_label
 
 # The header's up/down colours. They are here rather than in the stylesheet
 # because they are chosen per-value in Python and interpolated into inline
@@ -98,4 +99,4 @@ def max_gex_label(chain_df: pd.DataFrame, spx_price: float) -> str:
     if totals["peak_strike"] is None:
         return "N/A"
 
-    return f"{totals['peak_strike']:,.0f} ({totals['peak_side']})"
+    return peak_label(totals)

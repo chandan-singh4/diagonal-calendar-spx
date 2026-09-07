@@ -15,6 +15,7 @@ from __future__ import annotations
 import streamlit as st
 import streamlit.components.v1 as components
 
+from core import session as core_session
 from core.format import fmt_duration
 from core.market import DailyChange
 from ui.sidebar import reauth_command
@@ -40,13 +41,10 @@ def render(*, spx_price: float, vix_value: float | None, gex_label: str,
 
     # The dot is about STALENESS, not market hours: green under ten minutes,
     # amber under an hour, red beyond. After hours the collector is idle by
-    # design, so a red dot overnight is expected rather than a fault.
-    if snap_age_secs < 600:
-        _dot_cls = "green"
-    elif snap_age_secs < 3600:
-        _dot_cls = "amber"
-    else:
-        _dot_cls = "red"
+    # design, so a red dot overnight is expected rather than a fault. The
+    # boundaries are core.session's, so the React header cannot drift from
+    # this one.
+    _dot_cls = core_session.staleness_level(snap_age_secs)
 
     h_left, h_right = st.columns([6, 5])
 
@@ -94,21 +92,10 @@ def render(*, spx_price: float, vix_value: float | None, gex_label: str,
 # The liveness strip
 # ─────────────────────────────────────────────────────────────────────────────
 
-# How late is late. Chandan's threshold is "over 5 minutes midday, over a
-# minute in the first and last half hour" — which is exactly the collector's
-# polling interval, so it arrives as `expected_interval` rather than as a
-# second copy of those numbers (core/session.py).
-#
-# WHY TWO STAGES AND NOT ONE. At a 300-second cadence the age reaches 300
-# seconds immediately before every new price lands — that is the cadence
-# working, not failing. Turning red exactly on the threshold would flash red
-# once per cycle, all day, and a warning that fires when nothing is wrong is
-# one you stop reading by Wednesday. So the threshold Chandan named turns the
-# number AMBER (it is now later than it should be), and half as long again
-# turns it RED (it is now late enough that something is wrong). Both are
-# computed in the browser as the number ticks, so the colour changes while
-# you are watching rather than only on the next redraw.
-_RED_MULTIPLE = 1.5
+# Both thresholds are computed in the browser as the number ticks, so the
+# colour changes while you are watching rather than only on the next redraw.
+# What counts as late is core.session.staleness_thresholds -- see the note
+# there for why lateness has two stages rather than one.
 
 
 def _render_liveness_strip(snap_age_secs: float, expected_interval: int | None) -> None:
@@ -135,13 +122,9 @@ def _render_liveness_strip(snap_age_secs: float, expected_interval: int | None) 
     """
     age0 = max(0, int(snap_age_secs))
 
-    if expected_interval is None:
-        # Market shut: the collector is idle BY DESIGN, so there is no such
-        # thing as late. Saying so beats a red number every evening — see the
-        # note in core/session.py about alarms that cry wolf nightly.
-        amber_at, red_at, closed = -1, -1, True
-    else:
-        amber_at, red_at, closed = expected_interval, int(expected_interval * _RED_MULTIPLE), False
+    # Market shut: the collector is idle BY DESIGN, so there is no such thing
+    # as late — core.session says so, and says it once for both headers.
+    amber_at, red_at, closed = core_session.staleness_thresholds(expected_interval)
 
     components.html(
         f"""

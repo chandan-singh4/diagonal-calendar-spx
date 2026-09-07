@@ -205,18 +205,38 @@ def test_the_loop_survives_a_failing_poll(temp_db):
 
 async def _test_the_loop_survives_a_failing_poll(temp_db):
     """A watcher that dies on one bad read stops notifying and says nothing
-    about it — silence that looks exactly like a quiet market."""
+    about it — silence that looks exactly like a quiet market.
+
+    WAITS ON THE SECOND CALL, NOT ON THE CLOCK. This test used to sleep 0.08s
+    and assert that a 0.01s loop had ticked more than once, which is the
+    "sleeps and hopes" shape this module's docstring rules out — and it did
+    exactly what that warns of: it failed once inside a full-suite run on a
+    loaded machine, passed alone, and passed on the next full run. A flake
+    like that costs more than the check is worth, because the honest response
+    to it is to go looking for a bug that is not there.
+
+    The timeout is generous and is a deadlock guard, not a measurement: if
+    the loop really has died, this fails in a second rather than hanging the
+    suite.
+    """
     watcher = SnapshotWatcher(temp_db, poll_seconds=0.01)
     calls = []
+    tried_again = asyncio.Event()
 
     def explode():
         calls.append(1)
+        if len(calls) > 1:
+            tried_again.set()
         raise sqlite3.OperationalError("database is locked")
 
     watcher._read_latest = explode
     await watcher.start()
-    await asyncio.sleep(0.08)
-    await watcher.stop()
+    try:
+        await asyncio.wait_for(tried_again.wait(), timeout=5.0)
+    except TimeoutError:
+        pass
+    finally:
+        await watcher.stop()
 
     assert len(calls) > 1, "the loop must keep trying after a failed read"
 

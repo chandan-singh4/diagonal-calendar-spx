@@ -37,17 +37,43 @@ is precisely the slice the collector keeps.
 
 **The same is emphatically NOT true of vega.** Vega lives in long-dated
 options and the record stops at ~28 days, so a vanna or "VEX" measure built
-from this data would describe the front month and not the market. That is a
-real limitation of the data, not of the arithmetic, and this module therefore
-offers gamma-flavoured measures only. Do not quietly extend it to vega
-without widening collection first.
+from this data describes the front month and not the market.
 
-PURE. No database, no config, no clock, no Streamlit — a DataFrame and a spot
-price in, a DataFrame out, so the whole thing is testable without a broker.
+That paragraph used to end "so this module offers gamma-flavoured measures
+only". It no longer does: `vanna_by_strike` and `charm_by_strike` were added
+deliberately, and the limitation above is unchanged and unfixed — what changed
+is the judgement about whether a front-month figure is worth having. It is,
+because the front month is the whole universe of a diagonal calendar: the
+strategy this dashboard exists for never holds anything the truncation drops.
+The figure is therefore CORRECT ABOUT THE COLLECTED CHAIN and must never be
+captioned as a market-wide one, because it will not agree with a vendor's and
+the difference is the data, not the arithmetic. Every caller says so on screen.
+Widening collection is still the only thing that would make it market-wide.
+
+PURE. No database, no config, no AMBIENT clock, no Streamlit — everything
+arrives as an argument, so the whole thing is testable without a broker.
+
+That word "ambient" is doing work. `day_remainder` below parses a timestamp
+and a timezone name, both HANDED IN; what this module still refuses to do is
+call `datetime.now()` or read `config.DISPLAY_TIMEZONE` for itself. The
+difference is the whole point — a function told what time it is can be driven
+to a 15:59 boundary by a test, and one that asks cannot.
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
+from datetime import UTC, datetime
+from datetime import time as dtime
+from typing import Union
+from zoneinfo import ZoneInfo
+
 import pandas as pd
+
+# The pure analytics core, for the second-order Greeks it alone defines. Both
+# modules are framework-free, so this is a sideways import between two leaves
+# rather than a layering breach — core/position.py and core/scanner.py already
+# do the same.
+import iv_engine
 
 # One option contract covers 100 shares of the underlying.
 SHARES_PER_CONTRACT = 100
@@ -81,9 +107,112 @@ def _blank() -> pd.DataFrame:
     return pd.DataFrame({c: pd.Series(dtype="float64") for c in COLUMNS})
 
 
+ExpiryScope = Union[str, Sequence[str], None]
+
+
+def scope_to(work: pd.DataFrame, expiry: ExpiryScope) -> pd.DataFrame:
+    """Narrow a chain to one expiry, or to several.
+
+    ONE STRING AND A LIST OF ONE MEAN THE SAME THING, and both are accepted
+    because the two callers genuinely differ: every existing caller passes a
+    single display key, while the Gamma tab's expiry board lets a trader tick
+    several and asks for their combined exposure. Adding a second parameter
+    for the plural case would have left two ways to say the same thing and a
+    question over what happens when both are set.
+
+    A str IS a Sequence, so the isinstance check has to come first; without
+    it "2026-09-18" would be read as a list of ten characters and match
+    nothing, silently, returning an empty chain that looks like a thin day.
+
+    AN EMPTY LIST IS NOT "NO FILTER". Asking for the exposure of no expiries
+    is answered with no rows -- the caller deselected everything and an empty
+    board is the honest reply. `None` is the one value that means "all".
+    """
+    if isinstance(expiry, str):
+        return work[work["expiry"] == expiry]
+    return work[work["expiry"].isin(list(expiry))]
+
+
+def by_expiry(chain_df: pd.DataFrame, spot: float) -> pd.DataFrame:
+    """Call and put gamma exposure TOTALLED PER EXPIRY, one row each.
+
+    WHY THIS IS NOT TWENTY CALLS TO `by_strike`. It could be, and the answer
+    would match; but the expiry board asks the question for every contract in
+    the chain at once, and twenty filtered passes over the same frame is
+    twenty times the work for one screen that redraws on every snapshot. One
+    groupby says the same thing once.
+
+    THE SCALE IS by_strike's, DELIBERATELY. Both weight gamma by open interest
+    and by the same notional (`SHARES_PER_CONTRACT * spot**2 * ONE_PERCENT`),
+    so a board figure and the sum of that expiry's bars are the SAME number
+    and can be checked against each other. Two scales would have made the
+    board decorative.
+
+    `put_gex` comes back POSITIVE, as it does everywhere else in this module;
+    which side of the axis it is drawn on is the view's business, and the
+    "Call vs Put" panel and the expiry board happen to make the same choice.
+
+    Rows missing gamma are dropped and missing open interest is a real zero --
+    the same asymmetry `by_strike` documents at length, for the same reason.
+    Empty in, empty out, with columns.
+    """
+    cols = ["expiry", "call_gex", "put_gex", "net_gex"]
+    if chain_df is None or chain_df.empty:
+        return pd.DataFrame(columns=cols)
+    if not {"expiry", "right", "gamma"}.issubset(chain_df.columns):
+        return pd.DataFrame(columns=cols)
+
+    work = chain_df[chain_df["gamma"].notna()].copy()
+    if work.empty:
+        return pd.DataFrame(columns=cols)
+
+    oi = (pd.to_numeric(work.get("open_interest"), errors="coerce").fillna(0.0)
+          if "open_interest" in work.columns else 0.0)
+    gex_val = work["gamma"] * oi * (SHARES_PER_CONTRACT * (spot ** 2) * ONE_PERCENT)
+    sign = work["right"].map(DEALER_SIGN).fillna(0)
+
+    is_call = work["right"] == "C"
+    return pd.DataFrame({
+        "expiry": work["expiry"],
+        "call_gex": gex_val.where(is_call, 0.0),
+        "put_gex": gex_val.where(work["right"] == "P", 0.0),
+        "net_gex": gex_val * sign,
+    }).groupby("expiry", as_index=False).sum()
+
+
+#: Which column gamma is weighted by. Open interest is the INSTALLED
+#: structure -- every contract still open, however long ago it was written.
+#: Volume is TODAY'S FLOW -- what has actually traded this session, and
+#: nothing else. Same arithmetic, two different questions, which is exactly
+#: why vGEX is this module's `by_strike` with one word changed rather than a
+#: second function that would drift from it.
+WEIGHTS = {"gex": "open_interest", "vgex": "volume"}
+
+
 def by_strike(chain_df: pd.DataFrame, spot: float,
-              *, expiry: str | None = None) -> pd.DataFrame:
+              *, expiry: ExpiryScope = None,
+              weight: str = "open_interest") -> pd.DataFrame:
     """Gamma exposure, open interest and volume per strike.
+
+    `weight` is what gamma is multiplied by: "open_interest" gives GEX, the
+    installed dealer structure, and "volume" gives vGEX, the same measure over
+    TODAY'S traded flow alone (Chandan, 2026-09-06). The columns are named
+    `call_gex`/`put_gex`/`net_gex` under both, deliberately: `summary`,
+    `flip_strike`, `cumulative_net` and the tab's whole strike panel all read
+    those names, and vGEX is the same quantity over a different weight rather
+    than a different quantity. The CALLER says which it asked for; nothing
+    downstream needs to.
+
+    THE SCALE IS OURS, NOT THE VENDOR CARD'S. A published vGEX definition
+    reads "gamma x volume x 100"; this multiplies by
+    `SHARES_PER_CONTRACT * spot**2 * ONE_PERCENT` because that is what GEX is
+    scaled by everywhere else here, and the entire use of vGEX is to be read
+    BESIDE GEX -- divergence between them is the signal. Two scales would make
+    the comparison meaningless while looking fine.
+
+    VOLUME-WEIGHTED IS EMPTY BEFORE THE OPEN and small early in the session.
+    That is the measure behaving correctly, not a fault: no trades yet means
+    no flow yet. A near-flat vGEX panel at 09:31 is the honest picture.
 
     `expiry` selects one expiry by its DISPLAY KEY (so the third Friday's a.m.
     and p.m. contracts stay apart — core/contract.py); None aggregates every
@@ -111,7 +240,7 @@ def by_strike(chain_df: pd.DataFrame, spot: float,
     if expiry is not None:
         if "expiry" not in work.columns:
             return _blank()
-        work = work[work["expiry"] == expiry]
+        work = scope_to(work, expiry)
 
     work = work[work["gamma"].notna()].copy()
     if work.empty:
@@ -122,7 +251,7 @@ def by_strike(chain_df: pd.DataFrame, spot: float,
                      if col in work.columns else 0.0)
 
     scale = SHARES_PER_CONTRACT * (spot ** 2) * ONE_PERCENT
-    work["gex"] = work["gamma"] * work["open_interest"] * scale
+    work["gex"] = work["gamma"] * work[weight] * scale
     work["sign"] = work["right"].map(DEALER_SIGN).fillna(0)
 
     is_call = work["right"] == "C"
@@ -219,6 +348,31 @@ def flip_strike(gex_df: pd.DataFrame) -> float | None:
     if guard > 0 and not (low + guard <= crossing <= high - guard):
         return None
     return crossing
+
+
+def flow_ratio(gex_df: pd.DataFrame) -> float | None:
+    """Share of net exposure sitting on the POSITIVE side: sum(V>0) / sum(|V|).
+
+    The published vGEX definition Chandan brought on 2026-09-06 --
+    "vGEX Ratio = sum positive V(K) / sum |V(K)|" -- and a DIFFERENT NUMBER
+    from `summary()["ratio"]`, which is the larger side over the smaller,
+    signed. Both are kept because they answer different questions: this one is
+    bounded in [0, 1] and reads as "what fraction of today's gamma flow is
+    positive", while the other is unbounded and reads as "how lopsided". A
+    single field would have had to pick one and mislabel it.
+
+    None rather than 0 when there is no exposure at all -- before the open,
+    volume-weighted exposure is genuinely absent, and 0.0 would read as
+    "entirely negative", which is a claim about a session that has not
+    started.
+    """
+    if gex_df is None or gex_df.empty or "net_gex" not in gex_df.columns:
+        return None
+    net = gex_df["net_gex"]
+    total = float(net.abs().sum())
+    if total <= 0:
+        return None
+    return float(net[net > 0].sum()) / total
 
 
 def summary(gex_df: pd.DataFrame) -> dict:
@@ -330,7 +484,7 @@ def dollar_scale(spot: float) -> float:
 
 
 def dex_by_strike(chain_df: pd.DataFrame, spot: float,
-                  *, expiry: str | None = None) -> pd.DataFrame:
+                  *, expiry: ExpiryScope = None) -> pd.DataFrame:
     """Delta exposure per strike — dollars of stock behind the open interest.
 
     Where gamma exposure says how much dealers will be FORCED to trade as SPX
@@ -362,7 +516,7 @@ def dex_by_strike(chain_df: pd.DataFrame, spot: float,
     if expiry is not None:
         if "expiry" not in work.columns:
             return blank
-        work = work[work["expiry"] == expiry]
+        work = scope_to(work, expiry)
 
     work = work[work["delta"].notna()].copy()
     if work.empty:
@@ -484,6 +638,64 @@ def net_flow_by_strike(intraday: pd.DataFrame,
     return frame.sort_values("strike").reset_index(drop=True)
 
 
+def session_range_by_strike(intraday: pd.DataFrame) -> pd.DataFrame:
+    """Each strike's HIGHEST and LOWEST call and put exposure so far today.
+
+    THE "WICKS" Chandan asked for on 2026-09-06, after gexstream.com, whose
+    own documentation defines them as the "per-strike session high / low for
+    GEX, DEX and vGEX, tracked since the 4:00 PM ET reset". Worth stating
+    plainly because the obvious reading is the wrong one: a wick is NOT the
+    change since the open. `net_flow_by_strike` above is the change. This is
+    the RANGE the strike has travelled through, and the two answer different
+    questions -- a strike sitting at +500 having been between -800 and +900 is
+    a different animal from one that has held +400 to +600 all day, and the
+    flow figure is the same for both if they end where they started.
+
+    WHY IT EARNS ITS PLACE ON THE BAR. The bar is one instant. A reader
+    looking at a tall bar cannot tell whether it has stood there since the
+    open or arrived in the last ten minutes, and the wick answers that without
+    a second chart -- which is exactly why Chandan wanted it.
+
+    EACH SNAPSHOT IS SCALED BY ITS OWN SPOT, for the reason `net_flow_by_strike`
+    gives: `dollar_scale` is quadratic in spot, so scaling this morning's
+    reading by this afternoon's price would fold the index's own move into the
+    range and widen every wick on a trending day.
+
+    THE SESSION IS WHATEVER `intraday` HOLDS. Scoping to a session is the
+    caller's job (`load_intraday_strike_metrics` takes a session date), so
+    "since the 4pm reset" is enforced by the query, not re-derived here.
+
+    Returns one row per strike, sorted by strike so a horizontal ladder reads
+    top to bottom. Empty in, empty out -- with columns.
+    """
+    cols = ["strike", "call_low", "call_high", "put_low", "put_high",
+            "net_low", "net_high"]
+    needed = {"strike", "timestamp", "call_gamma_oi", "put_gamma_oi",
+              "underlying_price"}
+    if intraday is None or intraday.empty or not needed.issubset(intraday.columns):
+        return pd.DataFrame(columns=cols)
+
+    work = intraday.copy()
+    scale = work["underlying_price"].map(dollar_scale)
+    work["call_gex"] = work["call_gamma_oi"] * scale
+    work["put_gex"] = work["put_gamma_oi"] * scale
+    work["net_gex"] = work["call_gex"] - work["put_gex"]
+
+    # SUM WITHIN A SNAPSHOT BEFORE TAKING THE RANGE. A strike lists several
+    # expiries, and the panel draws their total; taking min/max over the
+    # unaggregated rows would give the range of a single expiry's exposure
+    # and label it as the strike's.
+    per_snapshot = (work.groupby(["timestamp", "strike"], as_index=False)
+                        [["call_gex", "put_gex", "net_gex"]].sum())
+
+    out = per_snapshot.groupby("strike").agg(
+        call_low=("call_gex", "min"), call_high=("call_gex", "max"),
+        put_low=("put_gex", "min"), put_high=("put_gex", "max"),
+        net_low=("net_gex", "min"), net_high=("net_gex", "max"),
+    ).reset_index()
+    return out.sort_values("strike", ignore_index=True)[cols]
+
+
 def replay_by_strike(intraday: pd.DataFrame,
                      *, strikes: int | None = None) -> pd.DataFrame:
     """Every snapshot of the session as a level AND a change since the open.
@@ -551,3 +763,284 @@ def replay_by_strike(intraday: pd.DataFrame,
            .reset_index())
     out["underlying_price"] = out["timestamp"].map(spot)
     return out.sort_values(["timestamp", "strike"], ignore_index=True)[columns]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Second-order exposure — Vanna and Charm
+#
+# READ THE LIMITATION IN THE MODULE DOCSTRING FIRST. Vega, and therefore
+# vanna, lives largely in long-dated options and this record stops at ~28
+# days. What follows is a FRONT-MONTH figure and must be captioned as one; it
+# is not the market-wide "VEX" a vendor publishes and will not agree with one.
+#
+# It earns its place anyway because the front month is the entire universe of
+# a diagonal calendar. The question this answers — how does dealer hedging
+# pressure at these strikes change when IV moves, and how does it drift
+# overnight — is a question about exactly the contracts collected.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Calendar days in the year fraction the Black-Scholes formulas want.
+DAYS_PER_YEAR = 365.0
+
+VANNA_COLUMNS = ["strike", "call_vex", "put_vex", "net_vex", "abs_vex"]
+CHARM_COLUMNS = ["strike", "call_cex", "put_cex", "net_cex", "abs_cex"]
+
+
+# SPX p.m. contracts settle on the 4 p.m. close. The a.m. monthly settles on
+# the OPEN instead, which this constant does not know about — see
+# day_remainder for why that is left alone rather than half-handled.
+SETTLE_AT = dtime(16, 0)
+
+
+def day_remainder(snapshot_ts: str, display_tz: str) -> float:
+    """How much of a 24-hour day is left between this snapshot and the close.
+
+    MOVED HERE FROM views/gex.py ON 2026-09-06, and the move is the point: it
+    was a private function on the page, so `/mission/gamma` could not serve
+    charm without either importing a Streamlit view into a server or keeping a
+    second copy of this arithmetic. That is the same fault DEBT-041 was opened
+    for, one layer down, and a second copy here would be worse than most —
+    the two screens would disagree only on the last day of an expiry, only in
+    the afternoon, and by an amount that looks like a market move.
+
+    WHY CHARM NEEDS THIS AND NOTHING ELSE DOES. `dte` is a whole number of
+    days. Vanna is well-behaved as expiry approaches, so rounding time to the
+    nearest day barely moves it. Charm carries a 1/(T*sqrt(T)) factor: on the
+    last day the difference between "0 days" and "three hours" is the
+    difference between a blank column and the largest bar on the chart, and
+    0DTE is the expiry this dashboard looks at most.
+
+    Returned as a fraction of a DAY, which is what year_fraction adds to
+    `dte`. Clamped to [0, 1]: a snapshot after the close has no day left, and
+    one before the open has at most a whole one.
+
+    THE A.M. MONTHLY IS KNOWINGLY WRONG HERE, by up to six and a half hours on
+    one expiry a month. Doing better means reading `settlement` per contract
+    and returning a different remainder for each — but `settlement` is NULL on
+    every row written before 2026-08-19 (db.py), so for most of the record the
+    correction would be a guess wearing the costume of a fix. One stated hour
+    of error beats an unstated one. Vanna is unaffected either way.
+
+    `display_tz` is passed in rather than read from config, exactly as
+    core.charts.to_display_time takes it: this is core/, and core/ is handed
+    what it needs (tests/test_layering.py).
+
+    0.0 on an unparseable timestamp or an unknown zone. That is the same
+    answer as "the close has passed", which is the conservative one: it makes
+    a 0DTE contract's charm fall back on whole days rather than inventing a
+    fraction from a value nobody can read.
+    """
+    try:
+        ts = datetime.fromisoformat(snapshot_ts).replace(tzinfo=UTC)
+        local = ts.astimezone(ZoneInfo(display_tz))
+    except (TypeError, ValueError, KeyError):
+        return 0.0
+    close = local.replace(hour=SETTLE_AT.hour, minute=SETTLE_AT.minute,
+                          second=0, microsecond=0)
+    return max(0.0, min(1.0, (close - local).total_seconds() / 86400.0))
+
+
+def year_fraction(dte: float, day_remainder: float = 0.0) -> float | None:
+    """Time to expiry in years, from whole days plus the rest of today.
+
+    WHY THE SECOND ARGUMENT EXISTS. `option_rows.dte` is a whole number of
+    calendar days, and charm carries a 1/(T*sqrt(T)) factor that is unbounded
+    as T goes to zero — so a 0DTE contract computed from `dte` alone would be
+    handed T = 0 and vanish, and a 1DTE one would be told it has a full extra
+    day. `day_remainder` is the fraction of a 24-hour day between the snapshot
+    and the expiry instant. `day_remainder()` below works it out; this function
+    only adds it, so a caller with a better figure can pass one instead.
+
+    A CAVEAT THE CALLER CANNOT FIX FROM HERE. The expiry instant differs by
+    contract: SPX's third-Friday monthly settles at the OPEN and the weekly at
+    the CLOSE, and `settlement` is NULL for every row written before
+    2026-08-19 (see db.py). On those older rows a third-Friday `day_remainder`
+    is a guess, and charm — not vanna — is where that shows.
+
+    None when the result is not positive: an expired contract has no time
+    value left to differentiate, and a zero would be a lie dressed as data.
+    """
+    if dte is None:
+        return None
+    total = float(dte) + float(day_remainder)
+    return total / DAYS_PER_YEAR if total > 0 else None
+
+
+def _second_order_frame(chain_df: pd.DataFrame, spot: float,
+                        expiry: ExpiryScope, columns: list[str]):
+    """The setup every second-order measure repeats: filter, check, weight.
+
+    Returns (work, blank) where `work` is None if there is nothing to compute.
+    Split out because vanna and charm differ only in which per-contract number
+    they multiply by, and a second copy of the filtering would be a second
+    place for the `iv`-in-percent convention to be got wrong.
+    """
+    blank = pd.DataFrame({c: pd.Series(dtype="float64") for c in columns})
+    if chain_df is None or chain_df.empty:
+        return None, blank
+    if not {"strike", "right", "iv", "dte"}.issubset(chain_df.columns):
+        return None, blank
+
+    work = chain_df
+    if expiry is not None:
+        if "expiry" not in work.columns:
+            return None, blank
+        work = scope_to(work, expiry)
+
+    work = work[work["iv"].notna() & work["dte"].notna()].copy()
+    if work.empty:
+        return None, blank
+
+    work["_oi"] = (pd.to_numeric(work.get("open_interest"), errors="coerce")
+                   .fillna(0.0) if "open_interest" in work.columns else 0.0)
+    # Dollars of underlying behind one contract. Both measures are DELTA
+    # derivatives, so both scale linearly in spot — unlike GEX, which is
+    # quadratic because gamma is itself a delta derivative in the same
+    # variable. Using dollar_scale here would be wrong by a factor of spot/100.
+    work["_notional"] = work["_oi"] * SHARES_PER_CONTRACT * spot
+    return work, blank
+
+
+def vanna_by_strike(chain_df: pd.DataFrame, spot: float, *,
+                    r: float, q: float, expiry: ExpiryScope = None,
+                    day_remainder: float = 0.0) -> pd.DataFrame:
+    """Vanna exposure per strike — dollars of delta created per vol point.
+
+    WHAT IT MEANS. Gamma exposure says how much dealers must trade as SPX
+    MOVES. Vanna exposure says how much they must trade when IMPLIED
+    VOLATILITY moves and SPX does not. The two are routinely confused and are
+    different hedging pressures: a vol-crush morning with a flat index still
+    forces flow, and this is the column that shows it.
+
+    THE DEALER SIGN CONVENTION IS APPLIED HERE, exactly as it is for gamma and
+    exactly as it is NOT for delta — and the reason is a fact rather than a
+    preference. A call and a put at the same strike and expiry have the SAME
+    vanna: put-call parity fixes their delta difference at e^(-qT), which
+    contains no sigma, so it differentiates away (iv_engine.vanna). The number
+    therefore carries no side of its own, so the long-calls/short-puts
+    convention has to be imposed for `net_vex` to mean anything directional.
+    Compare dex_by_strike, where delta arrives already signed and imposing it
+    again would invert every put.
+
+    Unit: vanna x open_interest x 100 x spot, i.e. dollars of delta per one
+    point of IV. Positive net means dealers get LONGER delta as vol rises.
+
+    `r` and `q` are required rather than defaulted: they are the assumption
+    this whole measure rests on (config.RISK_FREE_RATE, config.DIVIDEND_YIELD)
+    and a default here would hide it at every call site.
+    """
+    work, blank = _second_order_frame(chain_df, spot, expiry, VANNA_COLUMNS)
+    if work is None:
+        return blank
+
+    work["_vanna"] = [
+        iv_engine.vanna(spot, float(k), year_fraction(d, day_remainder),
+                        float(v), r, q)
+        for k, d, v in zip(work["strike"], work["dte"], work["iv"], strict=True)
+    ]
+    work = work[work["_vanna"].notna()]
+    if work.empty:
+        return blank
+
+    work["vex"] = work["_vanna"] * work["_notional"]
+    work["sign"] = work["right"].map(DEALER_SIGN).fillna(0)
+
+    is_call = work["right"] == "C"
+    out = pd.DataFrame({
+        "call_vex": work["vex"].where(is_call, 0.0),
+        "put_vex": work["vex"].where(work["right"] == "P", 0.0),
+        "net_vex": work["vex"] * work["sign"],
+        "strike": work["strike"],
+    }).groupby("strike", as_index=False).sum()
+    out["abs_vex"] = out["call_vex"].abs() + out["put_vex"].abs()
+    return out.sort_values("strike", ignore_index=True)[VANNA_COLUMNS]
+
+
+def charm_by_strike(chain_df: pd.DataFrame, spot: float, *,
+                    r: float, q: float, expiry: ExpiryScope = None,
+                    day_remainder: float = 0.0) -> pd.DataFrame:
+    """Charm exposure per strike — dollars of delta that decay away per day.
+
+    WHAT IT MEANS. The hedge a dealer put on today stops being the right hedge
+    tomorrow even if nothing happens, because every option's delta drifts as
+    expiry approaches: in-the-money contracts converge on 1.00, out-of-the-
+    money ones on zero. Charm exposure is the size of that drift in dollars —
+    the flow that has to happen overnight and into the following open purely
+    because a day passed. It is the cleanest available explanation for the
+    "nothing happened but the market drifted" open, and it is largest exactly
+    where this collector looks: near the money, in the front expiries.
+
+    THE DEALER SIGN IS DELIBERATELY NOT APPLIED, unlike vanna and gamma, for
+    the same reason it is not applied in dex_by_strike: charm is a derivative
+    of DELTA with respect to time, and delta is already signed by side. A
+    put's charm is genuinely the opposite sign from a call's at the same
+    moneyness; multiplying by another -1 would double-count it. Getting this
+    wrong is silent — the magnitudes stay plausible and the answer inverts.
+
+    So `net_cex` is the CHAIN's net delta decay, not an inferred dealer
+    inventory. That is the description that needs no assumption to be true.
+
+    SIGN READS AS: positive means the chain's net delta will be HIGHER
+    tomorrow, matching iv_engine.charm's convention (and theta's direction of
+    reading: what the passage of a day does TO you).
+
+    Unit: charm x open_interest x 100 x spot, i.e. dollars of delta per day.
+    """
+    work, blank = _second_order_frame(chain_df, spot, expiry, CHARM_COLUMNS)
+    if work is None:
+        return blank
+
+    work["_charm"] = [
+        iv_engine.charm(spot, float(k), year_fraction(d, day_remainder),
+                        float(v), r, q, str(rt))
+        for k, d, v, rt in zip(work["strike"], work["dte"], work["iv"],
+                               work["right"], strict=True)
+    ]
+    work = work[work["_charm"].notna()]
+    if work.empty:
+        return blank
+
+    work["cex"] = work["_charm"] * work["_notional"]
+
+    is_call = work["right"] == "C"
+    out = pd.DataFrame({
+        "call_cex": work["cex"].where(is_call, 0.0),
+        "put_cex": work["cex"].where(work["right"] == "P", 0.0),
+        "net_cex": work["cex"],
+        "strike": work["strike"],
+    }).groupby("strike", as_index=False).sum()
+    out["abs_cex"] = out["call_cex"].abs() + out["put_cex"].abs()
+    return out.sort_values("strike", ignore_index=True)[CHARM_COLUMNS]
+
+
+def second_order_summary(vex_df: pd.DataFrame,
+                         cex_df: pd.DataFrame) -> dict:
+    """The headline figures for the two second-order panels.
+
+    Deliberately fewer numbers than `summary`. There is no vendor definition
+    of a "vanna ratio" or a "charm sentiment" to agree with, and inventing
+    ones by analogy would put figures on screen that look like the GEX ones
+    beside them and mean something nobody has checked. Totals and the peak
+    strike are what the charts actually support.
+
+    Every value is None when it cannot be computed, never 0 — a chain with no
+    second-order exposure and a perfectly balanced one are different states.
+    """
+    out = dict(net_vex=None, abs_vex=None, peak_vex_strike=None,
+               net_cex=None, abs_cex=None, peak_cex_strike=None)
+
+    if vex_df is not None and not vex_df.empty:
+        out["net_vex"] = float(vex_df["net_vex"].sum())
+        out["abs_vex"] = float(vex_df["abs_vex"].sum())
+        if out["abs_vex"] > 0:
+            out["peak_vex_strike"] = float(
+                vex_df.loc[vex_df["abs_vex"].idxmax(), "strike"])
+
+    if cex_df is not None and not cex_df.empty:
+        out["net_cex"] = float(cex_df["net_cex"].sum())
+        out["abs_cex"] = float(cex_df["abs_cex"].sum())
+        if out["abs_cex"] > 0:
+            out["peak_cex_strike"] = float(
+                cex_df.loc[cex_df["abs_cex"].idxmax(), "strike"])
+
+    return out

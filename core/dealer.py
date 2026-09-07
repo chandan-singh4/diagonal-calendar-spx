@@ -316,6 +316,39 @@ def classify(volume: float, delta_oi: float, *, high_volume: bool,
     return "—", "quiet"
 
 
+#: What each verdict means, in plain words, for the legend under the panel.
+#:
+#: HERE RATHER THAN IN A VIEW, and this is not pedantry about where text
+#: lives: the wording IS the definition of the band. "Stayed open" versus
+#: "changed hands" is the whole difference between accumulation and churn, and
+#: two tabs describing the same threshold in two ways would eventually
+#: describe it in two DIFFERENT ways — with no test able to notice, because
+#: both would still render.
+#:
+#: A LIST, NOT A DICT, because the reading order is part of it: the two
+#: outcomes that mean something stuck, then the one that means the opposite,
+#: then churn, then the walls, then the honest default last.
+#:
+#: Every string here is one short line. The panel is read at a glance during a
+#: session, and a legend that needs its own paragraph is one nobody reads.
+VERDICT_MEANINGS: tuple[tuple[str, str, str], ...] = (
+    ("Heavy Accumulation", "accumulation",
+     "Lots of new positions opened here, and they stayed open."),
+    ("Opening Longs", "accumulation",
+     "Some new positions opened here, but fewer."),
+    ("Position Liquidation", "liquidation",
+     "Positions that were open here got closed out."),
+    ("Intraday Churn", "churn",
+     "Busy, but almost nothing stuck — the same contracts changing hands."),
+    ("Call Wall Defense", "wall",
+     "A wall of calls sits here. It often caps a rally."),
+    ("Put Wall Defense", "wall",
+     "A wall of puts sits here. It often cushions a fall."),
+    ("—", "quiet",
+     "Nothing notable: ordinary two-way trade, or too quiet to judge."),
+)
+
+
 def _column(frame: pd.DataFrame, name: str) -> pd.Series:
     """A column, or zeros shaped like the frame when it is not there.
 

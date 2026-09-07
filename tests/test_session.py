@@ -221,3 +221,31 @@ class TestSecondsUntilOpen:
 
     def test_holiday_morning_is_not_waiting(self):
         assert session.seconds_until_open(self._et(2026, 12, 25, 9, 29, 0), self.HOLIDAYS) is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# What "late" means — one definition for both headers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_lateness_has_two_stages_not_one():
+    """At a 300-second cadence the age reaches 300 immediately before every
+    new price lands -- that is the cadence WORKING. Amber on the threshold,
+    red at half again, so nothing flashes red once per cycle all day."""
+    amber, red, closed = session.staleness_thresholds(300)
+    assert (amber, red, closed) == (300, 450, False)
+
+
+def test_a_shut_market_is_never_late():
+    """The collector is idle by design overnight. A red number every evening
+    is an alarm nobody reads on the morning it means something."""
+    amber, red, closed = session.staleness_thresholds(None)
+    assert closed is True
+    assert (amber, red) == (-1, -1)
+
+
+def test_the_staleness_dot_is_about_age_not_market_hours():
+    assert session.staleness_level(0) == "green"
+    assert session.staleness_level(599) == "green"
+    assert session.staleness_level(600) == "amber"
+    assert session.staleness_level(3599) == "amber"
+    assert session.staleness_level(3600) == "red"

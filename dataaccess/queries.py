@@ -133,6 +133,54 @@ def load_chain_df(db_path, snapshot_id: int) -> pd.DataFrame:
     return df
 
 
+def load_session_chain_df(db_path, session_date: str,
+                          dte_max: int | None = None,
+                          expiry: str | None = None) -> pd.DataFrame:
+    """Every snapshot of one session's chain, in the working DataFrame shape.
+
+    THE SAME BOUNDARY AS `load_chain_df`, ONE SESSION WIDE. Every transform
+    here is that function's, applied to many snapshots at once rather than to
+    one: the display key, the `side` column, and `iv` decimal -> percent.
+
+    THE IV CONVERSION IS THE ONE THAT MATTERS. `core.gex.vanna_by_strike` and
+    `charm_by_strike` take `iv` IN PERCENT — `_second_order_frame` says so —
+    and the database stores it as a decimal. A session frame that skipped this
+    line would hand 0.15 where 15.0 was meant, and Black-Scholes would return
+    a number for it rather than an error: every vanna and charm wick would be
+    wrong, plausibly shaped, and wrong in a direction nobody could eyeball.
+    That is why this shares the boundary rather than reimplementing it.
+
+    `snapshot_id`, `snapshot_timestamp` and `underlying_price` ride along, so
+    a caller can group by snapshot and still have that snapshot's own spot —
+    which every dollar-scaled measure needs, because scaling the morning by
+    the afternoon's price folds the index's own move into the answer.
+    """
+    rows = db.get_session_chain(db_path, session_date, dte_max, expiry)
+    if not rows:
+        return pd.DataFrame()
+    # NOT `[dict(r) for r in rows]`, which is what `load_chain_df` does. That
+    # builds 410,000 dictionaries and costs 12s here; a Row is already a
+    # sequence, so pandas can take the rows as they are. `load_chain_df` keeps
+    # the simpler form because it handles one snapshot -- ~3,200 rows -- where
+    # the difference is unmeasurable.
+    df = pd.DataFrame(rows, columns=rows[0].keys())
+    if "settlement" not in df.columns:
+        df["settlement"] = None
+    # ONE KEY PER CONTRACT, NOT ONE PER ROW. A session repeats the same ~40
+    # (date, settlement) pairs across every snapshot and every strike, so the
+    # per-row comprehension `load_chain_df` uses would call `contract.key`
+    # 410,000 times to produce 40 distinct answers.
+    pairs = df[["expiry_date", "settlement"]].drop_duplicates()
+    keys = {(d, s): contract.key(d, s)
+            for d, s in zip(pairs["expiry_date"], pairs["settlement"],
+                            strict=True)}
+    df["expiry"] = [keys[(d, s)] for d, s in
+                    zip(df["expiry_date"], df["settlement"], strict=True)]
+    df["side"] = df["right"].map({"C": "CALL", "P": "PUT"})
+    df["iv"] = df["iv"] * 100  # decimal -> percent, at the load boundary
+    return df
+
+
 def load_spx_intraday(db_path, session_date: str) -> pd.DataFrame:
     """Intraday SPX path for the session."""
     rows = db.get_spx_intraday_today(db_path, session_date)

@@ -44,14 +44,29 @@ def _as_utc(stamp: str | None) -> _dt.datetime | None:
     return naive.replace(tzinfo=_dt.UTC)
 
 
-def create_app(db_path: str | None = None) -> FastAPI:
-    """Build the server, bound to one database.
+def create_app(db_path: str | None = None,
+               state_dir: str | None = None) -> FastAPI:
+    """Build the server, bound to one database and one state directory.
 
     `db_path` is resolved once, here, and closed over by the routes. This is
     the api/ layer doing its one job — deciding which database — so that
     nothing below it has to.
+
+    `state_dir` is the same job for the second process-level fact, added by
+    DEBT-041. The non-ATM opportunities panel is built from the persisted
+    eligibility registry (eligible_history.json), so serving it means the
+    server has to know where the sidecar files live. It is bound here rather
+    than read at the point of use for exactly the reason `db_path` is: a route
+    that reached for `config.STATE_DIR` itself could not be pointed at a
+    temporary directory by a test, and this registry is ~700 KB of real
+    accumulated state that a test must never write over.
+
+    READ, NEVER WRITTEN. `api/` remains read-only apart from its one
+    documented exception, the "New" registry — see the module docstring and
+    the note above `computed.non_atm_panel`.
     """
     resolved = db_path or config.DB_PATH
+    resolved_state = str(state_dir) if state_dir is not None else str(config.STATE_DIR)
     cache = SnapshotCache()
     watcher = watch.SnapshotWatcher(resolved)
 
@@ -149,7 +164,7 @@ def create_app(db_path: str | None = None) -> FastAPI:
                                 content={"detail": exc.detail})
         return await call_next(request)
 
-    ctx = reads.ReadContext(resolved, cache)
+    ctx = reads.ReadContext(resolved, cache, state_dir=resolved_state)
     app.include_router(reads.build_router(ctx))
     app.include_router(reads.build_computed_router(ctx))
     app.include_router(watch.build_router(watcher))

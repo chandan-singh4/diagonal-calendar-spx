@@ -42,7 +42,7 @@ matched a.m., 0 matched p.m. See ADR-046's amendment.
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 AM = "AM"
 PM = "PM"
@@ -111,6 +111,112 @@ def is_third_friday(expiry_date: str) -> bool:
     """
     d = date.fromisoformat(expiry_date)
     return d.weekday() == 4 and 15 <= d.day <= 21
+
+
+def opex_of(day: date) -> date:
+    """The third Friday of `day`'s own month.
+
+    THE MONTHLY EXPIRY IS THE CALENDAR THE OPTIONS MARKET ACTUALLY KEEPS.
+    Weeklies expire every Friday, but the big open interest, the index
+    rebalances and the quarterly roll all land on the third Friday, so
+    "this cycle" means "up to and including the next monthly", not "the next
+    thirty days". Grouping expiries any other way would cut a cycle in half
+    and put the contract that matters most in the wrong bucket.
+
+    Derived rather than tabulated: `is_third_friday` above says the third
+    Friday is the unique Friday in the 15th-21st window, so walking that
+    window finds it with no holiday table and no year-by-year list to
+    maintain.
+    """
+    for dom in range(15, 22):
+        candidate = date(day.year, day.month, dom)
+        if candidate.weekday() == 4:
+            return candidate
+    raise AssertionError("a seven-day window always contains one Friday")
+
+
+def next_opex(day: date) -> date:
+    """The next monthly expiry on or after `day`.
+
+    Once `day` is past this month's third Friday the current cycle is next
+    month's, which is why this rolls forward rather than clamping. December
+    rolls the year as well as the month; `date` will not do that arithmetic
+    for us, so it is done explicitly here rather than by adding 30 days and
+    hoping.
+    """
+    this = opex_of(day)
+    if this >= day:
+        return this
+    year, month = (day.year + 1, 1) if day.month == 12 else (day.year, day.month + 1)
+    return opex_of(date(year, month, 1))
+
+
+def week_end(day: date) -> date:
+    """The Friday of `day`'s own trading week.
+
+    Saturday and Sunday belong to the week that has just ENDED by the
+    calendar, but to a trader on a Sunday evening "this week" is the one
+    about to start. So the weekend rolls forward to the coming Friday rather
+    than backwards to the one just gone -- otherwise a Sunday would show an
+    empty list, every expiry in it having already passed.
+    """
+    if day.weekday() >= 5:                      # Sat, Sun
+        return day + timedelta(days=(4 - day.weekday()) + 7)
+    return day + timedelta(days=4 - day.weekday())
+
+
+#: The expiry filters the Gamma tab offers, in the order it lists them, each
+#: paired with the function giving its LAST included date. Every one is a
+#: CUMULATIVE upper bound -- "This OpEx Cycle" holds the weeklies before the
+#: monthly as well as the monthly -- because that is how a trader reads the
+#: phrase, and because a filter that excluded the near dates would hide the
+#: 0DTE contract this dashboard looks at most.
+EXPIRY_FILTERS: list[tuple[str, str]] = [
+    ("this_week", "This Week"),
+    ("next_2_weeks", "Next 2 Weeks"),
+    ("this_opex_cycle", "This OpEx Cycle"),
+    ("next_2_opex_cycles", "Next 2 OpEx Cycles"),
+]
+
+
+def filter_cutoffs(today: date) -> dict[str, date]:
+    """The last date each filter in `EXPIRY_FILTERS` includes.
+
+    ONE DEFINITION, TWO SCREENS. The React tab does not decide what "this
+    week" means; it receives, per expiry, the list of filters that expiry
+    belongs to. A browser computing this itself would do it in the VIEWER'S
+    timezone off the viewer's clock, so a trader in London opening the tab at
+    01:00 would see the next day's cycle -- plausible, wrong, and silent.
+    """
+    first = next_opex(today)
+    after = next_opex(first + timedelta(days=1))
+    return {
+        "this_week": week_end(today),
+        "next_2_weeks": week_end(today) + timedelta(days=7),
+        "this_opex_cycle": first,
+        "next_2_opex_cycles": after,
+    }
+
+
+def filters_for(expiry_date: str, today: date) -> list[str]:
+    """Which of `EXPIRY_FILTERS` this expiry falls inside.
+
+    Membership rather than a bound, so the browser filters with a set lookup
+    and never compares two dates itself. An expiry already past -- the record
+    holds them, and a snapshot replayed from last week is full of them -- is
+    in no bucket at all: it is not in "this week" by any reading a trader
+    would accept.
+    """
+    if expiry_date is None:
+        return []
+    try:
+        d = date.fromisoformat(date_of(expiry_date))
+    except ValueError:
+        return []
+    if d < today:
+        return []
+    cutoffs = filter_cutoffs(today)
+    return [k for k, _label in EXPIRY_FILTERS if d <= cutoffs[k]]
 
 
 def legacy_clause(expiry_date: str, settlement: str | None,

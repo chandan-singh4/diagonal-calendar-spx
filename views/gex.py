@@ -72,7 +72,27 @@ _PUT_VOL_EDGE = "rgba(163,116,224,0.55)"
 
 _FLIP = "#e8b64c"
 
-_VIEWS = ["Call vs Put", "Abs Gamma", "Net Gamma", "Delta Exposure"]
+_VIEWS = ["Call vs Put", "Abs Gamma", "Net Gamma", "Delta Exposure",
+          "Vanna Exposure", "Charm Exposure"]
+
+# The two views computed rather than read. Everything else on this tab draws a
+# column the broker sent; these two draw a number derived from four of them
+# (core/gex.py, iv_engine.py). Grouped in one place because several branches
+# below need to ask "is this one of the derived ones" and a repeated
+# `in ("Vanna Exposure", "Charm Exposure")` is a list that drifts.
+_SECOND_ORDER = ("Vanna Exposure", "Charm Exposure")
+
+# What the top panel is called, per view. It used to be the literal string
+# "Gamma Exposure" in two places — the subplot title and _dark's annotation
+# recolouring — which was fine while every view drew gamma.
+_PANEL_TITLE = {
+    "Call vs Put": "Gamma Exposure",
+    "Abs Gamma": "Gamma Exposure",
+    "Net Gamma": "Gamma Exposure",
+    "Delta Exposure": "Delta Exposure",
+    "Vanna Exposure": "Vanna Exposure — $ delta per IV point",
+    "Charm Exposure": "Charm Exposure — $ delta per day",
+}
 
 # How the Open Interest and Volume panels lay their two sides out. Mirrored
 # (puts drawn downward) compares the two sides at a strike; stacked compares
@@ -86,58 +106,18 @@ _FLOW_COLOURS = ["#4d8eff", "#e8b64c", "#10d4a3", "#f05252",
                  "#a78bfa", "#c9a227", "#ec4899", "#22d3ee"]
 
 
-def _fmt_money(value: float | None, unit: str = "") -> str:
-    """A large figure at a readable magnitude, or an em dash.
-
-    NO CURRENCY MARK BY DEFAULT. Exposure is derived from a notional — gamma
-    times open interest times a hundred times spot squared — so the units are
-    real but the number is not money anybody holds or pays, and a "$" invites
-    it to be read as one. The magnitude suffix is the part that matters.
-
-    An em dash rather than 0: absent and zero are different states, and the
-    project's rule is that a missing number shows blank.
-    """
-    if value is None or pd.isna(value):
-        return "—"
-    sign = "-" if value < 0 else ""
-    mag = abs(value)
-    for cutoff, suffix in ((1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "K")):
-        if mag >= cutoff:
-            return f"{sign}{unit}{mag / cutoff:,.1f}{suffix}"
-    return f"{sign}{unit}{mag:,.0f}"
+# _SETTLE_AT and _day_remainder MOVED to core/gex.py on 2026-09-06 so
+# the API could serve charm without importing a view. Called below as
+# gex.day_remainder(ctx.snapshot_ts, config.DISPLAY_TIMEZONE); the
+# timezone is passed because core/ may not read config for itself.
 
 
-def _money_ticks(values, unit: str = "") -> dict:
-    """Axis ticks labelled the way the headline numbers are labelled.
-
-    Plotly's SI format writes a billion as "G" — correct for engineers, wrong
-    for anyone reading a magnitude, and different from the "29.3B" in the
-    strip directly above the chart. Two notations for one number on one screen
-    is a reader's problem, not a formatting preference, so the ticks are placed
-    here and labelled with `_fmt_money`.
-
-    The step is the largest of 1/2/2.5/5 x 10^k that still leaves about six
-    ticks across the range, and the range always includes zero: on these charts
-    the sign is the message, so an axis that cropped zero out would hide it.
-    """
-    series = pd.Series(list(values), dtype="float64").dropna()
-    if series.empty:
-        return {}
-    lo, hi = min(0.0, float(series.min())), max(0.0, float(series.max()))
-    if hi == lo:
-        return {}
-
-    import math
-    rough = (hi - lo) / 6.0
-    power = 10.0 ** math.floor(math.log10(rough))
-    step = next((m * power for m in (1.0, 2.0, 2.5, 5.0) if m * power >= rough),
-                10.0 * power)
-
-    first = math.floor(lo / step)
-    ticks = [(first + i) * step for i in range(int((hi - lo) / step) + 3)]
-    ticks = [t for t in ticks if lo - step <= t <= hi + step]
-    return dict(tickmode="array", tickvals=ticks,
-                ticktext=[_fmt_money(t, unit) for t in ticks])
+# _fmt_money and _money_ticks MOVED on 2026-09-06 to core/format.py and
+# core/charts.py, so the API can label its headline figures and place its
+# axis ticks with the SAME functions this page uses. Picking a magnitude
+# suffix and choosing tick positions are both formulas, and a second copy
+# in TypeScript would drift on exactly the values nobody checks. Called
+# below as fmt.fmt_money(...) and fmt.money_ticks(...).
 
 
 def _metric(label: str, value: str, colour: str = _BRIGHT) -> str:
@@ -190,8 +170,9 @@ def _dark(fig, height: int, *, legend: bool = False) -> None:
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left",
                     x=0, font=dict(size=10), bgcolor="rgba(0,0,0,0)"),
     )
+    _titles = set(_PANEL_TITLE.values()) | {"Open Interest", "Volume"}
     for note in fig.layout.annotations:
-        if note.text in ("Gamma Exposure", "Open Interest", "Volume"):
+        if note.text in _titles:
             note.font.update(color=_INK, size=12)
 
 
@@ -395,6 +376,24 @@ def render(ctx: ViewContext) -> None:
     shown = per_strike
     totals = gex.summary(shown)          # displayed bars, per the documentation
 
+    # The derived views, computed ONCE here rather than inside the memoised
+    # figure. The headline strip needs the same numbers the chart draws, and
+    # two calls would be two chances for the strip and the bars to disagree
+    # about what is on screen. Only the selected one is built: each walks the
+    # whole chain through iv_engine, and the other would be thrown away.
+    second = None
+    second_totals = None
+    if view in _SECOND_ORDER:
+        remainder = gex.day_remainder(ctx.snapshot_ts, config.DISPLAY_TIMEZONE)
+        kwargs = dict(r=config.RISK_FREE_RATE, q=config.DIVIDEND_YIELD,
+                      expiry=expiry, day_remainder=remainder)
+        if view == "Vanna Exposure":
+            second = gex.vanna_by_strike(chain, ctx.spx_price, **kwargs)
+            second_totals = gex.second_order_summary(second, None)
+        else:
+            second = gex.charm_by_strike(chain, ctx.spx_price, **kwargs)
+            second_totals = gex.second_order_summary(None, second)
+
     # Wrapped so the stylesheet can cap the width. Full-bleed on a wide
     # monitor stretches a ~450px panel across ~1700px: the bars turn into
     # ribbons and the shape of the curve — the thing being read — flattens.
@@ -402,9 +401,10 @@ def render(ctx: ViewContext) -> None:
     # page while the chart under it stopped at the cap, and the mismatch read
     # as the strip being broken rather than as two different widths.
     with st.container(key="gexbody"):
-        _draw_headline(totals)
+        _draw_headline(totals, second_totals, view)
         _draw_side_mode_control()
-        _draw_strike_panels(ctx, shown, view, expiry, side_mode == "Stacked")
+        _draw_strike_panels(ctx, shown, view, expiry, side_mode == "Stacked",
+                            second)
         _gap()
         # The cumulative gamma curve stood here. It restated the flip strike
         # the headline already gives as a number, and its shape was dominated
@@ -441,7 +441,8 @@ def _draw_side_mode_control() -> None:
 # The headline strip
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _draw_headline(totals: dict) -> None:
+def _draw_headline(totals: dict, second: dict | None = None,
+                   view: str = "") -> None:
     net = totals["net_gex"]
     ratio = totals["ratio"]
     sentiment = totals["sentiment"]
@@ -454,20 +455,46 @@ def _draw_headline(totals: dict) -> None:
     bars = ("" if totals["total_bars"] is None
             else f" ({totals['positive_bars']}/{totals['total_bars']})")
 
+    # The gamma figures stay on screen even when a derived view is selected:
+    # vanna and charm are read AGAINST the gamma picture, not instead of it —
+    # "dealers are short gamma here and get shorter delta as vol rises" is one
+    # sentence needing both halves. The derived pair is appended, not swapped
+    # in, and only when it has something to say.
+    extra: list[str] = []
+    if second is not None and view == "Vanna Exposure":
+        vex = second["net_vex"]
+        extra = [
+            _metric("Net VEX", fmt.fmt_money(vex),
+                    _BRIGHT if vex is None else (_CALL if vex >= 0 else _PUT)),
+            _metric("Peak vanna",
+                    "—" if second["peak_vex_strike"] is None
+                    else f"{second['peak_vex_strike']:,.0f}"),
+        ]
+    elif second is not None and view == "Charm Exposure":
+        cex = second["net_cex"]
+        extra = [
+            _metric("Net CEX", fmt.fmt_money(cex),
+                    _BRIGHT if cex is None else (_CALL if cex >= 0 else _PUT)),
+            _metric("Peak charm",
+                    "—" if second["peak_cex_strike"] is None
+                    else f"{second['peak_cex_strike']:,.0f}"),
+        ]
+
     _strip([
-        _metric("Net GEX", _fmt_money(net), net_colour),
+        _metric("Net GEX", fmt.fmt_money(net), net_colour),
         _metric("GEX Ratio", "—" if ratio is None else f"{ratio:+,.1f}x",
                 ratio_colour),
         _metric("Sentiment",
                 "—" if sentiment is None else f"{sentiment:,.0f}%{bars}"),
-        _metric("Call GEX", _fmt_money(totals["call_gex"]), _CALL),
-        _metric("Put GEX", _fmt_money(totals["put_gex"]), _PUT),
+        _metric("Call GEX", fmt.fmt_money(totals["call_gex"]), _CALL),
+        _metric("Put GEX", fmt.fmt_money(totals["put_gex"]), _PUT),
         _metric("Peak strike",
                 "—" if totals["peak_strike"] is None
-                else f"{totals['peak_strike']:,.0f} ({totals['peak_side']})"),
+                else fmt.peak_label(totals)),
         _metric("Gamma flip",
                 "—" if totals["flip_strike"] is None
                 else f"{totals['flip_strike']:,.0f}", _FLIP),
+        *extra,
     ])
 
 
@@ -476,7 +503,8 @@ def _draw_headline(totals: dict) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _draw_strike_panels(ctx: ViewContext, shown: pd.DataFrame,
-                        view: str, expiry: str | None, stack: bool) -> None:
+                        view: str, expiry: str | None, stack: bool,
+                        second: pd.DataFrame | None = None) -> None:
     """Everything read against the strike axis, in one stack.
 
     Volume and open interest share an axis so a bar in one can be read straight
@@ -491,7 +519,7 @@ def _draw_strike_panels(ctx: ViewContext, shown: pd.DataFrame,
     once and then becomes noise on every render after.
     """
     fig = _strike_figure(shown, ctx.chain_df, ctx.spx_price, view, expiry,
-                         stack, ctx.snapshot_id)
+                         stack, ctx.snapshot_id, second)
     with st.container(key="chartcard_gex"):
         st.plotly_chart(fig, use_container_width=True)
 
@@ -509,13 +537,14 @@ def _draw_strike_panels(ctx: ViewContext, shown: pd.DataFrame,
 @st.cache_data(show_spinner=False, max_entries=16)
 def _strike_figure(_shown: pd.DataFrame, _chain: pd.DataFrame, spot: float,
                    view: str, expiry: str | None, stack: bool,
-                   snapshot_id: int):
-    shown, ctx_chain = _shown, _chain
+                   snapshot_id: int, _second: pd.DataFrame | None = None):
+    shown, ctx_chain, second = _shown, _chain, _second
     fig = make_subplots(
         rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.14,
         row_heights=[0.48, 0.26, 0.26],
         specs=[[{"secondary_y": True}], [{}], [{}]],
-        subplot_titles=("Gamma Exposure", "Volume", "Open Interest"),
+        subplot_titles=(_PANEL_TITLE.get(view, "Gamma Exposure"),
+                        "Volume", "Open Interest"),
     )
 
     # ── Panel 1, background: the day's volume as translucent fills ───────────
@@ -547,6 +576,32 @@ def _strike_figure(_shown: pd.DataFrame, _chain: pd.DataFrame, spot: float,
         colours = [_CALL if v >= 0 else _PUT for v in shown["net_gex"]]
         _add_bar(fig, shown["strike"], shown["net_gex"], colours, 1,
                  "Strike %{x:,.0f}<br>Net GEX %{y:,.0f}<extra></extra>")
+    elif view in _SECOND_ORDER:
+        # NOT MIRRORED, unlike the volume and open-interest panels below.
+        # Calls and puts at one strike carry the SAME SIGN here — identical
+        # for vanna, near-identical for charm — so flipping one side would
+        # draw two bars cancelling each other where the honest picture is one
+        # tall bar. barmode is "relative", so same-sign bars stack and the
+        # total height is the strike's real exposure with the split visible.
+        call_col, put_col = ((("call_vex", "put_vex"))
+                             if view == "Vanna Exposure"
+                             else ("call_cex", "put_cex"))
+        tag = "VEX" if view == "Vanna Exposure" else "CEX"
+        panel = (second if second is not None and not second.empty
+                 else pd.DataFrame(columns=["strike", call_col, put_col]))
+        # Narrowed to the strikes the panels BELOW draw, as Delta Exposure is.
+        # These frames drop a contract with no IV while `shown` drops one with
+        # no gamma, so the two lists can differ by a strike or two — and a top
+        # panel one bar wider than the volume panel under it silently
+        # misaligns every reading made by looking straight down.
+        panel = panel[panel["strike"].isin(shown["strike"])]
+        # Concatenated rather than interpolated: a hovertemplate is full of
+        # "%{x}" placeholders, which both %-formatting and an f-string would
+        # try to read as their own.
+        _add_bar(fig, panel["strike"], panel[call_col], _CALL, 1,
+                 "Strike %{x:,.0f}<br>Call " + tag + " %{y:,.0f}<extra></extra>")
+        _add_bar(fig, panel["strike"], panel[put_col], _PUT, 1,
+                 "Strike %{x:,.0f}<br>Put " + tag + " %{y:,.0f}<extra></extra>")
     else:
         dex = gex.dex_by_strike(ctx_chain, spot, expiry=expiry)
         dex = dex[dex["strike"].isin(shown["strike"])]
@@ -602,6 +657,12 @@ def _strike_figure(_shown: pd.DataFrame, _chain: pd.DataFrame, spot: float,
     # title on the left only eats width the bars could use.
     if view == "Delta Exposure":
         primary = pd.concat([dex["call_dex"], dex["put_dex"]])
+    elif view in _SECOND_ORDER:
+        # The stacked total, not the two columns separately: the bars share a
+        # sign and pile up, so an axis fitted to the taller COLUMN would clip
+        # the taller BAR. `panel` is empty-safe.
+        primary = (panel[call_col] + panel[put_col]) if len(panel) else pd.Series(
+            dtype="float64")
     elif view == "Call vs Put":
         primary = pd.concat([shown["call_gex"], -shown["put_gex"]])
     elif view == "Abs Gamma":
@@ -617,16 +678,16 @@ def _strike_figure(_shown: pd.DataFrame, _chain: pd.DataFrame, spot: float,
     fig.update_yaxes(title_text=None, row=1, col=1, secondary_y=False,
                      showticklabels=True, ticks="outside", ticklen=4,
                      tickcolor=_GRID, zeroline=True, zerolinecolor="#3c5570",
-                     zerolinewidth=1, **_money_ticks(primary))
+                     zerolinewidth=1, **fmt.money_ticks(primary))
     fig.update_yaxes(title_text=None, row=1, col=1, secondary_y=True,
                      showgrid=False, showticklabels=True, ticks="outside",
                      ticklen=4, tickcolor=_GRID,
-                     **_money_ticks(pd.concat([shown["call_volume"],
+                     **fmt.money_ticks(pd.concat([shown["call_volume"],
                                                shown["put_volume"]]), ""))
     fig.update_yaxes(title_text=None, row=2, col=1, zeroline=True,
-                     zerolinecolor="#3c5570", **_money_ticks(vol_side, ""))
+                     zerolinecolor="#3c5570", **fmt.money_ticks(vol_side, ""))
     fig.update_yaxes(title_text=None, row=3, col=1, zeroline=True,
-                     zerolinecolor="#3c5570", **_money_ticks(oi_side, ""))
+                     zerolinecolor="#3c5570", **fmt.money_ticks(oi_side, ""))
 
 
     # Strike labels on EVERY panel, not only the bottom one: shared_xaxes
@@ -777,7 +838,7 @@ def _volume_figure(_intraday: pd.DataFrame, _shown: pd.DataFrame,
     fig.update_layout(xaxis=_time_axis(span),
                       yaxis=dict(title="Call volume − put volume",
                                  gridcolor=_GRID,
-                                 **_money_ticks(work["net_volume"])))
+                                 **fmt.money_ticks(work["net_volume"])))
     _dark(fig, 320, legend=True)
     return fig
 
@@ -799,9 +860,9 @@ def _draw_zero_dte_flow(ctx: ViewContext, span: list) -> None:
     fig, total_now, total_open, levels = built
 
     _strip([
-        _metric("0DTE GEX now", _fmt_money(total_now),
+        _metric("0DTE GEX now", fmt.fmt_money(total_now),
                 _CALL if total_now >= 0 else _PUT),
-        _metric("0DTE flow today", _fmt_money(total_now - total_open),
+        _metric("0DTE flow today", fmt.fmt_money(total_now - total_open),
                 _CALL if total_now >= total_open else _PUT),
         _metric("Key levels",
                 " · ".join(f"{s:,.0f}" for s in sorted(levels)[:3])),
@@ -853,7 +914,7 @@ def _flow_figure(_zero: pd.DataFrame, span: list, snapshot_id: int):
     fig.update_layout(xaxis=_time_axis(span),
                       yaxis=dict(title="0DTE net GEX", gridcolor=_GRID,
                                  zeroline=True, zerolinecolor="#3c5570",
-                                 **_money_ticks(zero["net_gex"])))
+                                 **fmt.money_ticks(zero["net_gex"])))
     _dark(fig, 340, legend=True)
     return fig, total_now, total_open, levels
 
@@ -912,6 +973,67 @@ def _draw_caption(totals: dict, expiry: str | None,
             "put's delta is already a negative number, so applying the "
             "convention again would count it twice. This panel is simply "
             "what the option chain itself reports."
+        ))
+    if view in _SECOND_ORDER:
+        lines.insert(0, (
+            "**These two are calculated here, not sent by the broker.** "
+            "Schwab reports delta, gamma, theta and vega; almost nobody "
+            "publishes vanna or charm. They are worked out from the same "
+            "numbers using the standard options formula, plus two figures "
+            "that are not in the data and have to be assumed: an interest "
+            "rate of "
+            f"{config.RISK_FREE_RATE:.1%} and a dividend yield of "
+            f"{config.DIVIDEND_YIELD:.1%}. Those affect the exact size of "
+            "each bar a little; they barely affect the shape across prices, "
+            "which is what this chart is for."
+        ))
+        lines.insert(1, (
+            "**This is the front month only, and that is a real limit.** "
+            "The record stops about 28 days out. Gamma lives close to expiry "
+            "so cutting there costs almost nothing, but vanna lives in "
+            "longer-dated options — so this is *not* the market-wide vanna "
+            "figure a data vendor sells, and it will not match one. It is "
+            "the right answer for the contracts a diagonal calendar "
+            "actually holds, which are all inside the window."
+        ))
+        lines.insert(2, (
+            "**Calls and puts point the same way here, so the bars stack "
+            "instead of mirroring.** At a given price, a call and a put have "
+            "exactly the same vanna and almost the same charm — that is a "
+            "property of how options are priced, not a shortcut. The height "
+            "of the whole bar is the exposure at that price; the two colours "
+            "show which side it sits in."
+        ))
+    if view == "Vanna Exposure":
+        lines.insert(3, (
+            "**What it means:** gamma says how much dealers must trade when "
+            "SPX *moves*. Vanna says how much they must trade when implied "
+            "volatility moves and SPX stands still — the flow on a "
+            "vol-crush morning with a flat index. A positive total means "
+            "dealers get longer delta as volatility rises. It uses the same "
+            "dealer assumption as gamma, and for the same reason: a call "
+            "and a put have identical vanna, so the number carries no side "
+            "of its own until the convention supplies one."
+        ))
+    if view == "Charm Exposure":
+        lines.insert(3, (
+            "**What it means:** every option's delta drifts as expiry nears "
+            "even if nothing happens — in-the-money contracts head toward "
+            "1.00, out-of-the-money ones toward zero. Charm is the size of "
+            "that drift in dollars: the hedging that has to happen overnight "
+            "purely because a day passed. Positive means the chain's delta "
+            "will be higher tomorrow. Like Delta Exposure and unlike gamma, "
+            "it does **not** use the dealer assumption — charm is a delta "
+            "figure and already carries its own sign."
+        ))
+        lines.insert(4, (
+            "**Same-day expiries are the least reliable bars on this "
+            "chart.** Charm grows without limit as expiry arrives, so the "
+            "number depends on the exact time left, and the record stores "
+            "whole days — the clock is added back from the snapshot time, "
+            "but the monthly contract that settles at the *opening* bell is "
+            "still treated as settling at the close, which is up to six and "
+            "a half hours out on one expiry a month."
         ))
     if expiry is None:
         lines.append(
@@ -1015,10 +1137,10 @@ def _draw_net_flow(ctx: ViewContext, expiry: str | None,
     added = float(totals.loc[totals["flow"] > 0, "flow"].sum())
     removed = float(totals.loc[totals["flow"] < 0, "flow"].sum())
     _strip([
-        _metric("Net flow today", _fmt_money(added + removed),
+        _metric("Net flow today", fmt.fmt_money(added + removed),
                 _CALL if added + removed >= 0 else _PUT),
-        _metric("Gamma added", _fmt_money(added), _CALL),
-        _metric("Gamma removed", _fmt_money(removed), _PUT),
+        _metric("Gamma added", fmt.fmt_money(added), _CALL),
+        _metric("Gamma removed", fmt.fmt_money(removed), _PUT),
     ])
     st.plotly_chart(_net_flow_figure(rows, ctx.spx_price, ctx.snapshot_id, scope),
                     use_container_width=True)
@@ -1070,7 +1192,7 @@ def _net_flow_figure(_rows: pd.DataFrame, spot: float, snapshot_id: int,
         font=dict(color="#9575cd", size=9))
     fig.update_layout(
         xaxis=dict(gridcolor=_GRID, zeroline=False,
-                   **_money_ticks(rows["flow"])),
+                   **fmt.money_ticks(rows["flow"])),
         yaxis=dict(gridcolor=_GRID, tickformat="d", dtick=_ladder_step(rows)),
         bargap=0.35,
     )
@@ -1260,9 +1382,9 @@ def _time_machine_figure(_frames: pd.DataFrame, n_frames: int,
         bargap=0.35,
     )
     fig.update_xaxes(range=[-lvl_max, lvl_max], zeroline=False,
-                     **_money_ticks([-lvl_max, lvl_max]), row=1, col=1)
+                     **fmt.money_ticks([-lvl_max, lvl_max]), row=1, col=1)
     fig.update_xaxes(range=[-flw_max, flw_max], zeroline=False,
-                     **_money_ticks([-flw_max, flw_max]), row=1, col=2)
+                     **fmt.money_ticks([-flw_max, flw_max]), row=1, col=2)
     fig.update_yaxes(tickformat="d",
                      dtick=_ladder_step(pd.DataFrame({"strike": strikes})),
                      row=1, col=1)
@@ -1676,7 +1798,7 @@ def _positioning_table(rows: pd.DataFrame, spot: float, live: bool,
             f'<div class="dealer-bar"><div class="dealer-track">'
             f'<div class="dealer-fill" style="width:{vol_pct:.1f}%;'
             f'background:{_VOL_BAR};"></div></div>'
-            f'<div class="dealer-val">{_fmt_money(shown_volume)}</div>'
+            f'<div class="dealer-val">{fmt.fmt_money(shown_volume)}</div>'
             f'</div>'
             f'<div class="dealer-bar"><div class="dealer-track">'
             f'<div class="dealer-fill" style="width:{delta_bar:.1f}%;'

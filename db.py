@@ -2022,6 +2022,84 @@ def seed_t001(db_path: str) -> None:
         logger.info("T-001 seeded into trades table.")
 
 
+def get_session_chain(db_path: str, session_date: str,
+                      dte_max: int | None = None,
+                      expiry: str | None = None) -> list:
+    """Every option row of one session, with its snapshot's time and spot.
+
+    THE READ BEHIND THE SESSION-RANGE WICKS ON EVERY MEASURE. The wicks were
+    gamma-only because `get_intraday_strike_metrics` sums gamma x open
+    interest in SQL, and that shape cannot answer for the others: vanna and
+    charm are not stored at all, they are Black-Scholes derivatives of each
+    CONTRACT's own strike, expiry and implied vol, so they cannot be summed
+    before they are computed. Delta and volume-weighted gamma could be summed
+    here, but doing so would put four more weighting formulas in SQL beside
+    the ones that already live in core/gex.py — two copies of each, drifting.
+
+    So this returns the ROWS and core/ranges.py runs the same
+    `by_strike` functions the bars themselves are drawn with, once per
+    snapshot. The wick and the bar are then the same formula by construction
+    rather than by inspection, which is the only way a sign convention as
+    subtle as "vanna takes the dealer sign and delta does not" stays true in
+    both places.
+
+    ~410,000 ROWS FOR A FULL SESSION, and affordable only because of two
+    things: the subquery below rather than a join predicate (BUG-039), and a
+    named column list rather than `o.*`. Measured on a full session, 2.0s as
+    written; 15.6s with the wildcard; 45s with the join predicate. The caller
+    caches the result and nothing draws on it synchronously, so seconds are
+    acceptable here and tens of seconds are not.
+
+    `dte_max` and `expiry` scope exactly as they do in
+    `get_intraday_strike_metrics`, and `expiry` is a DISPLAY KEY rather than a
+    date so the third Friday's two contracts stay apart (ADR-046/047).
+
+    Ordered by time then expiry then strike, so a caller can group by snapshot
+    without re-sorting.
+    """
+    scope, params = "(? IS NULL OR o.dte <= ?)", [dte_max, dte_max]
+    if expiry is not None:
+        expiry_date, settlement = contract.parse(expiry)
+        scope = ("o.expiry_date = ? AND "
+                 + contract.match_clause(expiry_date, settlement,
+                                         rows="o", snaps="s"))
+        params = [expiry_date]
+
+    with get_conn(db_path) as conn:
+        return conn.execute(
+            f"""
+            -- NAMED COLUMNS, NOT o.*. The row is 20 columns wide and this
+            -- read returns 410,000 of them; asking for all of them costs
+            -- 15.6s against 2.5s for the 13 the measures actually use. The
+            -- price of a wildcard here is paid on every column nobody wanted.
+            SELECT o.snapshot_id,
+                   o.expiry_date,
+                   o.settlement,
+                   o.dte,
+                   o.strike,
+                   o.right,
+                   o.iv,
+                   o.delta,
+                   o.gamma,
+                   o.volume,
+                   o.open_interest,
+                   s.snapshot_timestamp,
+                   s.underlying_price
+            FROM option_rows o
+            JOIN snapshots  s USING (snapshot_id)
+            -- THE SESSION IS SELECTED IN A SUBQUERY, NOT AS A JOIN PREDICATE.
+            -- See get_intraday_strike_metrics for the 110x this is worth; the
+            -- same trap, and this read pulls thirty times the rows.
+            WHERE o.snapshot_id IN (SELECT snapshot_id FROM snapshots
+                                    WHERE status = 'COMPLETE'
+                                      AND DATE(snapshot_timestamp) = ?)
+              AND {scope}
+            ORDER BY s.snapshot_timestamp, o.expiry_date, o.strike, o.right
+            """,
+            [session_date, *params]
+        ).fetchall()
+
+
 def get_intraday_strike_metrics(db_path: str, session_date: str,
                                 dte_max: int | None = None,
                                 expiry: str | None = None) -> list:

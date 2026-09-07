@@ -224,3 +224,37 @@ def scan_all_offsets(
         subset=["Front Expiry", "Back Expiry", "Put Strike", "Call Strike"]
     )
     return combined.sort_values("Transform Diff", ascending=False).reset_index(drop=True)
+
+
+def add_mark_columns(df):
+    """Add `diagonal_mark`, `transform_mark` and `gap` to a mark history.
+
+    THE THREE SUBTRACTIONS THAT DEFINE THE WHOLE STRATEGY, in one place. They
+    were written out by hand in four: the Calendar Edge chart, the Research
+    tab, the served card builder, and -- nearly -- the React rebuild, which is
+    what prompted collecting them. Four copies of a subtraction is not a
+    typing cost, it is four chances for one screen to disagree with another
+    about what a diagonal is worth, and the disagreement would be a plausible
+    number rather than an error.
+
+    The diagonal is the back pair less the front pair. The transform is the
+    back pair less the front WINGS -- the same back leg, sold against a
+    different front -- and the gap between them is what the scanner ranks on.
+
+    Returns a COPY: callers hold frames from a cache, and mutating one in
+    place corrupts it for every later reader.
+
+    Names the columns `gap`, not `transform_gap`. Both spellings were in use;
+    `gap` is what the registry, the cards and the threshold all say.
+    """
+    out = df.copy()
+    out["diagonal_mark"] = (
+        out["back_call_mark"] + out["back_put_mark"]
+        - out["front_call_mark"] - out["front_put_mark"]
+    )
+    out["transform_mark"] = (
+        out["back_call_mark"] + out["back_put_mark"]
+        - out["front_wing_call_mark"] - out["front_wing_put_mark"]
+    )
+    out["gap"] = out["transform_mark"] - out["diagonal_mark"]
+    return out

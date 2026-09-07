@@ -21,6 +21,9 @@ from plotly.subplots import make_subplots
 
 import config
 import iv_engine
+from core.scanner import add_mark_columns
+from core import series
+from core.series import market_open_lines, merge_atm_pair, strike_crossings
 from core.charts import (
     SESSION_RANGEBREAKS,
     banded_ratio_traces,
@@ -89,7 +92,7 @@ def render(ctx: ViewContext) -> None:
         st.markdown('</div>', unsafe_allow_html=True)
 
     # Metrics row
-    iv_index = float(ctx.chain_df.groupby("expiry")["iv"].mean().mean())
+    iv_index = iv_engine.iv_index(ctx.chain_df)
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("ATM IV Ratio (F/B)", f"{ctx.ts_now.ratio:.4f}")
     m2.metric("Front ATM IV",       f"{ctx.ts_now.front_iv:.2f}%")
@@ -101,19 +104,14 @@ def render(ctx: ViewContext) -> None:
     period_days = {"Today": 1, "5D": 5, "10D": 10, "20D": 20}[period_label]
     # DEBT-030: the reads hand back zoned UTC now, so the wall-clock the
     # rangebreaks need is applied HERE, at the point of drawing.
-    _fhp = to_display_time(ctx.load_atm_hist_fb(ctx.front_expiry, period_days),
-                           config.DISPLAY_TIMEZONE)
-    _bhp = to_display_time(ctx.load_atm_hist_fb(ctx.back_expiry,  period_days),
-                           config.DISPLAY_TIMEZONE)
-    atm_merged = pd.DataFrame()
-    if not _fhp.empty and not _bhp.empty:
-        atm_merged = pd.merge(
-            _fhp[["timestamp", "atm_iv"]].rename(columns={"atm_iv": "front_iv"}),
-            _bhp[["timestamp", "atm_iv"]].rename(columns={"atm_iv": "back_iv"}),
-            on="timestamp", how="inner",
-        )
-        atm_merged["iv_ratio"] = atm_merged["front_iv"] / atm_merged["back_iv"]
-        atm_merged = break_sessions(atm_merged)
+    # `core.series.merge_atm_pair` — one definition, shared with the API so
+    # this tab and the served one join, divide and break the two series the
+    # same way. See its docstring for why the join is inner.
+    atm_merged = merge_atm_pair(
+        ctx.load_atm_hist_fb(ctx.front_expiry, period_days),
+        ctx.load_atm_hist_fb(ctx.back_expiry,  period_days),
+        config.DISPLAY_TIMEZONE,
+    )
 
     # Both synced charts autorange independently unless given an explicit
     # range, and their underlying queries don't cover the same history:
@@ -144,14 +142,24 @@ def render(ctx: ViewContext) -> None:
 
     def _add_market_open_lines(fig, ts_series: pd.Series, **vline_kwargs) -> None:
         """Subtle vertical dotted line at 9:30 AM for each trading day present
-        in ts_series. Skipped entirely for the Today view, where a single
-        9:30 marker at the left edge of the chart adds no information."""
-        if period_label == "Today" or ts_series is None or ts_series.empty:
+        in ts_series.
+
+        WHICH DAYS GET A LINE is `core.series.market_open_lines` -- including
+        the rule that a single-day window gets none, where one marker at the
+        left edge adds a mark and no information. It was decided here and is
+        now decided once, because the React chart draws the same lines.
+
+        The old `period_label == "Today"` short-circuit is gone and nothing
+        changed: a Today window holds one date, and one date returns no
+        lines. The shared rule reads the DATA rather than the picker, which
+        also covers a wider window that happens to hold a single session.
+        """
+        if ts_series is None or ts_series.empty:
             return
-        for _day in sorted(pd.to_datetime(ts_series).dt.date.unique()):
-            _open_ts = pd.Timestamp(f"{_day} 09:30")  # naive, matches naive plotted timestamps
+        for _open_ts in market_open_lines(ts_series):
             fig.add_vline(
-                x=_open_ts, line_width=1, line_dash="dot",
+                # Naive, matching the naive plotted timestamps (DEBT-030).
+                x=pd.Timestamp(_open_ts), line_width=1, line_dash="dot",
                 line_color="#3a5170", opacity=0.6, **vline_kwargs,
             )
 
@@ -198,15 +206,12 @@ def render(ctx: ViewContext) -> None:
                 _gap_df = _gap_df[_gap_df["timestamp"].dt.date == _last_date]
 
         if not _gap_df.empty:
-            _gap_df["diagonal_mark"] = (
-                _gap_df["back_call_mark"] + _gap_df["back_put_mark"]
-                - _gap_df["front_call_mark"] - _gap_df["front_put_mark"]
-            )
-            _gap_df["transform_mark"] = (
-                _gap_df["back_call_mark"] + _gap_df["back_put_mark"]
-                - _gap_df["front_wing_call_mark"] - _gap_df["front_wing_put_mark"]
-            )
-            _gap_df["transform_gap"] = _gap_df["transform_mark"] - _gap_df["diagonal_mark"]
+            # `core.scanner.add_mark_columns` -- one definition, see its
+            # docstring. It names the third column `gap`; this tab has always
+            # called it `transform_gap`, and the rename stays local rather
+            # than rippling through 40 references in this file.
+            _gap_df = add_mark_columns(_gap_df).rename(
+                columns={"gap": "transform_gap"})
 
             # Opportunistic registry backfill — see _backfill_eligible_history
             # docstring. Only meaningful for non-ATM combos, matching the
@@ -545,15 +550,16 @@ def render(ctx: ViewContext) -> None:
                 ))
 
                 # Directional crossing markers where SPX crosses a short strike.
-                _sx = _spx_series.to_numpy()
-                _tx = _gap_df["timestamp"].to_numpy()
-                _cu_x, _cu_y, _cd_x, _cd_y = [], [], [], []
-                for _k in (ctx.put_strike, ctx.call_strike):
-                    for _i in range(1, len(_sx)):
-                        if _sx[_i - 1] < _k <= _sx[_i]:
-                            _cu_x.append(_tx[_i]); _cu_y.append(float(_k))
-                        elif _sx[_i - 1] > _k >= _sx[_i]:
-                            _cd_x.append(_tx[_i]); _cd_y.append(float(_k))
+                # `core.series.strike_crossings` — one rule, shared with the
+                # API. See its docstring for why each inequality is closed on
+                # the side it is.
+                _cross = strike_crossings(
+                    _gap_df["timestamp"].to_numpy(), _spx_series.to_numpy(),
+                    (ctx.put_strike, ctx.call_strike))
+                _cu_x = [p["x"] for p in _cross["up"]]
+                _cu_y = [p["y"] for p in _cross["up"]]
+                _cd_x = [p["x"] for p in _cross["down"]]
+                _cd_y = [p["y"] for p in _cross["down"]]
                 if _cu_x:
                     fig_spx.add_trace(go.Scatter(
                         x=_cu_x, y=_cu_y, mode="markers", name="cross-up",
@@ -788,13 +794,11 @@ def render(ctx: ViewContext) -> None:
             unsafe_allow_html=True,
         )
         _sc = atm_merged.copy()
-        _sc["hod"] = _sc["timestamp"].dt.hour + _sc["timestamp"].dt.minute / 60.0
-        _lo = float(min(_sc["back_iv"].min(), _sc["front_iv"].min()))
-        _hi = float(max(_sc["back_iv"].max(), _sc["front_iv"].max()))
-        _pad = (_hi - _lo) * 0.05 or 1.0
+        _sc["hod"] = series.hour_of_day(_sc)
+        _lo_pad, _hi_pad = series.scatter_domain(_sc)
         fig_intra = go.Figure()
         fig_intra.add_trace(go.Scatter(
-            x=[_lo - _pad, _hi + _pad], y=[_lo - _pad, _hi + _pad], mode="lines",
+            x=[_lo_pad, _hi_pad], y=[_lo_pad, _hi_pad], mode="lines",
             name="R = 1  (Front = Back)", line=dict(color="#2a3f56", dash="dash")))
         fig_intra.add_trace(go.Scatter(
             x=_sc["back_iv"], y=_sc["front_iv"], mode="markers", name="snapshots",

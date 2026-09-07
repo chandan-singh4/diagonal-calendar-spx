@@ -200,15 +200,36 @@ def test_the_statistics_frame_is_deliberately_not_broken():
     Pinned so that a later 'consistency' cleanup does not helpfully add the
     call. The absence is the correct behaviour, and it is not obvious.
 
-    REPOINTED in M2 step 2.4, the same way ADR-032 repointed the test below:
-    the tab moved to views/historical.py and this failed on its own anchor,
-    which is what the anchor is for. The window search is gone with it — the
-    whole module is now that one tab, so the assertion covers the file rather
-    than 2,000 characters after a heading, and can no longer be satisfied by
-    a `break_sessions` call sitting just past the cut-off.
+    REPOINTED TWICE, both times by failing on its own anchor, which is what
+    the anchor is for. In M2 step 2.4 the tab moved to views/historical.py.
+    In M6 the hand-written merge it was watching was replaced by
+    `core.series.merge_iv_pair`, the same join the charts use — so the
+    absence this guards is no longer the absence of a CALL but the presence
+    of an ARGUMENT. That is a weaker thing to leave unpinned, not a stronger
+    one: `insert_breaks` defaults to True, so the dangerous edit is now a
+    deletion rather than an addition, and deleting is easier.
+
+    Both halves are asserted. The panel must not import break_sessions, and
+    it must ask the shared join not to insert them.
+
+    HOW MUCH THIS ACTUALLY PROTECTS, measured rather than assumed (2026-09-06).
+    On the live record a broken statistics frame gains four gap rows out of
+    637 -- and `range_stats`, `percentile_rank` and the served `observations`
+    count all drop NaN first, so today every figure would come out the same.
+    The guard is therefore about the frame's SHAPE, not a demonstrated wrong
+    number, and it is kept for two reasons: the next consumer of this frame
+    is not obliged to dropna, and a summary frame carrying rows that stand
+    for nothing is a trap whether or not it has been sprung yet. Said plainly
+    so nobody later reads the original claim, tests it, finds it overstated,
+    and deletes the check.
     """
     src = (APP_PATH.parent / "views" / "historical.py").read_text(encoding="utf-8")
-    assert 'pm["ratio"] = pm["f"] / pm["b"]' in src, "anchor moved; re-point this test"
+    assert "merge_iv_pair(" in src, "anchor moved; re-point this test"
+    assert "insert_breaks=False" in src, (
+        "the statistics frame must NOT be broken -- NaN rows would corrupt "
+        "range_stats() and percentile_rank(). `insert_breaks` defaults to "
+        "True, so dropping the argument silently breaks the frame."
+    )
     assert "break_sessions" not in src, (
         "the statistics frame must NOT be broken -- NaN rows would corrupt "
         "range_stats() and percentile_rank()"
@@ -219,10 +240,16 @@ def test_break_sessions_is_defined_once_where_the_loader_expects_it():
     """Guards the AST loader: if break_sessions moves again, fail here with a
     clear reason rather than mysteriously.
 
-    REPOINTED in M2 (ADR-032). It used to assert app.py defined the function;
-    the extraction moved it to core/charts.py and this test did its job by
-    failing. Asserting exactly one home also catches the worse case — a copy
-    left behind in app.py, where the dashboard would run one version and the
-    golden tests would measure the other.
+    REPOINTED TWICE, both times by failing first, which is the whole point of
+    it. In M2 (ADR-032) it asserted app.py; the extraction moved the function
+    to core/charts.py. In M6 it asserted core/charts.py; the function moved
+    again, to core/series.py, so the read-only API could use it without
+    importing plotly for the sake of two functions that build no chart.
+
+    THE GUARD IS "EXACTLY ONE HOME", NOT ANY PARTICULAR ADDRESS. `core/charts`
+    re-exports the name and that is fine — a re-export is not a definition.
+    What this catches is the worse case: a copy left behind at the old
+    address, where the dashboard would run one version and the golden tests
+    would measure the other.
     """
-    assert definition_sources("break_sessions") == ["core/charts.py"]
+    assert definition_sources("break_sessions") == ["core/series.py"]

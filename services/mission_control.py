@@ -34,16 +34,25 @@ beyond adding services/ to that loader's search path.
 """
 from __future__ import annotations
 
-import numpy as np
 import pandas as pd
 import streamlit as st
 
 import config
 import db
-from core.format import exp_label, fmt_duration, sparkline
-from core.ranking import card_key, rank_for_panel
-from core.scanner import APPROACHING_LOW, TSCAN_THRESHOLD, scan_all_offsets
 from api import computed
+
+# WHAT IS NO LONGER IMPORTED HERE, and why the list shrank rather than a name
+# being missed. Two milestones moved card-building bodies down into
+# api/computed.py — M6.3 took approaching_panel, DEBT-041 took the non-ATM
+# panel — and each left its collaborators imported by a module that had
+# stopped calling them. Cleared together, in the change that made the last two
+# of them dead: numpy, sparkline, rank_for_panel and APPROACHING_LOW were
+# already unreachable before this edit, exp_label and fmt_duration became so
+# in it, and leaving the older four would make the next reader unable to tell
+# which move abandoned what. Nothing imports any of them THROUGH this module —
+# app.py takes only _backfill_eligible_history and _run_mission_control.
+from core.ranking import card_key
+from core.scanner import TSCAN_THRESHOLD, scan_all_offsets
 from services.loaders import compute_transform_scanner
 from services.sidecars import (
     _ELIGIBLE_HISTORY_RETENTION_DAYS,
@@ -247,145 +256,32 @@ def _build_non_atm_panel(non_atm_current: pd.DataFrame, registry: dict,
                           dte_by_expiry: dict, window_start: str | None,
                           snapshot_ts: str, cap: int = _MC_HISTORY_CAP,
                           min_display: int = 6):
+    """The curated non-ATM panel. The body now lives in api/computed.py.
+
+    Moved down a layer on 2026-09-06 (DEBT-041) so the server can serve the
+    third card grid the other two already had. Nothing about the arithmetic,
+    the four-tier sort or the never-empty fallback changed.
+
+    THIS WRAPPER EARNS ITS KEEP TWICE, which is why it is not just deleted and
+    the call sites repointed:
+
+      * `config.DB_PATH`, exactly as `_candidate_signals` above — right for a
+        page with one database, wrong for a server handed whichever database
+        create_app was given.
+      * The TUPLE. The moved version returns a named payload, because it is
+        serialised to JSON where a positional triple has no field names.
+        Unpacking it here keeps `(cards, in_window_total, fallback_used)` for
+        the page — and, more to the point, for the twelve golden tests in
+        tests/test_mc_pipeline_golden.py, which call this name and unpack
+        three values. They now measure the moved body through this line, so
+        the move is covered by the tests written before it rather than by new
+        ones asserting the same things a second time.
     """
-    The curated "non-ATM opportunities" panel — built from the persisted
-    registry, NOT a slice of the Scanner. Includes any combo that is
-    currently >= threshold OR appears in the registry within the lookback
-    window (i.e. crossed >= 5 at some point recently, even if it isn't
-    right now).
-
-    Ranking — a transparent, inspectable multi-key sort, not a blended
-    score (same principle as rank_for_panel above):
-      Tier 1 — currently live (>= 5 right now) outranks historical-only;
-               an opportunity you can act on today beats a past one.
-      Tier 2 — rank_gap descending: current gap for live combos, peak gap
-               (max_gap ever observed) for historical-only ones.
-      Tier 3 — hit_count descending — directly answers "which strikes
-               repeatedly become transformable," not just "which spiked once."
-      Tier 4 — most recent crossing first, as the final tiebreak.
-
-    Never-empty guarantee: if fewer than min_display combos fall within the
-    selected lookback window, the remaining slots are filled with the most
-    recent registry entries regardless of window — flagged via
-    outside_lookback=True so the UI can make that explicit rather than
-    silently showing stale data as if it were in-range. Only true cold start
-    (an empty registry — nothing has ever crossed threshold, automated or
-    backfilled) can still produce an empty panel.
-
-    Returns (capped_cards, in_window_total, fallback_used_count).
-    """
-    # `window_start` arrives already resolved to the date of the Nth most
-    # recent SESSION ON RECORD — it is not computed here, and not derived from
-    # a day count. Subtracting a Timedelta made "20D" fifteen sessions on a
-    # Friday while the reader was told twenty (BUG-035); this panel and the
-    # charts beneath it carry one label, so they must mean one window.
-    #
-    # It is a parameter rather than a lookup because resolving it needs the
-    # database, and a panel that reads config.DB_PATH to decide its own window
-    # cannot be exercised without the real record beside it.
-    if window_start is not None and not isinstance(window_start, str):
-        # This argument used to be a day count, and pd.Timestamp accepts an
-        # int — as nanoseconds since 1970. A caller left on the old signature
-        # would therefore get a cutoff in 1970 and a panel that windowed
-        # nothing, silently and while looking entirely healthy.
-        raise TypeError(
-            f"window_start must be a date string, not {type(window_start).__name__}"
-        )
-    try:
-        cutoff = pd.Timestamp(window_start) if window_start else None
-    except ValueError:
-        cutoff = None
-
-    current_lookup: dict[str, dict] = {}
-    if not non_atm_current.empty:
-        for _, row in non_atm_current.iterrows():
-            front_raw = row["Front Expiry"].split(" ")[0]
-            back_raw  = row["Back Expiry"].split(" ")[0]
-            k = f"{front_raw}|{back_raw}|{int(row['Put Strike'])}|{int(row['Call Strike'])}"
-            current_lookup[k] = dict(
-                gap=float(row["Transform Diff"]), iv_ratio=row.get("IV Ratio"),
-            )
-
-    def _card_from_entry(key: str, entry: dict, last_seen_ts: pd.Timestamp,
-                          outside_lookback: bool) -> dict:
-        cur = current_lookup.get(key)
-        is_live  = cur is not None and cur["gap"] >= TSCAN_THRESHOLD
-        rank_gap = cur["gap"] if is_live else entry["max_gap"]
-        front_raw, back_raw = entry["front_raw"], entry["back_raw"]
-        # One table, checked and looked up. Before ADR-034 the guard read the
-        # parameter and _exp_label read a global of the same name.
-        front_label = (exp_label(front_raw, dte_by_expiry)
-                       if front_raw in dte_by_expiry else front_raw)
-        back_label  = (exp_label(back_raw, dte_by_expiry)
-                       if back_raw in dte_by_expiry else back_raw)
-        try:
-            ago_str = fmt_duration(pd.Timestamp(snapshot_ts) - last_seen_ts) + " ago"
-        except (ValueError, TypeError):
-            ago_str = "—"
-        return dict(
-            front_raw=front_raw, back_raw=back_raw,
-            front_label=front_label, back_label=back_label,
-            put_strike=entry["put_strike"], call_strike=entry["call_strike"],
-            iv_ratio=(cur["iv_ratio"] if cur else entry.get("iv_ratio")),
-            is_live=is_live,
-            current_gap=(cur["gap"] if cur else None),
-            max_gap=entry["max_gap"],
-            gap=rank_gap,
-            hit_count=entry["hit_count"],
-            last_seen=last_seen_ts,
-            last_seen_ago=ago_str,
-            outside_lookback=outside_lookback,
-        )
-
-    candidates, used_keys = [], set()
-    for key, entry in registry.items():
-        try:
-            last_seen_ts = pd.Timestamp(entry["last_seen"])
-        except (ValueError, TypeError, KeyError):
-            continue
-        if cutoff is not None and last_seen_ts < cutoff:
-            continue
-        candidates.append(_card_from_entry(key, entry, last_seen_ts, outside_lookback=False))
-        used_keys.add(key)
-
-    candidates.sort(key=lambda c: (
-        not c["is_live"], -c["gap"], -c["hit_count"], -c["last_seen"].timestamp()
-    ))
-    in_window_total = len(candidates)
-
-    # Never-empty fallback: pull in the most recent entries from OUTSIDE the
-    # selected window, clearly flagged, rather than show nothing.
-    fallback_used = 0
-    if len(candidates) < min_display:
-        fallback_raw = []
-        for key, entry in registry.items():
-            if key in used_keys:
-                continue
-            try:
-                last_seen_ts = pd.Timestamp(entry["last_seen"])
-            except (ValueError, TypeError, KeyError):
-                continue
-            fallback_raw.append((key, entry, last_seen_ts))
-        fallback_raw.sort(key=lambda t: t[2].timestamp(), reverse=True)
-
-        needed = max(cap - len(candidates), min_display - len(candidates))
-        for key, entry, last_seen_ts in fallback_raw[:needed]:
-            candidates.append(_card_from_entry(key, entry, last_seen_ts, outside_lookback=True))
-            fallback_used += 1
-
-    capped = candidates[:cap]
-
-    # Phase B (duration/spark/eta) only for the small final, capped set —
-    # _candidate_signals is independently cached so repeat calls are cheap.
-    for c in capped:
-        sig = _candidate_signals(c["front_raw"], c["back_raw"],
-                                  c["put_strike"], c["call_strike"]) or {}
-        c["duration"]    = sig.get("duration") if c["is_live"] else None
-        c["eta_minutes"] = sig.get("eta_minutes")
-        c["spark"]       = sig.get("spark", "─")
-        c["trend_up"]    = sig.get("trend_up", False)
-
-    return capped, in_window_total, fallback_used
+    panel = computed.non_atm_panel(
+        non_atm_current, registry, dte_by_expiry, window_start, snapshot_ts,
+        db_path=config.DB_PATH, cap=cap, min_display=min_display,
+    )
+    return panel["cards"], panel["in_window_total"], panel["fallback_used"]
 
 @st.cache_data(show_spinner=False, max_entries=8)
 def _build_non_atm_panel_cached(_non_atm_current: pd.DataFrame, _registry: dict,

@@ -405,12 +405,19 @@ def test_every_consumer_of_a_timestamped_read_converts_it_for_display():
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
 
         # Calls that are DIRECTLY wrapped: to_display_time(loader(...), tz)
+        #
+        # `merge_atm_pair` counts as a converter too, and that is an EARNED
+        # exemption, not a hole: it converts both series itself, and
+        # test_merge_atm_pair_converts_for_display below fails if it ever
+        # stops. Widening this set without that second test would have made
+        # the guard say "converted" where it only means "handed to something".
+        CONVERTERS = {"to_display_time", "merge_atm_pair", "merge_iv_pair"}
         wrapped = {
             id(arg)
             for n in ast.walk(tree)
             if isinstance(n, ast.Call)
-            and ((isinstance(n.func, ast.Name) and n.func.id == "to_display_time")
-                 or (isinstance(n.func, ast.Attribute) and n.func.attr == "to_display_time"))
+            and ((isinstance(n.func, ast.Name) and n.func.id in CONVERTERS)
+                 or (isinstance(n.func, ast.Attribute) and n.func.attr in CONVERTERS))
             for arg in n.args
         }
 
@@ -443,6 +450,59 @@ def test_every_consumer_of_a_timestamped_read_converts_it_for_display():
         "them reaches a chart its x-axis is silently hours out:\n  "
         + "\n  ".join(offenders)
     )
+
+
+def test_merge_atm_pair_converts_for_display():
+    """The other half of the guard above.
+
+    `merge_atm_pair` is accepted there as a converter, so this asserts it
+    really is one. Handed zoned UTC, it must return a naive local wall-clock:
+    13:30 UTC is 09:30 in New York, and the whole point of DEBT-030 is that
+    getting this wrong shifts every session break by hours while the chart
+    goes on looking entirely plausible.
+    """
+    import pandas as pd
+
+    from core.series import merge_atm_pair
+
+    ts = pd.to_datetime(["2026-09-04T13:30:00Z"])
+    front = pd.DataFrame({"timestamp": ts, "atm_iv": [20.0]})
+    back = pd.DataFrame({"timestamp": ts, "atm_iv": [10.0]})
+
+    out = merge_atm_pair(front, back, "America/New_York")
+
+    assert out["timestamp"].dt.tz is None, "a naive wall-clock is required"
+    assert out["timestamp"].iloc[0] == pd.Timestamp("2026-09-04 09:30:00")
+
+
+def test_merge_iv_pair_converts_for_display_with_the_breaks_off():
+    """The other half of the exemption above.
+
+    `views/historical.py` reads two timestamped frames and hands them
+    straight to `merge_iv_pair(..., insert_breaks=False)`, so the AST check
+    sees no converter at the call site. The panel takes a min, a max and a
+    percentile from the RESULT OF A MERGE ON THAT COLUMN -- if one side were
+    converted and the other were not, the join would find no shared
+    timestamps at all and every window would silently read "No data".
+
+    Proved by breaking: make `merge_iv_pair` skip `to_display_time` and this
+    fails.
+    """
+    import pandas as pd
+
+    from core.series import merge_iv_pair
+
+    ts = pd.to_datetime(["2026-09-04T13:30:00Z"])
+    front = pd.DataFrame({"timestamp": ts, "atm_iv": [20.0]})
+    back = pd.DataFrame({"timestamp": ts, "atm_iv": [10.0]})
+
+    out = merge_iv_pair(front, back, "America/New_York", insert_breaks=False)
+
+    assert out["timestamp"].dt.tz is None, "a naive wall-clock is required"
+    assert out["timestamp"].iloc[0] == pd.Timestamp("2026-09-04 09:30:00")
+    assert out["iv_ratio"].iloc[0] == 2.0
+    # The breaks really are off: one shared timestamp, one row.
+    assert len(out) == 1
 
 
 def test_the_extracted_tabs_are_dispatched_from_app():

@@ -529,3 +529,208 @@ def test_an_empty_or_wrong_shaped_frame_returns_the_empty_columns():
         out = gex.net_flow_by_strike(frame)
         assert out.empty
         assert list(out.columns) == ["strike", "open_gex", "now_gex", "flow"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# vGEX and the multi-expiry scope (2026-09-06)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_vgex_is_gex_with_volume_in_place_of_open_interest():
+    """Same formula, same scale, one column swapped.
+
+    The scale is the point of the check. A published vGEX definition reads
+    "gamma x volume x 100", and this deliberately uses OUR gex scale instead
+    (`x spot^2 x 1%`) so vGEX and GEX are the same kind of number and can be
+    read side by side -- which is the entire use of the measure.
+    """
+    chain = _chain([{"strike": 7700, "right": "C",
+                     "gamma": 0.002, "oi": 500, "vol": 1500}])
+    on_oi = gex.by_strike(chain, SPOT)
+    on_vol = gex.by_strike(chain, SPOT, weight="volume")
+
+    assert on_vol["call_gex"].iloc[0] == pytest.approx(
+        on_oi["call_gex"].iloc[0] * 3)          # 1500 traded against 500 open
+    assert on_vol["call_gex"].iloc[0] == pytest.approx(
+        0.002 * 1500 * 100 * (SPOT ** 2) * 0.01)
+
+
+def test_vgex_is_empty_before_the_open_and_that_is_the_honest_answer():
+    """No trades yet means no flow yet.
+
+    Volume is 0 across the chain premarket. The strikes must still APPEAR --
+    a strike with no volume genuinely has none, which is a zero, not a
+    missing value -- but every exposure on them is nil, and a vGEX panel that
+    looked identical to the GEX one at 09:29 would be the real fault.
+    """
+    chain = _chain([{"strike": 7700, "right": "C", "gamma": 0.002, "oi": 500},
+                    {"strike": 7700, "right": "P", "gamma": 0.003, "oi": 800}])
+    frame = gex.by_strike(chain, SPOT, weight="volume")
+
+    assert len(frame) == 1
+    assert frame["call_gex"].iloc[0] == 0.0
+    assert frame["put_gex"].iloc[0] == 0.0
+    assert gex.flow_ratio(frame) is None      # not 0.0 — see core.gex.flow_ratio
+
+
+def test_the_flow_ratio_is_a_share_and_not_the_summary_s_ratio():
+    """Two different numbers, both kept, because they answer different things.
+
+    `flow_ratio` is bounded in [0, 1]: what fraction of absolute net exposure
+    is positive. `summary()["ratio"]` is the larger side over the smaller and
+    is unbounded. Collapsing them into one field would mean mislabelling
+    whichever survived.
+    """
+    frame = pd.DataFrame({"strike": [7700.0, 7720.0],
+                          "net_gex": [30.0, -10.0],
+                          "call_gex": [30.0, 0.0], "put_gex": [0.0, 10.0],
+                          "abs_gex": [30.0, 10.0]})
+    assert gex.flow_ratio(frame) == pytest.approx(30 / 40)
+    assert gex.summary(frame)["ratio"] == pytest.approx(3.0)
+
+
+def test_a_single_expiry_and_a_list_of_one_mean_the_same_thing():
+    """A str IS a Sequence, so the isinstance check in `scope_to` is load-bearing.
+
+    Without it "2026-09-18" is read as a list of ten characters, matches no
+    expiry, and returns an EMPTY chain -- which draws as a thin day rather
+    than as an error.
+    """
+    chain = _chain([
+        {"strike": 7700, "right": "C", "expiry": "2026-09-18", "oi": 500},
+        {"strike": 7700, "right": "C", "expiry": "2026-09-25", "oi": 700},
+    ])
+    one = gex.by_strike(chain, SPOT, expiry="2026-09-18")
+    listed = gex.by_strike(chain, SPOT, expiry=["2026-09-18"])
+
+    assert not one.empty
+    assert one["call_gex"].iloc[0] == pytest.approx(listed["call_gex"].iloc[0])
+
+
+def test_several_expiries_add_and_an_empty_list_is_not_the_whole_board():
+    """Ticking two expiries asks for their COMBINED exposure.
+
+    And asking for none is answered with none: `None` is the one value that
+    means "every expiry". If an empty list fell back to the whole board, a
+    caller that had deselected everything would be shown the largest figure
+    on the tab under the impression it had narrowed the scope.
+    """
+    chain = _chain([
+        {"strike": 7700, "right": "C", "expiry": "2026-09-18", "oi": 500},
+        {"strike": 7700, "right": "C", "expiry": "2026-09-25", "oi": 700},
+    ])
+    both = gex.by_strike(chain, SPOT, expiry=["2026-09-18", "2026-09-25"])
+    whole = gex.by_strike(chain, SPOT)
+
+    assert both["call_gex"].iloc[0] == pytest.approx(whole["call_gex"].iloc[0])
+    assert gex.by_strike(chain, SPOT, expiry=[]).empty
+
+
+def test_the_expiry_board_totals_equal_the_sum_of_that_expiry_s_bars():
+    """One groupby must give the same answer as twenty filtered passes.
+
+    This is what makes the picker's figures worth reading: a number beside an
+    expiry is the same number the chart draws when you tick it. Two scales,
+    or a stray dealer sign on one side, and the board becomes decorative.
+    """
+    chain = _chain([
+        {"strike": 7700, "right": "C", "expiry": "2026-09-18", "gamma": 0.002, "oi": 500},
+        {"strike": 7720, "right": "P", "expiry": "2026-09-18", "gamma": 0.003, "oi": 400},
+        {"strike": 7700, "right": "C", "expiry": "2026-09-25", "gamma": 0.001, "oi": 900},
+    ])
+    board = gex.by_expiry(chain, SPOT).set_index("expiry")
+
+    for key in ("2026-09-18", "2026-09-25"):
+        bars = gex.by_strike(chain, SPOT, expiry=key)
+        assert board["call_gex"][key] == pytest.approx(bars["call_gex"].sum())
+        assert board["put_gex"][key] == pytest.approx(bars["put_gex"].sum())
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The session-range "wicks" (2026-09-06)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _session_frame(rows: list[dict]) -> pd.DataFrame:
+    """A frame shaped like load_intraday_strike_metrics' output.
+
+    Named apart from `_intraday` above rather than reusing it: that one builds
+    the columns the flow tests need, and quietly widening it would have made
+    every flow test depend on fields it does not care about.
+    """
+    return pd.DataFrame([
+        {"timestamp": pd.Timestamp(r["t"], tz="UTC"),
+         "strike": r["strike"],
+         "call_gamma_oi": r.get("cg", 0.0),
+         "put_gamma_oi": r.get("pg", 0.0),
+         "underlying_price": r.get("spot", SPOT)}
+        for r in rows
+    ])
+
+
+def test_a_wick_is_the_session_RANGE_and_not_the_change_since_the_open():
+    """The two are different numbers and the distinction is the whole feature.
+
+    A strike that opened at X, travelled a long way and came back to X has a
+    flow of ZERO and a wide wick. Reporting the change on a bar meant to show
+    the range would draw nothing at all for exactly the strike whose story is
+    most worth telling.
+    """
+    frame = _session_frame([
+        {"t": "2026-09-04 13:35", "strike": 7700, "cg": 100.0},
+        {"t": "2026-09-04 15:00", "strike": 7700, "cg": 400.0},
+        {"t": "2026-09-04 19:55", "strike": 7700, "cg": 100.0},
+    ])
+    out = gex.session_range_by_strike(frame)
+
+    scale = gex.dollar_scale(SPOT)
+    assert out["call_low"].iloc[0] == pytest.approx(100.0 * scale)
+    assert out["call_high"].iloc[0] == pytest.approx(400.0 * scale)
+    # The same session has no flow at all, which is the point.
+    assert gex.net_flow_by_strike(frame)["flow"].iloc[0] == pytest.approx(0.0)
+
+
+def test_the_expiries_at_one_strike_are_summed_before_the_range_is_taken():
+    """Otherwise the wick is ONE expiry's range wearing the strike's label.
+
+    The panel draws the strike's total, so the wick behind it has to be the
+    total's range. Taking min/max over the unaggregated rows gives the range
+    of whichever expiry happened to be smallest and largest.
+    """
+    frame = _session_frame([
+        # Two expiries at one strike, one snapshot: total is 30.
+        {"t": "2026-09-04 13:35", "strike": 7700, "cg": 10.0},
+        {"t": "2026-09-04 13:35", "strike": 7700, "cg": 20.0},
+        {"t": "2026-09-04 19:55", "strike": 7700, "cg": 25.0},
+        {"t": "2026-09-04 19:55", "strike": 7700, "cg": 25.0},
+    ])
+    out = gex.session_range_by_strike(frame)
+
+    scale = gex.dollar_scale(SPOT)
+    assert out["call_low"].iloc[0] == pytest.approx(30.0 * scale)
+    assert out["call_high"].iloc[0] == pytest.approx(50.0 * scale)
+
+
+def test_each_snapshot_is_scaled_by_its_own_spot_not_the_latest():
+    """`dollar_scale` is QUADRATIC in spot.
+
+    Scaling this morning's reading by this afternoon's price folds the index's
+    own move into the range, widening every wick on a trending day — a chart
+    that says positioning is in flux when all that moved was SPX.
+    """
+    frame = _session_frame([
+        {"t": "2026-09-04 13:35", "strike": 7700, "cg": 100.0, "spot": 7000.0},
+        {"t": "2026-09-04 19:55", "strike": 7700, "cg": 100.0, "spot": 7700.0},
+    ])
+    out = gex.session_range_by_strike(frame)
+
+    assert out["call_low"].iloc[0] == pytest.approx(100.0 * gex.dollar_scale(7000.0))
+    assert out["call_high"].iloc[0] == pytest.approx(100.0 * gex.dollar_scale(7700.0))
+    # If both had been scaled at 7,700 the low would equal the high.
+    assert out["call_low"].iloc[0] < out["call_high"].iloc[0]
+
+
+def test_an_empty_session_returns_the_columns_and_no_rows():
+    """Before the first snapshot of the day there is no range. Not a fault."""
+    out = gex.session_range_by_strike(None)
+    assert out.empty
+    assert list(out.columns) == ["strike", "call_low", "call_high",
+                                 "put_low", "put_high", "net_low", "net_high"]

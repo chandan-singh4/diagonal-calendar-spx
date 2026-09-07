@@ -533,3 +533,62 @@ def test_yesterday_is_never_qualified():
     label that changed would be describing the clock, not the data."""
     assert dealer.day_labels(True)["prior"] == dealer.day_labels(False)["prior"]
     assert dealer.day_labels(True)["prior"] == "Yesterday"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The legend under the positioning panel
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_every_verdict_the_code_can_produce_has_a_plain_english_line():
+    """THE LEGEND CANNOT SILENTLY FALL BEHIND THE CODE.
+
+    A verdict added to `classify` or overlaid by `positioning` renders as a
+    badge whatever happens; the only thing that would be missing is the line
+    explaining it, and no page would error to say so. This is the check that
+    notices — it derives the verdicts from the source rather than repeating
+    them, so a new one fails here rather than shipping unexplained.
+
+    The two wall verdicts are added by `positioning` AFTER `classify` has run,
+    which is why reading `classify` alone is not enough: a legend built only
+    from its branches would miss both.
+    """
+    produced = set()
+    for volume, delta in ((100.0, 40.0), (100.0, -40.0), (100.0, 5.0),
+                          (100.0, 20.0), (0.0, 0.0)):
+        produced.add(dealer.classify(volume, delta, high_volume=True)[0])
+    produced.update({"Call Wall Defense", "Put Wall Defense"})
+
+    explained = {v for v, _, _ in dealer.VERDICT_MEANINGS}
+
+    assert produced <= explained, (
+        f"no plain-English line for: {sorted(produced - explained)} — the "
+        f"badge would render with nothing under the panel explaining it"
+    )
+    assert explained <= produced | {"—"}, (
+        f"the legend explains verdicts nothing can produce: "
+        f"{sorted(explained - produced)}"
+    )
+
+
+def test_every_legend_tone_is_one_the_code_actually_assigns():
+    """A tone with no match is a badge drawn in a colour the table never uses,
+    which makes the legend point at nothing."""
+    assigned = {t for _, t in (
+        dealer.classify(v, d, high_volume=h)
+        for v, d, h in ((100.0, 40.0, True), (100.0, -40.0, True),
+                        (100.0, 5.0, True), (100.0, 20.0, True),
+                        (0.0, 0.0, False)))}
+    assigned.add("wall")
+
+    for verdict, tone, _ in dealer.VERDICT_MEANINGS:
+        assert tone in assigned, f"{verdict} is drawn in an unused tone: {tone}"
+
+
+def test_the_meanings_are_one_short_line_each():
+    """The panel is read at a glance during a session (Chandan, 2026-09-06:
+    "very plain language, but keep it also very concise"). A legend that needs
+    its own paragraph is one nobody reads."""
+    for verdict, _, meaning in dealer.VERDICT_MEANINGS:
+        assert meaning, f"{verdict} has no explanation"
+        assert len(meaning) <= 90, f"{verdict}'s line is too long: {meaning}"
+        assert "\n" not in meaning

@@ -2299,3 +2299,57 @@ million — and the history charts are bounded by a `-N days` clause against `at
 `option_rows`. Every `option_rows` reader in `db.py` was checked: each is filtered by `snapshot_id`
 or by a days window; there is no unbounded read. **Old data costs disk, not speed** — which is the
 distinction that decides whether `prune.py` is a performance tool (it is not) or a storage one.
+
+---
+
+**16. M6.4 — the Gamma Exposure tab answers to the clock and to every measure (2026-09-06/07).**
+Four changes Chandan asked for from his own screen, and none of them was a bug report.
+
+**The charts showed UTC where the market runs on New York time.** The net-volume and 0DTE
+net-gamma panels drew the session starting at 13:30. The cause is worth writing down because it
+defeats the obvious test: **Plotly reads the wall-clock part of an ISO stamp and ignores the
+offset**, so `13:30:00+00:00` draws at 13:30 whatever the offset says. A test asserting only the
+offset therefore passes against a *relabelled* frame — right offset, wrong hour — so the checks
+now pin the hour too. The conversion is server-side (DEBT-030): a browser formatting a timestamp
+formats it in the *viewer's* zone, which is a different answer in London.
+
+**Wicks on all six views, not just the two gamma ones.** `core/ranges.py` computes each strike's
+session high and low for gamma, vGEX, delta, vanna and charm by calling **the measure's own
+`by_strike` function once per snapshot** — not by re-deriving it. That is the whole design: the
+sign conventions differ per measure (vanna and charm impose the dealer long-calls/short-puts
+sign; delta deliberately does not, because a put's delta is already negative), and a second copy
+would agree for months and then not. Cross-checked against the existing gamma-only path over a
+full live session: agreement to 2e-16.
+
+**It needed a session-wide read, and the first version took 45 seconds.** Two faults, both
+measured rather than guessed: selecting the session as a join predicate defeats the index
+(BUG-039 again, 45s → 15.6s), and `SELECT o.*` costs 15.6s against 2.0s for thirteen named
+columns on 410,069 rows. **The second one was not previously documented anywhere** and is now
+recorded at the query. I also nearly optimised against a phantom: a 12.8s measurement turned out
+to be the full test suite running concurrently on the same machine. Re-measured idle: 3.0s.
+
+**The expiry countdowns were reading Friday's numbers on Sunday** — ADR-053. Re-based against the
+live clock, but only on the newest board; a replayed session keeps its own, or every filter
+window empties. Extended the next day to Calendar Edge's front/back dropdowns, through one shared
+helper so the two tabs cannot disagree about one contract. The narrowing rule underneath is
+untouched and pinned by a test: back expiries are still selected **by date**, never by countdown,
+so a display change cannot quietly alter which pairs are offered.
+
+**The filter buttons looked like they worked and did not.** "This Week" shortened the visible list
+and left the selection alone. It now selects every expiry in its window.
+
+**Six deliberate-break harnesses, 45 breaks, 44 caught.** The one survivor is documented rather
+than faked: pandas `groupby` already sorts by the group key, so removing the explicit
+`sort_values` after it is a genuine no-op no test can distinguish. Three earlier drafts of those
+tests were rewritten because a break survived them — most instructively, a test asserting only
+that the delta range's put side was negative, which is true of vanna too on that fixture, so
+routing delta through vanna passed it. **A test that cannot fail is worse than no test.**
+
+**Also, on screen:** the volume shade behind the bars was lightened — the first attempt left the
+call and put fills at identical luminance, separated by hue alone, which is exactly the pair a
+colour-blind reader cannot split; caught by measuring rather than by looking. The Gamma headline
+strip now spreads across the card instead of bunching left, Calendar Edge's Range control sits at
+the right-hand end of its row, and the gap between the mark chart and the SPX panel beneath it
+went from 0.08 to 0.14 of the figure.
+
+1,491 checks pass. Verified in the live browser after restarting the service, not only under test.

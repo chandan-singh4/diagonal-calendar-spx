@@ -1,12 +1,11 @@
 """Historical Statistics — ATM IV ratio range over four lookback windows."""
 from __future__ import annotations
 
-import pandas as pd
 import streamlit as st
 
 import config
 import iv_engine
-from core.charts import to_display_time
+from core.series import HISTORICAL_WINDOWS, merge_iv_pair
 from views.context import ViewContext
 
 
@@ -31,33 +30,30 @@ def render(ctx: ViewContext) -> None:
     )
 
     stat_cols = st.columns(4)
-    for col, (label, days) in zip(
-        stat_cols,
-        [("Today", 1), ("5 Days", 5), ("10 Days", 10), ("20 Days", 20)],
-    ):
-        # Converted even though this tab draws no time axis: the two frames
-        # are merged ON this column, and both sides must agree. Keeping it
-        # identical to what every other consumer sees is also what makes
-        # "nothing changed" true here rather than merely likely (DEBT-030).
-        pf = to_display_time(ctx.load_atm_hist_fb(ctx.front_expiry, days),
-                             config.DISPLAY_TIMEZONE)
-        pb = to_display_time(ctx.load_atm_hist_fb(ctx.back_expiry,  days),
-                             config.DISPLAY_TIMEZONE)
+    # The four windows are core.series', so this panel and the React one
+    # cannot end up offering different ones -- the drift the Scanner's
+    # lookback picker caused, avoided by naming the set once.
+    for col, (label, days) in zip(stat_cols, HISTORICAL_WINDOWS):
+        # The join is `merge_iv_pair` with the session breaks off: it converts
+        # both frames to display time before merging ON that column (DEBT-030,
+        # and both sides must agree), and this panel has no time axis for a
+        # gap row to gap.
+        pm = merge_iv_pair(
+            ctx.load_atm_hist_fb(ctx.front_expiry, days),
+            ctx.load_atm_hist_fb(ctx.back_expiry,  days),
+            config.DISPLAY_TIMEZONE,
+            names=("f", "b", "ratio"),
+            insert_breaks=False,
+        )
         with col:
             st.caption(label)
-            if not pf.empty and not pb.empty:
-                pm = pd.merge(
-                    pf[["timestamp", "atm_iv"]].rename(columns={"atm_iv": "f"}),
-                    pb[["timestamp", "atm_iv"]].rename(columns={"atm_iv": "b"}),
-                    on="timestamp",
-                )
-                pm["ratio"] = pm["f"] / pm["b"]
+            if not pm.empty:
                 rs       = iv_engine.range_stats(pm["ratio"], ctx.ts_now.ratio)
                 pct_rank = iv_engine.percentile_rank(pm["ratio"], ctx.ts_now.ratio)
-                _is_low  = pct_rank < 25
-                _is_high = pct_rank > 75
-                _ctx_color = "#10d4a3" if _is_high else ("#f05252" if _is_low else "#6d8fa8")
-                _ctx_label = "HIGH" if _is_high else ("LOW" if _is_low else "MID")
+                # Where a percentile stops being unremarkable is iv_engine's,
+                # for the same reason: it is a claim about when a reading is
+                # worth noticing, and two screens must not disagree about it.
+                _ctx_label, _ctx_color = iv_engine.percentile_band(pct_rank)
                 st.markdown(
                     f"""<div style="font-size:0.83em;line-height:1.6;">
   <span style="color:#2f4459;">Min</span> {rs.low:.4f}
