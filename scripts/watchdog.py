@@ -94,8 +94,34 @@ def check(now_utc: datetime | None = None) -> dict:  # noqa: PLR0911
         session, config.POLL_INTERVAL_EVENT, config.POLL_INTERVAL_NORMAL
     )
 
+    # ── The token expires on its own clock, not the market's (BUG-043) ───────
+    # READ BEFORE THE MARKET-CLOSED RETURN, and that order IS the fix.
+    #
+    # This check already existed, but it sat below that return, so it was
+    # unreachable whenever the market was shut. On 2026-09-06 the refresh token
+    # died at 23:24 on the Sunday of a three-day weekend; this watchdog reported
+    # "ok -- market closed, collector idle by design" straight through it and
+    # would have raised the alarm on Tuesday morning, after the opening grace,
+    # with prices already lost. The record is the product and a lost session
+    # cannot be bought back.
+    #
+    # A closed market is the BEST time to hear this, not the worst: it is the
+    # only time re-authenticating costs nothing. The check reads a file on disk
+    # and has no opinion about trading hours.
+    token_note = _token_note()
+    token_failing = token_note.startswith("WARNING")
+
     # ── The market is shut ───────────────────────────────────────────────────
     if interval is None:
+        if token_failing:
+            # informative=True, unlike the quiet return below: this IS news.
+            return _result(
+                "warn", "Market closed, but the Schwab token needs attention",
+                f"{now_et:%Y-%m-%d %H:%M} ET. No prices are due right now, so "
+                f"nothing has been lost yet.\n{token_note}\n"
+                "Doing it now costs nothing. Finding out at the next open costs "
+                "a session, and a session cannot be re-fetched at any price.",
+            )
         return _result("ok", "Market closed — collector idle by design",
                        f"{now_et:%Y-%m-%d %H:%M} ET. Nothing is expected right now.",
                        informative=False)
@@ -132,8 +158,6 @@ def check(now_utc: datetime | None = None) -> dict:  # noqa: PLR0911
     ).replace(tzinfo=UTC)
     age = (now_utc - snap_dt).total_seconds()
     limit = interval * config.WATCHDOG_LATE_MULTIPLE
-
-    token_note = _token_note()
 
     # A price newer than "now" is impossible, so something is lying about the
     # time — a wrong system clock, or a timestamp written in the wrong zone.

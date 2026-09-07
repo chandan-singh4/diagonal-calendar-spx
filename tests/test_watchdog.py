@@ -77,6 +77,29 @@ def test_the_test_database_is_not_the_production_one(wd_db):
 # Cry-wolf case 1 — the market is shut
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Captured before any fixture replaces it. `wd_db` stubs `_token_note` out
+# entirely -- correctly, for the tests that are not about the token -- so the
+# BUG-043 tests have to put the real one back to have anything to check.
+_REAL_TOKEN_NOTE = watchdog._token_note
+
+
+@pytest.fixture
+def token_age(monkeypatch):
+    """Drive the REAL token note from a pinned age, overriding `wd_db`'s stub.
+
+    Patching `get_token_age_days` rather than `_token_note` is deliberate: the
+    thing under test is that a dead token produces a note beginning "WARNING"
+    AND that `check` acts on it. Stubbing the note itself would assert only the
+    second half, and would still pass if the wording that `startswith` depends
+    on ever changed.
+    """
+    def _set(days: float | None):
+        monkeypatch.setattr(watchdog.schwab_client, "get_token_age_days",
+                            lambda: days)
+        monkeypatch.setattr(watchdog, "_token_note", _REAL_TOKEN_NOTE)
+    return _set
+
+
 @pytest.mark.parametrize("when,label", [(SATURDAY, "weekend"), (OVERNIGHT, "overnight")])
 def test_a_shut_market_is_never_an_alarm(wd_db, when, label):
     """The collector is idle BY DESIGN out of hours. If this fails, the
@@ -85,6 +108,64 @@ def test_a_shut_market_is_never_an_alarm(wd_db, when, label):
     result = watchdog.check(when)
     assert result["ok"], label
     assert "closed" in result["headline"].lower()
+
+
+# ── BUG-043: the token expires on its own clock, not the market's ───────────
+
+def test_an_expired_token_is_reported_even_though_the_market_is_shut(wd_db, token_age):
+    """THE WHOLE OF BUG-043, and it is an ordering bug, not a missing check.
+
+    The token check existed -- below the market-closed return, where a shut
+    market made it unreachable. On 2026-09-06 the refresh token died at 23:24
+    on the Sunday of a three-day weekend and this watchdog said "ok -- market
+    closed, collector idle by design" straight through it. The alarm would have
+    arrived Tuesday morning after the opening grace, with prices already gone.
+
+    A closed market is the BEST time to be told: it is the only time
+    re-authenticating is free.
+    """
+    token_age(8.0)                                    # 7-day life, one day dead
+    _snapshot_at(wd_db, SATURDAY - timedelta(days=3))
+    result = watchdog.check(SATURDAY)
+
+    assert result["severity"] == "warn", "a dead token read as healthy"
+    assert not result["ok"]
+    assert "token" in result["headline"].lower()
+    assert result["informative"], (
+        "an uninformative result is swallowed by should_alert -- this must "
+        "actually reach Chandan, not just be computed")
+
+
+def test_a_token_about_to_expire_is_reported_over_the_weekend_too(wd_db, token_age):
+    """The Friday-evening case, which is the one that saves a session: six and
+    a half days old, still alive, and it will be dead by Monday's open."""
+    token_age(6.5)
+    _snapshot_at(wd_db, SATURDAY - timedelta(days=3))
+    assert watchdog.check(SATURDAY)["severity"] == "warn"
+
+
+def test_a_healthy_token_leaves_a_shut_market_quiet(wd_db, token_age):
+    """The other half, and the reason this cannot just always warn.
+
+    Out of hours with nothing wrong the check must stay UNINFORMATIVE -- not
+    merely "ok". `_result` documents why: an informative ok flips a previous
+    alarm into a RECOVERED email announcing prices are arriving again when the
+    market has simply closed."""
+    token_age(1.0)
+    _snapshot_at(wd_db, SATURDAY - timedelta(days=3))
+    result = watchdog.check(SATURDAY)
+
+    assert result["severity"] == "ok"
+    assert not result["informative"], "a quiet weekend became news"
+
+
+def test_an_unreadable_token_does_not_break_the_watchdog(wd_db, token_age):
+    """`_token_note` promises never to raise: a watchdog that dies checking a
+    secondary thing has failed at its primary job. Now that the call happens
+    earlier, that promise guards more."""
+    token_age(None)                                   # age unknown
+    _snapshot_at(wd_db, SATURDAY - timedelta(days=3))
+    assert watchdog.check(SATURDAY)["severity"] == "ok"
 
 
 def test_a_holiday_is_treated_as_shut(wd_db, monkeypatch):

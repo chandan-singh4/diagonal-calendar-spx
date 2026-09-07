@@ -5,6 +5,133 @@ what broke, and what remains.
 
 ----
 
+## 2026-09-07 (session 17) — the collector spent ten weeks deleting the number zero
+
+**Chandan found it from a chart, not from an alarm.** He asked why the Calendar Edge marks for a
+0DTE pair stopped at 15:05 when the market shuts at 16:00, and noted the x-axis was moving with
+the data instead of standing still. Both observations were right and they had the same cause.
+
+**1. BUG-041 — `_safe_float` treated 0.0 as "no value".** `collector.py` applied it to `bid`,
+`ask`, `last` and all four greeks. A 0DTE option the market has abandoned is quoted **0.00 x
+0.05**; that zero bid is the most informative number of the afternoon, because it says the
+contract you sold is dead. It was erased, `mark` became null, and the chart went blank.
+
+**The measurement that settled it took one query and had never been run.** Across 18.9M option
+rows: **zero exact 0.0 values in `bid`, `ask`, `mark`, `last`, `delta` or `gamma`** — while
+`volume`, `open_interest` and `intrinsic_value`, which never pass through that function, hold
+7.3M, 2.4M and 9.6M of them. A chain always quotes something at zero. Finding none was the
+filter, not the market. Corroborating: **191,855 null bids against 91 null asks**, a 2,000-fold
+gap that no broker outage produces.
+
+**The gamma half cost more than the marks.** `core/gex.py` drops rows whose gamma is null, and
+its docstring argues the case correctly — *"absent gamma is unknown, absent open interest is
+known to be nothing"*. The rule is right. **The premise was false**: a null gamma here was a
+known zero wearing an unknown's costume, so `by_strike` dropped precisely the strikes it wrote
+its own rule to protect. On snapshot 6303, **68 of the 0DTE expiry's 160 strikes vanished, taking
+186,432 contracts of open interest with them** — 28 dropped at 4DTE, 12 at 6DTE, **none from
+10DTE on**. That gradient is gamma genuinely decaying to zero near expiry, and it is what proves
+the nulls are measurements rather than outages. **`gex.py` was not changed. It starts working the
+moment it is fed the truth.**
+
+**BUG-030's fix was correct and incomplete.** `schwab_client.py` already had `_value_or_none`,
+which keeps zeros, and already used it for the five greeks — with a comment saying bid/ask/last
+are "left alone". They were, there. Then the collector re-sanitised all seven fields with its own
+stricter copy, which silently won. **Two layers each sanitising independently is not
+defence-in-depth; the stricter one just overrides the other.**
+
+**The note that talked the project out of fixing this was a test.** `test_zero_becomes_none`
+described the information loss accurately and then editorialised that it was *"harmless for the
+near-the-money strikes this strategy trades"*. It was not harmless, and the query that would have
+disproved it was never run. That docstring is rewritten to say so.
+
+**IV keeps the old rule**, via a new `_iv_or_none`: an option with zero implied volatility is not
+calm, it is unpriced. A test pins this, and it fails if the fix is over-applied — checked.
+
+**2. The x-axis was hiding the evidence.** The new screen let Plotly autorange, so the axis ended
+where the data ended and a missing hour read as a short trading day. The old screen already
+pinned 09:30-16:15 but as **two string literals inline**. Both now call
+`core.series.session_axis_range`, served to React as `session_axis_range` — a single session gets
+the whole session, several days return null and keep the fullest-series anchor. Applied to all
+three Calendar Edge time charts.
+
+**3. `scripts/audit.py` was resurrected four times by STATUS.md, not by anything real.**
+Chandan pointed out it had been flagged repeatedly after being closed. Tracing it: `83133b2`
+closed BUG-030 and its backlog row was properly deleted, but that commit ends *"Proof proper is
+the 09:30 audit tomorrow"* — and **no `progress_log.md` entry ever recorded the audit running**.
+`f770392`'s wrap then rewrote STATUS from the surviving evidence and re-raised it as open. **A
+closure with no entry here is indistinguishable from an open item to the next wrap**, which is now
+a written rule in STATUS. The item is closed and not to be re-raised. It was not re-run: Chandan
+asked that it not be, and re-proving a closed fault is what caused the loop.
+
+**4. Not repaired: the 191,855 existing rows.** They cannot now be told apart from genuine
+absences. Repair means writing inferred values into the one irreplaceable file, on an inference,
+and that is held until a live afternoon logs the raw payload. **Nothing about the fix requires the
+repair** — new data is correct from the next session.
+
+**5. Chandan asked for a proper check of the Calendar Edge page rather than more pointing, and
+it found two more.** He was also right that the IV charts were unfixed -- they were wired, but the
+fix returned None for any multi-day window, so on his 5D view it did nothing.
+
+**`session_axis_range` now covers every window, not just one session.** The first version reasoned
+that several days should anchor to the fullest series available. That was wrong for the same
+reason the original bug was: anchored to a SERIES, each session still ends where that series ends,
+so every day's missing tail stayed invisible -- the single-day defect repeated five times. It also
+made the axis MOVE depending on which query returned more rows, so two charts of the same window
+could disagree about where 09:30 sits. `views/edge.py` drops its fuller-series anchor for the
+clock.
+
+**BUG-042 -- the closing print was inside the collapsed evening.** `SESSION_RANGEBREAKS` began
+collapsing the axis at **16:00**. ADR-049 moved collection to **16:02** precisely because the 15:59
+reading is not the close -- that discovery is what proved 51 days of closing prices wrong by 2.39
+points. Those 16:00-16:02 readings then fell inside the rangebreak and **were drawn nowhere**. The
+break was written on 2026-07-07 and never revisited when ADR-049 landed. Bound moved to 16.25,
+which is `MARKET_AXIS_END_TIME`, so a session's axis now ends exactly where its break begins --
+the old 16:15 endpoint was decorative, being itself inside the break. **Nothing failed and nothing
+logged**: collected, stored, silently not shown. Needs visual confirmation after the restart;
+the arithmetic is certain, the render is not yet seen.
+
+**DEBT-031 on this page: five literal copies of the threshold, not the four recorded.** Shading
+test, badge, caption, progress-bar denominator, ETA target. All agreed, because the constant is
+5.0 today -- the fault only appears when it moves, and then one screen shades one number while the
+badge above it names another. A source-scanning guard now fails if a literal returns. `views/entry.py`
+still has its copy and was left alone: it was not the page under review.
+
+**6. Restarting all three services surfaced a dead Schwab token, and then a hole in the watchdog.**
+The collector logged `SCHWAB TOKEN EXPIRED 0.4 days ago` on startup. The refresh token was created
+2026-08-30 23:24 with Schwab's 7-day life and died **2026-09-06 23:24 -- Sunday evening of a
+three-day weekend**, with Tuesday the next session. Chandan reauthenticated; valid to 14 September.
+**The restart did not cause this, it revealed it a day and a half early**, on the only kind of day
+when reauth costs nothing.
+
+**BUG-043, and it was an ordering bug, not a missing check.** `scripts/watchdog.py` already checked
+the token -- below the market-closed early return, so a shut market made it unreachable. It
+reported `ok -- Market closed, collector idle by design` all weekend and would have alarmed on
+Tuesday morning after the opening grace, with prices already gone. **Its own docstring cites the
+2026-08-09 token expiry as the reason it exists**; it had the check, behind a door the weekend
+closed. The token reads a file on disk and has no opinion about trading hours, so it moved above
+the return. A healthy token still returns `informative=False`, which matters: an informative "ok"
+out of hours flips a prior alarm into a RECOVERED email claiming prices are arriving again.
+
+**The test that nearly could not fail.** `wd_db` stubs `_token_note` wholesale -- correctly, so a
+real token expiring on a Tuesday cannot redden unrelated tests -- which silently swallowed the
+first version of these checks. They now restore the real function and drive it from a pinned age,
+so the "WARNING" wording `startswith` depends on is covered too. Both proven against the old
+ordering; the two quiet-weekend checks still pass under the break, so they are not merely
+always-warn.
+
+**Also fixed by the restart, unasked:** the dashboard had been listening on `0.0.0.0:8501` -- the
+whole Wi-Fi -- because the `.streamlit/config.toml` binding that closed OPS-006 was written on
+2026-09-05 at 13:20 and the process had started at 11:20 that morning. **A config fix is not
+applied until the thing restarts**, which is the same lesson as the collector's, in a different
+place.
+
+**Six checks added, all proven by breaking the code**, and one break attempt was itself found to
+be vacuous: `-k session_axis` matched no test names and reported "18 deselected" as though it had
+passed. **A filter that selects nothing looks exactly like a filter that finds nothing wrong.**
+1,491 to 1,505 across the session.
+
+----
+
 ## 2026-09-03 (session 14) — three items closed by reading, the closing price was never recorded, and an audit that found a bug on its first run
 
 **The session's task list was the four items session 13 left behind. Three of them turned out

@@ -1,7 +1,7 @@
 # PROJECT STATUS
 
 **Updated:** 2026-09-07 · **Branch:** `m6-gamma-live-clock`, merged to `main` and saved online.
-**State:** **1,491 checks pass. Everything is committed.** Stage 5 done; stage 6 running. The new
+**State:** **1,505 checks pass. Everything is committed.** Stage 5 done; stage 6 running. The new
 screen was checked in a real browser against the live record after the changes below.
 > Self-contained: read this file alone to start a session. Replaced entirely by `/wrap`.
 
@@ -15,7 +15,7 @@ timing**, and brokers throw away today's prices — **so the historical record I
 
 | Part | What it does |
 |---|---|
-| **Collector** | Background program. Every 1–5 min while markets are open, records all option prices. Starts with Windows. **Running.** |
+| **Collector** | Background program. Every 1–5 min while markets are open, records all option prices. Starts with Windows. **Running** — restarted 2026-09-07 10:05 onto the BUG-041 fix. |
 | **Database** | One file, 6,387 snapshots and 19.3M option rows since 23 June. Newest: 2026-09-04 16:01 New York — 7 Sep is Labor Day, so no new data is expected today. Irreplaceable: the broker won't sell you last Tuesday's prices. |
 | **Old dashboard** | Web page, 6 tabs. Reads only. **Running on port 8501.** Still the live one. |
 | **Data service** | A separate program serving the same record to anything that asks. **Running on port 8899.** No auto-restart: restart it by hand after any change to it. |
@@ -60,14 +60,24 @@ cannot fail is worse than none.**
    hole**: six figures it needs are computed inside the old screen's startup code, served nowhere.
 2. **The lower half of the Gamma Exposure tab is still unbuilt** — the time panels, the 0DTE flow
    board, dealer structure, net flow and the replay.
-3. **Two questions wait on Chandan.** Whether the Calendar Edge gap chart matches the old one side
-   by side; and **whether the new screen should lock entries** — that means letting the data
-   service *write*, and **must not be added without his word**.
-4. **`scripts/audit.py` has still not been run on a live morning** since BUG-030 — carried since
-   2026-09-03 and still the only real proof that fault is closed.
+3. **One question waits on Chandan.** He has approved the new screen **logging entries** — the data
+   service may write. **What it may write is not yet settled**: the entry lock alone, or full
+   journal rows with fills and prices. Those are different amounts of trust and the second touches
+   `trades`. Nothing is built until that is answered. (Calendar Edge was compared and approved.)
+4. **Restart the data service, then look at Calendar Edge** — `api/reads.py` changed and it does
+   not reload itself. Check on both Today and 5D: every session runs to 16:15, the 16:00-16:02
+   closing readings are now drawn, and a session that lost its afternoon shows blank space rather
+   than a short day. **The old screen changed too** (`views/edge.py`), so give 8501 a rerun.
+5. **`views/entry.py` still holds `_THRESHOLD = 5.0`** — its own docstring admits it. Calendar Edge
+   is clean and guarded now; Entry Analysis is the remaining copy (DEBT-031).
 
 ## Open problems
 
+**BUG-041 remnant (high, needs Chandan's word)** — the collector no longer eats zeros, but
+**191,855 stored bids and 977,220 gammas are null where the broker sent 0.0**, and nothing can now
+tell those apart from a genuine absence. Repair means writing inferred values into the
+irreplaceable file. **Do not, until a live afternoon logs the raw payload and proves the broker
+sends 0.** Until then the Gamma tab under-counts pre-2026-09-07 0DTE sessions by ~42% of strikes.
 **BUG-001 (high, blocked on Chandan)** — old unexplained report; needs a symptom and screenshot.
 **BUG-023 (high)** — only the morning third-Friday option is shown; the afternoon one is recorded
 but never displayed. **DEBT-029 (high)** — two features of the old screen's library are past their
@@ -77,6 +87,9 @@ copies disagreeing at exactly 5.00. **DEBT-036** — `pinned_pairs.json` is dead
 
 ## Settled decisions
 
+- **The Schwab token dies 7 days after an interactive login, and nothing can automate it.**
+  Reauthenticated 2026-09-07 10:26, so **it expires Monday 14 September**. The watchdog now says so
+  while the market is shut (BUG-043) — a closed market is the only time reauth is free.
 - **The rebuild is not for speed** — the old screen's own cost is 0.04 seconds a click. It stays
   live until the last tab moves, so a stall leaves a working screen (`docs/m6_migration_plan.md`).
 - **No formula may exist in the new language.** Rounding rules, key formats, thresholds and date
@@ -87,7 +100,17 @@ copies disagreeing at exactly 5.00. **DEBT-036** — `pinned_pairs.json` is dead
   and the morning one is over at the opening print at 9:30 New York (ADR-048).
 - **Collection runs 09:30–16:02** (ADR-049); **old prices cleared 90 days past expiry, summaries
   kept forever** (ADR-044); **history windows count sessions on record** (BUG-035), in New York time.
+- **Zero is a measurement, not an absence** (BUG-041) — everywhere except implied volatility,
+  where a reported 0.0 means the broker could not price it.
+- **Charts are drawn on whole sessions, not on the extent of their data**
+  (`core.series.session_axis_range`, every window including multi-day). An axis that stops where
+  the data stops hides the hole; anchoring to a series also moves the axis depending on which
+  query returned more rows.
+- **The evening rangebreak starts at 16:15, not 16:00** (BUG-042) — collection runs to 16:02
+  (ADR-049) and the old bound collapsed the closing print onto nothing. Two checks pin it.
 - **Closing a problem means deleting its row. Never re-record a failing check to make it pass.**
+  **A closure with no entry in `progress_log.md` will be resurrected by the next `/wrap`** — that
+  is how the audit.py item came back four times after being closed and proven.
 
 ## How to work here
 
