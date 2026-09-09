@@ -67,8 +67,6 @@ auto-restart **hangs** (BUG-045), serving old code while fixes appeared to do no
 
 ## Open problems
 
-**Telegram bot key needs replacing (blocked on Chandan)** — I exposed it in a transcript.
-`/revoke` via BotFather, new key into `.env`. Not in the saved history, so this is a precaution.
 **BUG-045 (P1)** — auto-restart hangs, and killing it leaves orphans holding the port; **run
 WITHOUT `--reload`.** **DEBT-044 (P1)** — nothing notices when the briefing daemon dies.
 **BUG-041r (P1)** — old stored zeros are unrecoverable and repair means writing a guess into the
