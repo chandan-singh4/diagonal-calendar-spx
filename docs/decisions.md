@@ -7,6 +7,96 @@ it was recorded here.
 
 ---
 
+## ADR-058 — The tutor is handed computed figures and judges none of them
+
+**Date:** 2026-09-09 · **Status:** Accepted · **Decided by:** Chandan
+
+**Context.** Chandan asked for a chat on the dashboard that "would have ability to read the
+screen", to learn the Greeks and second-order Greeks. It exists: an Ask button, a panel on the
+right, `core/tutor.py` (the rules) + `api/tutor.py` (the route) + `web/src/tutor/`.
+
+**It cannot see the screen, and that is the design, not a shortfall.** No vision model, no
+screenshot. It is handed the **same assembled ladder the Telegram briefing gets** —
+`core.briefing.assemble` over `api.computed`, the code the charts already run. So the chat, the
+charts and the briefing cannot disagree about one snapshot, because there is one computation.
+**Say this plainly when asked** — Chandan asked directly ("Can I read figures? ... I doubt it can
+read images") and the honest answer is no, it reads numbers, and it is more reliable for it.
+
+**Four constraints, each earned.**
+- **Computed, not judged.** The pin candidate, the walls and the pin verdict are decided in
+  Python before the model sees them. A model allowed to pick a level will then defend it.
+- **Levels yes, sizes no.** A strike or price is actionable, so print it. A magnitude (billions,
+  contract counts, ratios) becomes a word — heavy, thin, evenly matched — because the reader has
+  no yardstick for whether forty billion is a lot. **One exception:** a size asked for by name at
+  a named strike, which is why `core.briefing.strike_rows` exists.
+- **Blank, not zero.** An em dash marks the unmeasurable. Told "0", a model invents a reason for
+  the zero.
+- **The figures are reprinted on every turn**, never sent once. The snapshot moves underneath
+  the chat as the collector writes; an implementation that sent them once would keep sounding
+  authoritative while describing a market that had gone.
+
+**Two faults found and fixed the same day, both instructive.** Asked "what is the delta at
+7,500", it could not say: the ladder carried only totals and peaks, so it could name 7,500 as the
+peak strike and not read its row. **A model cannot look up what it was not given** — added
+`strike_rows`. And three different questions drew three near-identical answers, because the
+effort instruction literally said *"Walk the whole ladder"*: **the repetition was authored, not
+emergent.** Verbosity blamed on a model is usually a prompt.
+
+**`integrations/` exists because of this work** — `llm.py` and `telegram.py` moved out of
+`services/`, which is the Streamlit page's data layer and is sunsetting. Outbound third-party
+calls are not a page's concern; the layering test pins it.
+
+**Effort is a real API parameter, not a wording trick.** Corrected by Chandan, who was right and
+I was wrong: OpenRouter takes `reasoning: {effort}`, Gemini and Groq take `reasoning_effort`.
+**Accepted values differ per MODEL, not per provider**, and a 400 marks a model dead for the run
+— so an unsupported value silently deletes working models from the fallback chain. Hence the
+retry-without-effort in `integrations/llm.py`.
+
+---
+
+## ADR-057 — A push channel is not delivered until something is listening
+
+**Date:** 2026-09-09 · **Status:** Accepted · **Closes:** ENH-002 (properly, this time)
+
+**Context.** Chandan: *"the dashboard doesn't automatically refresh when the data comes... it's
+been two minutes since the data has been refreshed. I mean, the data is being collected. I can
+see in the terminal, but the dashboard has just not fetched it."*
+
+**ENH-002 was marked DONE on 2026-09-05 and was half-built.** `api/watch.py` was real and
+correct — one poller per server watching `max(snapshot_id)`, fanning out over `/ws/snapshot`,
+tested, and verified live again today (it pushed snapshot 6574 within a minute of connecting).
+**Nothing in `web/` ever connected to it.** The server had been broadcasting into an empty room
+for four days. A second, independent fault sat behind it: the Vite dev proxy had no `ws: true`,
+so even a client that existed could not have upgraded. Two faults, each alone sufficient to
+produce the reported symptom, which is why neither was noticed.
+
+**Why nobody saw it, and this is the part worth keeping.** The screen looked alive. `useHeader`
+carries its own `refetchInterval: 60_000` because its job is to report whether the record is
+still being written to. Every OTHER query runs on `SHARED = { staleTime: 30_000 }`. **`staleTime`
+does not refetch.** It marks an answer out of date; React Query then refetches when something
+*triggers* it — a mount, a window focus, a reconnect. A dashboard being WATCHED rather than
+CLICKED fires none of those. So the one component that was genuinely live was the one reporting
+that everything beside it was stale, and the screen contradicted itself for four days.
+
+**Decision.** `web/src/api/push.ts` holds the socket open for the life of the app and invalidates
+every market-data query on an `event: "snapshot"` message. `ws: true` on the proxy. Four
+constraints, each with a failure it prevents: only `snapshot` refetches and not the `current`
+message sent on connect (otherwise every reconnect triggers a full-board refetch, so a flaky link
+causes a refetch storm attributable to the reconnect rather than to any data); reconnects back
+off 1s→30s (the usual reason the socket is unreachable is the API restarting); a 90s fallback
+poll runs ONLY while the socket is down, so a disconnected screen degrades to slow rather than
+silently frozen; and the model roster is excluded, being a capability list on a 15-minute cache
+that a new snapshot does not invalidate.
+
+**The rule this leaves.** **A channel is not delivered until something listens on it.** A server
+feature whose only consumer is its own test suite is a feature with no user, and marking it DONE
+is what stopped anyone looking. Note the second-order damage: the row was struck through and
+labelled DONE rather than deleted, against ADR-017 — and a struck-through row reads as finished
+to every later reader. **Where a feature spans two processes, the acceptance test crosses the
+boundary or the feature is not accepted.**
+
+---
+
 ## ADR-056 — The gamma flip is a re-priced level, not a running total
 
 **Date:** 2026-09-07 · **Status:** Accepted · **Decided by:** Chandan ("C is the real answer

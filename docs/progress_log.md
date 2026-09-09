@@ -5,6 +5,64 @@ what broke, and what remains.
 
 ----
 
+## 2026-09-09 (session 18) — a tutor that reads figures, and two channels that were never plugged in
+
+**The headline finding: two features were believed finished and neither was reaching Chandan.**
+Both were reported by him, not caught by us, and both had been silently broken for days.
+
+**The dashboard was not refreshing itself** — ADR-057. The push channel (`/ws/snapshot`, ENH-002,
+marked DONE on 2026-09-05) was real, correct and **had no client**. Nothing in `web/` ever
+connected; the server had been broadcasting into an empty room. Behind that sat a second,
+independent fault — the Vite proxy had no `ws: true`, so even a client could not have upgraded.
+**The screen contradicted itself and nobody read it that way:** `useHeader` polls on its own
+timer, so the strip reported data was two minutes old while every chart beside it still drew the
+snapshot from when the tab was opened. The reason is worth remembering — **`staleTime` does not
+refetch.** It marks an answer stale; React Query refetches on a *trigger* (mount, focus,
+reconnect), and a screen being watched rather than clicked fires none. Fixed with
+`web/src/api/push.ts`; verified live, 34 requests across the whole board in 75 seconds, driven by
+the collector rather than by a clock.
+
+**No Telegram briefings had gone out all day**, and the cause was not the code: the daemon was
+not running. **Eleven slots missed, 09:45 to 15:15, with nothing anywhere reporting it** —
+DEBT-044. Started it; the 15:30 briefing posted cleanly. It does not backfill, which is correct:
+a late slot would sit in the scoring log as though read on time and corrupt the grading.
+
+**Built this session: the Ask tutor** — ADR-058. Chat panel on the dashboard, on FastAPI (Chandan
+corrected an early Streamlit version: *"Streamlit is about to sunset"*), with model selection,
+reasoning effort, and a microphone. It reads **computed figures, not the screen** — the same
+`core.briefing.assemble` the charts and the briefing use, so the three cannot disagree about a
+snapshot. Asked directly whether it can read images, the honest answer is no, and it is more
+reliable for it. `integrations/` split out of `services/` (outbound calls are not a page's
+concern), pinned by the layering test.
+
+**Two of my own faults, both instructive.** Asked "what is the delta at 7,500" it could not
+answer — the ladder carried totals and peaks only, so it could *name* 7,500 as the peak strike
+and not read its row. **A model cannot look up what it was not given**; added
+`core.briefing.strike_rows`. And Chandan reported three questions drawing three near-identical
+answers: **the effort instruction I wrote literally said "Walk the whole ladder."** The
+repetition was authored, not emergent. Verbosity blamed on a model is usually a prompt.
+
+**And one wrong assertion, corrected by Chandan.** I claimed free models have no reasoning-effort
+dial. They do, it is a real API parameter, and he was right. Values differ **per model, not per
+provider**, and a 400 marks a model dead for the run — so an unsupported value silently deletes
+working models from the fallback chain, hence the retry-without-effort in `integrations/llm.py`.
+
+**A long false trail worth recording: `uvicorn --reload` hangs on this project** (BUG-045). It
+logged `Reloading...` and never restarted, so the server kept serving pre-edit code and a fix
+that scored 3/3 in-process scored 0/3 over HTTP. I spent a stretch treating that as model
+variance. **The 3-vs-0 split is what broke it open — identical code, different process.** Killing
+the reloader then left orphaned children holding port 8899. `GET /mission/models` now returns
+`prompt_fingerprint` so this is one call to diagnose, not an afternoon.
+
+**Also:** briefings rewritten for plain language at Chandan's request (*"I don't wanna read
+numbers... Simple. Bullish, bearish"*) — levels printed, sizes turned into words;
+`briefing_forecasts.jsonl` trimmed to the newest entry per slot. **I duplicated log entries by
+running the replay twice and said so** rather than quietly trimming it.
+
+1,728 checks pass; the new screen typechecks and lints clean.
+
+----
+
 ## 2026-09-07 (session 17k) — the flip stops being a line
 
 Chandan: *"Please remove gamma flip from the chart under gamma exposure."*
