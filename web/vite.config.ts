@@ -18,6 +18,18 @@ export default defineConfig({
       '/api': {
         target: 'http://127.0.0.1:8899',
         changeOrigin: true,
+        // WEBSOCKETS TOO, for /api/ws/snapshot. Without this the proxy
+        // forwards ordinary requests and silently refuses the upgrade, so the
+        // push channel the API has always published simply never connects and
+        // the dashboard falls back to refetching only when something happens
+        // to trigger it — which, on a screen being watched rather than
+        // clicked, is never (BUG, 2026-09-09).
+        //
+        // No token is attached on this path and none is needed: auth is an
+        // `@app.middleware("http")` in api/app.py, which websockets do not
+        // pass through. If that ever becomes a websocket-aware dependency,
+        // this needs a `proxyReqWs` handler to match the one below.
+        ws: true,
         rewrite: (path) => path.replace(/^\/api/, ''),
         configure: (proxy) => {
           const token = process.env.SPX_API_TOKEN
