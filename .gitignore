@@ -20,6 +20,17 @@ data/token.json
 # A dated suffix is exactly what a re-auth backup looks like.
 *token*
 
+# ── Recorded output of the briefing daemon ───────────────────────────────────
+# The forecast log is a RUNTIME RECORD, not source: the daemon appends to it
+# about fifteen times a trading day, and `scripts/score_briefings.py` reads it
+# back to grade what the model predicted. Committing it would put a churning
+# data file in every diff and would mean a pull could silently overwrite the
+# only copy of a day's forecasts. Same posture as the database above — `data/`
+# holds a `.gitkeep` and nothing else, and this keeps it that way.
+data/*.jsonl
+# Backups taken before a trim or a rewrite. Never wanted in the history.
+*.pre-trim
+
 # ── Databases (irreplaceable market data; backed up out-of-tree) ─────────────
 *.db
 *.db-wal

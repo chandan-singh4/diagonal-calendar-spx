@@ -13,15 +13,30 @@
 import { useEffect, useState } from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
+import { useSnapshotPush } from './api/push'
 import { EdgeTab } from './edge/EdgeTab'
 import { GammaTab } from './gamma/GammaTab'
 import { type EdgeSelection, parseRoute, routeHash } from './nav'
 import { ScannerTab } from './scanner/ScannerTab'
 import { HeaderBar } from './shell/HeaderBar'
 import { StrikeTab } from './strike/StrikeTab'
+import { AskButton, AskPanel } from './tutor/AskPanel'
 import './theme.css'
 
 const queryClient = new QueryClient()
+
+/**
+ * Holds the push connection open for the life of the app.
+ *
+ * A COMPONENT RATHER THAN A HOOK CALL IN `App`, for one reason: the hook
+ * needs the query client, which is only available BELOW the provider, and
+ * `App` is what renders the provider. Rendering nothing is the point — it
+ * exists to run an effect, not to draw.
+ */
+function LiveData() {
+  useSnapshotPush()
+  return null
+}
 
 const TABS = [
   { id: 'scanner', label: 'Scanner', ready: true },
@@ -76,6 +91,10 @@ function routeFromHash() {
 
 export default function App() {
   const [route, setRoute] = useState(routeFromHash)
+  // NOT IN THE HASH. The panel is a lens on whatever tab is open, not a
+  // place you can be; putting it in the address would make a shared link
+  // reopen someone else's half-finished conversation.
+  const [asking, setAsking] = useState(false)
   const active = route.tab
 
   function select(id: string) {
@@ -122,6 +141,7 @@ export default function App() {
 
   return (
     <QueryClientProvider client={queryClient}>
+      <LiveData />
       <HeaderBar />
       <TabStrip active={active} onSelect={select} />
       {active === 'gex' ? (
@@ -137,6 +157,8 @@ export default function App() {
       ) : (
         <ScannerTab onOpenEdge={openEdge} />
       )}
+      <AskButton onClick={() => setAsking(true)} />
+      <AskPanel open={asking} onClose={() => setAsking(false)} />
     </QueryClientProvider>
   )
 }

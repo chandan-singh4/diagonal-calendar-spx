@@ -22,7 +22,7 @@ from fastapi.responses import JSONResponse
 import config
 import db
 import schema
-from api import auth, locks, reads, watch
+from api import auth, locks, reads, tutor, watch
 from api.cache import SnapshotCache
 
 # The wire format for every timestamp this API emits. Stored timestamps are
@@ -174,6 +174,7 @@ def create_app(db_path: str | None = None,
     # state directory this server was pointed at -- a router that reached for
     # config.STATE_DIR itself would write the real locks during a test.
     app.include_router(locks.build_router(ctx))
+    app.include_router(tutor.build_router(ctx))
     app.include_router(watch.build_router(watcher))
     app.state.watcher = watcher
     app.state.cache = cache

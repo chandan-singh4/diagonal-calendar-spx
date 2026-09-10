@@ -592,3 +592,159 @@ def test_the_meanings_are_one_short_line_each():
         assert meaning, f"{verdict} has no explanation"
         assert len(meaning) <= 90, f"{verdict}'s line is too long: {meaning}"
         assert "\n" not in meaning
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Gamma bubbles (2026-09-08) — the same grid, a different question
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _gamma_chain(rows: list[dict]) -> pd.DataFrame:
+    """A chain frame carrying the columns the gamma view needs.
+
+    Separate from `_chain` rather than an extension of it: that fixture backs
+    the volume tests, and quietly giving every one of them a gamma column
+    would mean a regression in the volume path could be masked by a default
+    nobody chose.
+    """
+    return pd.DataFrame([
+        {"expiry": r.get("expiry", "2026-09-04"),
+         "dte": r.get("dte", 0),
+         "strike": r["strike"],
+         "right": r["right"],
+         "gamma": r.get("gamma", 0.001),
+         "open_interest": r.get("oi", 1000),
+         "volume": r.get("volume", 100),
+         "mark": r.get("mark", 2.0)}
+        for r in rows
+    ])
+
+
+def test_gamma_bubbles_use_the_same_scale_as_the_strike_panel():
+    """THE WHOLE POINT OF THE CONSISTENCY. A figure read off this chart and
+    the same figure read off core.gex.by_strike must be one number — two
+    scalings of "gamma exposure" in one tab teaches a reader to trust
+    neither."""
+    from core import gex
+
+    chain = _gamma_chain([
+        {"strike": 7700, "right": "C", "gamma": 0.0012, "oi": 5000},
+        {"strike": 7700, "right": "P", "gamma": 0.0009, "oi": 3000},
+    ])
+    bubbles = dealer.gamma_bubble_points(chain, SPOT)
+    reference = gex.by_strike(chain, SPOT)
+
+    assert bubbles["net_gex"].sum() == pytest.approx(
+        reference["net_gex"].sum())
+    assert bubbles["abs_gex"].sum() == pytest.approx(
+        reference["abs_gex"].sum())
+
+
+def test_calls_read_long_gamma_and_puts_read_short():
+    """The colour of every bubble hangs on this sign, and getting it backwards
+    would invert the chart's meaning while leaving it looking correct."""
+    calls = dealer.gamma_bubble_points(_gamma_chain([
+        {"strike": 7700, "right": "C"}]), SPOT)
+    puts = dealer.gamma_bubble_points(_gamma_chain([
+        {"strike": 7700, "right": "P"}]), SPOT)
+
+    assert calls.iloc[0]["flow"] == "long"
+    assert calls.iloc[0]["net_gex"] > 0
+    assert puts.iloc[0]["flow"] == "short"
+    assert puts.iloc[0]["net_gex"] < 0
+
+
+def test_a_cancelling_strike_draws_small_but_still_reports_its_size():
+    """THE ONE CASE THE GEOMETRY CANNOT SHOW. Equal call and put gamma nets to
+    nothing and is drawn at the minimum radius, which is right — it pushes
+    nowhere. But an enormous balanced position is not the same as an empty
+    strike, and `abs_gex` is what stops the hover saying it is."""
+    points = dealer.gamma_bubble_points(_gamma_chain([
+        {"strike": 7700, "right": "C", "gamma": 0.001, "oi": 10_000},
+        {"strike": 7700, "right": "P", "gamma": 0.001, "oi": 10_000},
+    ]), SPOT)
+
+    row = points.iloc[0]
+    assert row["net_gex"] == pytest.approx(0.0)
+    assert row["flow"] == "flat"
+    assert row["radius"] == dealer.MIN_RADIUS
+    assert row["abs_gex"] > 0          # the position is still there
+    assert row["abs_net_gex"] == pytest.approx(0.0)
+
+
+def test_rows_without_gamma_are_dropped_not_zeroed():
+    """Matching core.gex.by_strike: absent gamma is UNKNOWN and contributes
+    nothing computable. Treating it as zero would put a strike on the axis
+    claiming no exposure, which is a measurement we do not have."""
+    points = dealer.gamma_bubble_points(_gamma_chain([
+        {"strike": 7700, "right": "C", "gamma": None},
+        {"strike": 7705, "right": "C", "gamma": 0.001},
+    ]), SPOT)
+    assert points["strike"].tolist() == [7705.0]
+
+
+def test_the_volume_weight_ignores_open_interest_entirely():
+    """vGEX is the gamma TODAY added. A strike with a large installed position
+    and no trading is exactly what it must not show."""
+    chain = _gamma_chain([
+        {"strike": 7700, "right": "C", "oi": 50_000, "volume": 0},
+        {"strike": 7705, "right": "C", "oi": 0, "volume": 800},
+    ])
+    installed = dealer.gamma_bubble_points(chain, SPOT, weight="open_interest")
+    traded = dealer.gamma_bubble_points(chain, SPOT, weight="volume")
+
+    assert installed["strike"].tolist() == [7700.0]
+    assert traded["strike"].tolist() == [7705.0]
+
+
+def test_gamma_bubbles_drop_strikes_outside_the_band():
+    points = dealer.gamma_bubble_points(_gamma_chain([
+        {"strike": 7700, "right": "C"},
+        {"strike": 5000, "right": "C"},
+    ]), SPOT)
+    assert points["strike"].tolist() == [7700.0]
+
+
+def test_an_unknown_weight_raises_rather_than_guessing():
+    with pytest.raises(ValueError, match="open_interest"):
+        dealer.gamma_bubble_points(_gamma_chain([
+            {"strike": 7700, "right": "C"}]), SPOT, weight="notional")
+
+
+def test_gamma_bubbles_return_columns_even_when_empty():
+    """Every consumer relies on the shape; an empty board must not make a
+    caller branch on whether it got columns at all."""
+    points = dealer.gamma_bubble_points(pd.DataFrame(), SPOT)
+    assert list(points.columns) == list(dealer.GAMMA_BUBBLE_COLUMNS)
+    assert points.empty
+
+
+def test_the_trim_ranks_gamma_on_exposure_not_on_volume():
+    """RANKING GAMMA BY VOLUME WOULD DROP THE POINT THE CHART IS FOR. A strike
+    can carry the board's largest dealer position and trade almost nothing
+    today — that is the ordinary case for a far-dated expiry."""
+    chain = _gamma_chain([
+        # Huge installed position, barely traded today.
+        {"strike": 7700, "right": "C", "oi": 90_000, "volume": 1},
+        # Busy today, trivial position.
+        {"strike": 7705, "right": "C", "oi": 10, "volume": 90_000},
+    ])
+    points = dealer.gamma_bubble_points(chain, SPOT)
+    kept = dealer.most_traded(points, per_expiry=1, by="abs_net_gex")
+    assert kept["strike"].tolist() == [7700.0]
+
+
+def test_most_traded_rejects_a_ranking_column_it_does_not_have():
+    """Silently falling back to some other column would trim the wrong points
+    and look like a data problem rather than a call-site one."""
+    points = dealer.gamma_bubble_points(_gamma_chain([
+        {"strike": 7700, "right": "C"}]), SPOT)
+    with pytest.raises(KeyError, match="total_volume"):
+        dealer.most_traded(points)
+
+
+def test_the_two_bubble_views_do_not_share_a_vocabulary():
+    """A strike is routinely call-dominated AND short gamma. If the buckets
+    overlapped, one chart's green could be read as the other's."""
+    volume_words = {"call", "put", "balanced"}
+    gamma_words = {"long", "short", "flat"}
+    assert volume_words.isdisjoint(gamma_words)

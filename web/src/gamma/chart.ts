@@ -197,3 +197,40 @@ export function wickTrace(
 export function reading(v: number): string {
   return Math.round(v).toLocaleString()
 }
+
+/**
+ * The fixed 09:30–16:00 band for a session chart's date axis.
+ *
+ * WHY PIN IT AT ALL. Autorange fits the axis to the data that has arrived, so
+ * at 09:41 the whole width of the panel is eleven minutes and every line looks
+ * like a decisive move. The same chart at 15:55 draws those eleven minutes as
+ * a sliver. Nothing about the market changed between the two readings — only
+ * how much of the day had been collected — and a shape that depends on the
+ * clock rather than the data is a shape that cannot be compared with itself an
+ * hour later, or with a screenshot of yesterday. Fixing the band makes the
+ * morning's slope mean the same thing all day, and leaves the empty right-hand
+ * side saying the honest thing: the session is not finished.
+ *
+ * DERIVED FROM THE DATA, NOT FROM THE BROWSER'S CLOCK — the same rule, and the
+ * same reason, as `core.expiry.default_scope` and the `market_open` label on
+ * /dealer/positioning. The session date AND the UTC offset are both read back
+ * out of a timestamp the server already sent, so a reader in London gets the
+ * New York session rather than their own afternoon, and the change from EDT to
+ * EST in November needs no edit here. Constructing `Date` objects and asking
+ * the browser for an offset is precisely the bug this avoids.
+ *
+ * Returns undefined when there is no row to read, and the caller then leaves
+ * the axis autoranged — an empty panel has no session to pin to, and guessing
+ * one would draw a full day's axis over no data at all.
+ */
+export function sessionRange(stamp: string | undefined):
+    [string, string] | undefined {
+  if (!stamp) return undefined
+  // The offset is whatever trails the seconds, taken verbatim: '-04:00' in
+  // summer, '-05:00' in winter, and '' or 'Z' if the server's format ever
+  // changes. Passing the SAME suffix the data carries means the range and the
+  // points go through one parser and cannot land in different frames.
+  const m = /^(\d{4}-\d{2}-\d{2})T\d{2}:\d{2}:\d{2}(?:\.\d+)?(.*)$/.exec(stamp)
+  if (!m) return undefined
+  return [`${m[1]}T09:30:00${m[2]}`, `${m[1]}T16:00:00${m[2]}`]
+}

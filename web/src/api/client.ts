@@ -10,10 +10,14 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 import type {
+  AskRequest,
+  AskResponse,
+  TutorModelsResponse,
   AtmPairResponse,
   CardsResponse,
   ControlsResponse,
   EdgeHeadline,
+  BubbleMeasure,
   BubbleResponse,
   GammaResponse,
   GexTimelineResponse,
@@ -277,10 +281,21 @@ export function useGexTimeline(expiries: string[], count?: number,
  * scoped to one it is a single column. It is keyed on the snapshot alone,
  * which is also why it needs no filter state threaded through the tab.
  */
-export function useDealerBubbles(trim = true) {
+/**
+ * The bubble grid, in one of three measures.
+ *
+ * THE MEASURE IS IN THE QUERY KEY as well as the URL. React Query caches on
+ * the key alone, so without it the first view fetched would be handed back
+ * for all three and the toggle would change the legend while leaving the
+ * points where they were -- a chart that is wrong in a way that looks
+ * deliberate.
+ */
+export function useDealerBubbles(measure: BubbleMeasure = 'volume',
+                                 trim = true) {
   return useQuery({
-    queryKey: ['dealer-bubbles', trim],
-    queryFn: () => get<BubbleResponse>(`/dealer/bubbles?trim=${trim}`),
+    queryKey: ['dealer-bubbles', measure, trim],
+    queryFn: () => get<BubbleResponse>(
+      `/dealer/bubbles?trim=${trim}&measure=${measure}`),
     ...SHARED,
   })
 }
@@ -569,5 +584,36 @@ export function useClearLock() {
       return send<{ key: string; cleared: boolean }>(`/locks?${query}`, 'DELETE')
     },
     onSuccess: () => { void queries.invalidateQueries({ queryKey: ['locks'] }) },
+  })
+}
+
+/** Ask a question about the snapshot on screen.
+ *
+ *  A MUTATION AND NOT A QUERY, deliberately. react-query caches queries by
+ *  key and refetches them; an answer is neither cacheable nor refetchable —
+ *  asking the same question twice is a second question, and a background
+ *  refetch would silently spend the free tier. Nothing is invalidated on
+ *  success either, because nothing on the server changed: the tutor reads.
+ *
+ *  A 503 here is the ordinary failure, not a broken server — it means every
+ *  free provider was busy at once. The panel says so and offers a retry. */
+export function useAsk() {
+  return useMutation({
+    mutationFn: (body: AskRequest) => send<AskResponse>('/mission/ask', 'POST', body),
+    retry: false,
+  })
+}
+
+/** The models on the free rosters right now, in fallback order.
+ *
+ *  A QUERY AND NOT A CONSTANT. The free tiers churn weekly: a list baked into
+ *  this bundle would offer names that 404 a fortnight after the build. The
+ *  server caches the three roster fetches, so opening the picker repeatedly
+ *  costs nothing. */
+export function useTutorModels() {
+  return useQuery({
+    queryKey: ['tutor-models'],
+    queryFn: () => get<TutorModelsResponse>('/mission/models'),
+    staleTime: 15 * 60 * 1000,
   })
 }

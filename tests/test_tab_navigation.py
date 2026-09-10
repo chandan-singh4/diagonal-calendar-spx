@@ -98,5 +98,8 @@ def test_every_tab_in_the_table_is_dispatched(source):
     from another is a tab that cannot be reached or cannot be left."""
     keys = re.findall(r'^\s*\("(\w+)",\s+"', source, re.MULTILINE)
 
-    assert len(keys) == 6, f"expected the six tabs, found {keys}"
+    # BUMPED DELIBERATELY WHEN A TAB IS ADDED — 7 since the Ask tab landed
+    # (2026-09-08). The literal is the tripwire: a tab that appears in the
+    # table without anyone touching this line was not added on purpose.
+    assert len(keys) == 7, f"expected the seven tabs, found {keys}"
     assert len(set(keys)) == len(keys), "duplicate tab key"

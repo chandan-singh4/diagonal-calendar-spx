@@ -102,6 +102,7 @@ from views import historical as view_historical
 from views import research as view_research
 from views import scanner as view_scanner
 from views import strike as view_strike
+from views import tutor as view_tutor
 from views.context import ViewContext
 
 logger = logging.getLogger(__name__)
@@ -334,6 +335,7 @@ _TABS = [
     ("strike",   "🎯  Strike Detail",    _strike_with_history),
     ("gex",      "🧲  Gamma Exposure",   view_gex.render),
     ("research", "🔬  Research",         view_research.render),
+    ("tutor",    "🎓  Ask",               view_tutor.render),
 ]
 
 if "active_tab" not in st.session_state:

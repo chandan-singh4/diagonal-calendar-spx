@@ -31,6 +31,7 @@ DATAACCESS_DIR = ROOT / "dataaccess"
 STATE_DIR = ROOT / "state"
 VIEWS_DIR = ROOT / "views"
 SERVICES_DIR = ROOT / "services"
+INTEGRATIONS_DIR = ROOT / "integrations"
 UI_DIR = ROOT / "ui"
 API_DIR = ROOT / "api"
 
@@ -127,6 +128,23 @@ FORBIDDEN_UI = {
 # degrades rather than raising, so the server would answer correctly while
 # re-querying SQLite on every single request. That is the same invisible failure
 # the views/ rule guards against, one layer over.
+# integrations/ talks to things outside the machine — the model providers and
+# Telegram — and reads its credentials from the environment. It knows nothing
+# about this project, which is the whole reason it can sit under both the
+# Streamlit page and the FastAPI server at once. The moment it imports config
+# or db it stops being callable from either without dragging one into the
+# other, and it silently becomes a second services/.
+FORBIDDEN_INTEGRATIONS = {
+    "config":         "app settings. integrations/ reads the ENVIRONMENT, never this project's config",
+    "db":             "the database. These talk outward, not downward",
+    "sqlite3":        "the database, one layer down",
+    "streamlit":      "the page. This layer is called by the server too",
+    "views":          "a tab",
+    "services":       "the page's data layer",
+    "api":            "the server. Nothing outbound should depend on how it is served",
+    "core":           "calculation. An integration carries text; it does not compute",
+}
+
 FORBIDDEN_API = {
     "streamlit":      "the page. api/ serves data; a server with a browser session is not a server",
     "services":       "the page's data layer — every module in it imports streamlit",
@@ -144,6 +162,7 @@ LAYERS = [
     pytest.param(SERVICES_DIR, FORBIDDEN_SERVICES, id="services"),
     pytest.param(UI_DIR, FORBIDDEN_UI, id="ui"),
     pytest.param(API_DIR, FORBIDDEN_API, id="api"),
+    pytest.param(INTEGRATIONS_DIR, FORBIDDEN_INTEGRATIONS, id="integrations"),
 ]
 
 
