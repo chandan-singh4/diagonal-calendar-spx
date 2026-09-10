@@ -93,6 +93,22 @@ BUBBLE_COLUMNS = ("expiry", "expiry_label", "expiry_order", "strike",
                   "call_volume", "put_volume", "total_volume", "pcr",
                   "notional", "flow", "radius")
 
+# The gamma bubble chart's own shape. It shares expiry/strike/flow/radius with
+# BUBBLE_COLUMNS so the browser draws one chart either way, and differs in
+# everything the point MEANS.
+#
+# `abs_net_gex` rides alongside `net_gex` rather than being derived in the
+# browser: it is what the radius is drawn from AND what the trim ranks on, and
+# a second copy of `abs()` in TypeScript is a second place for the two to stop
+# agreeing.
+#
+# `abs_gex` is NOT the same quantity and both are carried on purpose — see
+# gamma_bubble_points for the strike where they disagree and why that matters.
+GAMMA_BUBBLE_COLUMNS = ("expiry", "expiry_label", "expiry_order", "strike",
+                        "call_gex", "put_gex", "net_gex", "abs_net_gex",
+                        "abs_gex", "call_oi", "put_oi", "call_volume",
+                        "put_volume", "flow", "radius")
+
 # `total_volume` is TODAY's trading, shown for context. `settled_volume` is
 # the PRIOR session's, and it is the one every verdict is computed against —
 # see positioning() for why they are not interchangeable.
@@ -137,6 +153,41 @@ def expiry_label(expiry: str, dte: int) -> str:
     return f"{day:%a} {day.day} {day:%b}"
 
 
+def gamma_bucket(net_gex) -> str:
+    """Which way the dealer hedging at this point pushes.
+
+    THREE WORDS THAT ARE NOT THE VOLUME PANEL'S THREE, deliberately. The
+    volume chart's buckets name a SIDE of the market (calls, puts, both); these
+    name a BEHAVIOUR (dampening, amplifying), and the two are unrelated — a
+    strike can be call-dominated and short gamma at once. Sharing the
+    vocabulary, or the palette's meaning, would invite reading one chart's
+    green as the other's.
+
+      long  — dealers are long gamma here. Hedging LEANS AGAINST the move:
+              they sell into strength and buy weakness, which is what pins
+              price to a strike.
+      short — dealers are short gamma. Hedging goes WITH the move and
+              accelerates it. This is the side that produces fast trends.
+      flat  — no net exposure worth calling either way. Not "unknown": a
+              strike where calls and puts genuinely cancel is a real and
+              readable state, and it is why `abs_gex` is carried too.
+
+    Exactly zero is `flat`, and so is a missing value — but they arrive here
+    differently and only the missing one is a gap in the data. Nothing
+    downstream distinguishes them because nothing downstream should draw a
+    zero point differently from an unknown one on THIS chart: both get the
+    minimum radius and the neutral colour, which says "nothing to see here"
+    for either reason.
+    """
+    if net_gex is None or pd.isna(net_gex):
+        return "flat"
+    if net_gex > 0:
+        return "long"
+    if net_gex < 0:
+        return "short"
+    return "flat"
+
+
 def flow_bucket(pcr) -> str:
     """Which side the volume at this point leaned, by put/call ratio."""
     if pcr is None or pd.isna(pcr):
@@ -175,8 +226,9 @@ def radius(volume: float, largest: float, *, scale: str = "sqrt",
 
 def most_traded(points: pd.DataFrame, *,
                 per_expiry: int = TOP_STRIKES_PER_EXPIRY,
-                max_expiries: int = MAX_EXPIRIES) -> pd.DataFrame:
-    """The busiest `per_expiry` strikes of the nearest `max_expiries`.
+                max_expiries: int = MAX_EXPIRIES,
+                by: str = "total_volume") -> pd.DataFrame:
+    """The largest `per_expiry` strikes of the nearest `max_expiries`.
 
     Expiries are kept by PROXIMITY (expiry_order, which is days to expiry),
     not by volume: the chart's subject is the term structure, and dropping a
@@ -187,13 +239,24 @@ def most_traded(points: pd.DataFrame, *,
     Radii are NOT recomputed. They are relative to the busiest point on the
     board, and rescaling to the survivors would make an expiry look busier
     simply because its neighbours were dropped.
+
+    `by` NAMES THE COLUMN THAT DECIDES WHICH STRIKES SURVIVE, because this
+    trim now serves two charts. The volume panel ranks on `total_volume`; the
+    gamma panel ranks on `abs_net_gex`, the same quantity its radius is drawn
+    from. Ranking gamma bubbles by volume would drop the strike carrying the
+    most dealer exposure whenever it happened to trade quietly today —
+    which is exactly the strike the gamma view exists to show.
     """
     if points is None or points.empty:
         return points
+    if by not in points.columns:
+        raise KeyError(
+            f"most_traded cannot rank on {by!r}: the frame has "
+            f"{list(points.columns)}")
     keep = (points[["expiry_label", "expiry_order"]].drop_duplicates()
             .nsmallest(max_expiries, "expiry_order")["expiry_label"])
     trimmed = (points[points["expiry_label"].isin(set(keep))]
-               .sort_values("total_volume", ascending=False))
+               .sort_values(by, ascending=False))
     # rank-then-filter, NOT groupby.apply: apply consumes expiry_label as the
     # grouping key and hands back a frame without it, which the caller needs
     # to draw the columns.
@@ -269,6 +332,129 @@ def bubble_points(chain_df: pd.DataFrame, spot: float, *,
 
     return grouped.sort_values(["expiry_order", "strike"], ignore_index=True)[
         list(BUBBLE_COLUMNS)]
+
+
+def gamma_bubble_points(chain_df: pd.DataFrame, spot: float, *,
+                        weight: str = "open_interest",
+                        band_percent: float = BAND_PERCENT,
+                        scale: str = "sqrt",
+                        min_radius: float = MIN_RADIUS,
+                        max_radius: float = MAX_RADIUS) -> pd.DataFrame:
+    """Gamma exposure per (expiry, strike), shaped for the bubble chart.
+
+    THE SAME PICTURE AS `bubble_points`, ASKING A DIFFERENT QUESTION.
+    That one shows where trading WENT today. This one shows where dealer
+    gamma SITS across the term structure — the structure that decides whether
+    a move gets damped or amplified, which is a property of positions built up
+    over weeks rather than of this morning's flow. Chandan asked for both under
+    one toggle (2026-09-08) precisely so the two can be compared at a glance.
+
+    THE SCALE IS `core.gex`'s, NOT A SECOND ONE. `gamma * weight *
+    SHARES_PER_CONTRACT * spot^2 * ONE_PERCENT`, identical to
+    `gex.by_strike`, so a number read off this chart and the same number read
+    off the strike panel are the same number. Two scalings of "gamma exposure"
+    in one tab is how a reader comes to distrust both. The constants are
+    imported rather than restated for the same reason.
+
+    `weight` SELECTS WHICH GAMMA, and both are real answers:
+      open_interest — GEX, the installed structure. Meaningful at 09:30.
+      volume        — vGEX, gamma the session ADDED. Empty at the open and
+                      filling through the day; a flat panel at 09:31 is
+                      correct, not broken.
+
+    RADIUS COMES FROM |net gex|, AND COLOUR FROM ITS SIGN, so the two say one
+    thing together: a big red bubble is a lot of amplifying exposure. The
+    alternative — sizing by `abs_gex`, the total regardless of side — would
+    draw its largest bubble where calls and puts CANCEL, which is the point
+    with the least directional consequence on the chart.
+
+    BOTH ARE CARRIED ANYWAY, and the difference between them is the reason.
+    A strike holding 10B of call gamma and 10B of put gamma has abs_gex 20B
+    and net_gex 0: an enormous installed position that pushes nowhere. It
+    draws as a small grey point here — correctly, because the chart's subject
+    is direction — and the hover can still report the 20B so the reader is not
+    told that nothing is there. Dropping `abs_gex` would make those two
+    strikes indistinguishable.
+
+    ROWS MISSING GAMMA ARE DROPPED, matching `gex.by_strike`: absent gamma is
+    unknown and contributes nothing computable, while absent open interest is
+    known to be nothing and stays as a zero.
+
+    Strikes outside the band are dropped rather than clamped, for the same
+    reason as `bubble_points` — height on this chart is a price, and a clamped
+    point sits at a price that carries no such exposure.
+    """
+    # Imported here rather than at module scope: core/gex.py is the owner of
+    # this arithmetic and importing it at the top would make two modules that
+    # already share a caller import each other's namespaces at load time.
+    from core import gex as _gex  # noqa: PLC0415
+
+    needed = {"expiry", "strike", "right", "gamma"}
+    if chain_df is None or chain_df.empty or not needed.issubset(chain_df.columns):
+        return _blank(GAMMA_BUBBLE_COLUMNS)
+    if weight not in ("open_interest", "volume"):
+        raise ValueError(
+            f"gamma_bubble_points weight must be 'open_interest' or "
+            f"'volume', not {weight!r}")
+
+    band = spot * band_percent / 100.0
+    work = chain_df[(chain_df["strike"] >= spot - band)
+                    & (chain_df["strike"] <= spot + band)].copy()
+    work = work[work["gamma"].notna()]
+    if work.empty:
+        return _blank(GAMMA_BUBBLE_COLUMNS)
+
+    for col in ("open_interest", "volume"):
+        work[col] = (pd.to_numeric(work.get(col), errors="coerce").fillna(0.0)
+                     if col in work.columns else 0.0)
+
+    dollar = _gex.SHARES_PER_CONTRACT * (spot ** 2) * _gex.ONE_PERCENT
+    work["gex"] = work["gamma"] * work[weight] * dollar
+    work["sign"] = work["right"].map(_gex.DEALER_SIGN).fillna(0)
+
+    is_call = work["right"] == "C"
+    is_put = work["right"] == "P"
+
+    grouped = pd.DataFrame({
+        "expiry": work["expiry"],
+        "strike": work["strike"],
+        "call_gex": work["gex"].where(is_call, 0.0),
+        "put_gex": work["gex"].where(is_put, 0.0),
+        "net_gex": work["gex"] * work["sign"],
+        "call_oi": work["open_interest"].where(is_call, 0.0),
+        "put_oi": work["open_interest"].where(is_put, 0.0),
+        "call_volume": work["volume"].where(is_call, 0.0),
+        "put_volume": work["volume"].where(is_put, 0.0),
+    }).groupby(["expiry", "strike"], as_index=False).sum()
+
+    grouped["abs_gex"] = grouped["call_gex"] + grouped["put_gex"]
+    grouped["abs_net_gex"] = grouped["net_gex"].abs()
+
+    # A strike with no exposure either way is not drawn. Unlike the volume
+    # chart -- where a listed strike that traded nothing is a fact worth
+    # seeing -- every listed strike has SOME gamma, so keeping the zeros here
+    # would put a full grid of minimum-radius dots behind the chart and hide
+    # the thing it is for.
+    grouped = grouped[grouped["abs_gex"] > 0].reset_index(drop=True)
+    if grouped.empty:
+        return _blank(GAMMA_BUBBLE_COLUMNS)
+
+    grouped["flow"] = grouped["net_gex"].map(gamma_bucket)
+
+    largest = float(grouped["abs_net_gex"].max())
+    grouped["radius"] = grouped["abs_net_gex"].map(
+        lambda v: radius(v, largest, scale=scale,
+                         min_radius=min_radius, max_radius=max_radius))
+
+    dte_by_expiry = (chain_df.groupby("expiry")["dte"].first()
+                     if "dte" in chain_df.columns else pd.Series(dtype="int64"))
+    dte = grouped["expiry"].map(dte_by_expiry).fillna(0).astype(int)
+    grouped["expiry_order"] = dte
+    grouped["expiry_label"] = [expiry_label(e, d)
+                               for e, d in zip(grouped["expiry"], dte)]
+
+    return grouped.sort_values(["expiry_order", "strike"], ignore_index=True)[
+        list(GAMMA_BUBBLE_COLUMNS)]
 
 
 # ─────────────────────────────────────────────────────────────────────────────

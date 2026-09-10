@@ -49,6 +49,18 @@ _MARKET_TZ = ZoneInfo(config.DISPLAY_TIMEZONE)
 # worth keeping absent.
 _MAX_DAYS = 365
 
+# What the bubble panel may be asked for, and the gamma weight each one means.
+# None is the volume chart, which weights nothing — it counts contracts.
+#
+# A DICT RATHER THAN THREE `if`s so the validation, the dispatch and the list
+# in the 422 message cannot fall out of step: adding a fourth view here is one
+# line and the endpoint needs no other edit.
+_BUBBLE_MEASURES: dict[str, str | None] = {
+    "volume": None,
+    "gex": "open_interest",
+    "vgex": "volume",
+}
+
 
 class ReadContext:
     """What every route needs: which database, and the cache in front of it.
@@ -650,12 +662,31 @@ def build_router(ctx: ReadContext) -> APIRouter:
             "Keep only the busiest strikes of the nearest expiries. Off, this "
             "is every point in the band — about 120 strikes per expiry, which "
             "fuses the columns into solid bars."),
+        measure: str = Query("volume", description=
+            "volume (default) — contracts traded today. gex — gamma x open "
+            "interest, the installed dealer structure. vgex — gamma x today's "
+            "volume, the gamma this session added. The default keeps existing "
+            "callers unchanged."),
     ) -> dict[str, Any]:
         """Where today's trading happened, across BOTH expiry and strike.
 
         NO EXPIRY PARAMETER, deliberately. This panel exists to COMPARE
         expiries; scoped to one it is a single column, which is the chart it
         is not. `dte_max` would be the same mistake more slowly.
+
+        THREE VIEWS OF THE SAME GRID (Chandan, 2026-09-08). `volume` is where
+        trading WENT today; `gex` is where dealer gamma SITS, built up over
+        weeks; `vgex` is the gamma this session ADDED. The rows differ in
+        shape between the volume view and the two gamma views — see
+        dealer.BUBBLE_COLUMNS against dealer.GAMMA_BUBBLE_COLUMNS — and
+        `measure` travels back on the response so a client is never left
+        guessing which it is holding.
+
+        The colour vocabulary differs too, and that is the point rather than
+        an oversight: `flow` is call/put/balanced under `volume` and
+        long/short/flat under the gamma pair. A strike can be call-dominated
+        and short gamma at once, so one set of words for both would be a
+        claim neither chart makes.
 
         `radius` arrives computed, and is relative to the busiest point on the
         WHOLE band rather than on what survived the trim — rescaling to the
@@ -665,17 +696,52 @@ def build_router(ctx: ReadContext) -> APIRouter:
         did not. All of it is core/dealer.py's; none of it is recomputed by a
         caller.
         """
+        if measure not in _BUBBLE_MEASURES:
+            raise HTTPException(
+                status_code=422,
+                detail=f"measure must be one of "
+                       f"{', '.join(sorted(_BUBBLE_MEASURES))}, not {measure!r}")
+
         target, chain, spot = _snapshot_chain_and_spot(snapshot_id)
-        points = ctx.cached(
-            ("dealer_bubbles", target, trim),
-            lambda: (dealer.most_traded(dealer.bubble_points(chain, spot))
-                     if trim else dealer.bubble_points(chain, spot)))
+
+        # THE RANKING COLUMN TRAVELS WITH THE MEASURE, because the trim has to
+        # keep the strikes the chart is actually about. Ranking gamma points by
+        # volume would drop the strike carrying the most dealer exposure on any
+        # day it happened to trade quietly — see dealer.most_traded.
+        weight = _BUBBLE_MEASURES[measure]
+
+        def compute():
+            points = (dealer.bubble_points(chain, spot) if weight is None
+                      else dealer.gamma_bubble_points(chain, spot,
+                                                      weight=weight))
+            if not trim:
+                return points
+            rank = "total_volume" if weight is None else "abs_net_gex"
+            return dealer.most_traded(points, by=rank)
+
+        # THE MEASURE IS IN THE CACHE KEY. Without it the first view asked for
+        # freezes into the cache and the toggle returns the other one's rows
+        # under this one's name — the same class of bug the countdown anchor
+        # note above records, and just as invisible.
+        points = ctx.cached(("dealer_bubbles", target, trim, measure), compute)
+
+        band = f"{dealer.BAND_PERCENT}% of spot"
+        basis = {
+            "volume": f"contracts traded this session within {band}; "
+                      "notional is mark x volume x 100, blank where the chain "
+                      "carries no mark",
+            "gex": f"gamma x open interest within {band}, dollars per 1% move; "
+                   "size is the NET figure and colour its sign — green where "
+                   "dealer hedging damps a move, red where it amplifies one",
+            "vgex": f"gamma x TODAY'S VOLUME within {band}, dollars per 1% "
+                    "move; the gamma this session added rather than what was "
+                    "already installed, so it is empty at the open and fills "
+                    "through the day",
+        }[measure]
+
         return serialize.frame_payload(
             points, snapshot_id=target, spot=spot, trimmed=trim,
-            band_percent=dealer.BAND_PERCENT,
-            basis="contracts traded this session within "
-                  f"{dealer.BAND_PERCENT}% of spot; notional is mark x volume "
-                  "x 100, blank where the chain carries no mark")
+            measure=measure, band_percent=dealer.BAND_PERCENT, basis=basis)
 
     @router.get("/dealer/positioning",
                 summary="Volume against the overnight change in open interest")

@@ -23,13 +23,17 @@
 import { useEffect, useRef } from 'react'
 import Plotly from 'plotly.js-dist-min'
 
-import type { BubbleRow } from '../api/types'
+import type { BubbleMeasure, BubbleRow } from '../api/types'
 import { BG, GRID, HOVER, INK, reading } from './chart'
 
 export interface DealerBubblesProps {
   rows: BubbleRow[]
   /** THIS snapshot's spot. The dashed line every point is read against. */
   spot: number
+  /** Which view these rows are. Decides the palette's MEANING and the hover's
+   *  rows — not merely a caption, which is why it is required rather than
+   *  defaulted. */
+  measure: BubbleMeasure
   basis: string
   height: string
 }
@@ -46,10 +50,40 @@ const FLOW: Record<string, { colour: string; label: string }> = {
   call: { colour: '#10d4a3', label: 'mostly calls' },
   put: { colour: '#f05252', label: 'mostly puts' },
   balanced: { colour: '#e8b64c', label: 'both sides' },
+
+  // THE GAMMA BUCKETS SHARE THE PALETTE AND NOT THE MEANING, and the labels
+  // are what stop that being a trap. Green is "calls" on one view and
+  // "dealers damp the move" on the other; the two are unrelated, and a strike
+  // is routinely call-heavy AND short gamma. The legend is always on screen
+  // and always says which reading is in force, so the colour is never the
+  // only thing carrying it.
+  //
+  // The hues are reused rather than invented because they already mean
+  // steady/green and violent/red everywhere else on this tab, and a fourth
+  // and fifth colour would compete with the flip line and the spot rule for
+  // no gain.
+  long: { colour: '#10d4a3', label: 'dampens moves' },
+  short: { colour: '#f05252', label: 'amplifies moves' },
+  flat: { colour: '#8fa6bd', label: 'no net exposure' },
 }
 const UNKNOWN = { colour: '#8fa6bd', label: 'unclassified' }
 
-export function DealerBubbles({ rows, spot, basis, height }: DealerBubblesProps) {
+/** Dollars, at the scale a gamma figure is actually read at. `reading` is the
+ *  full grouped number, which is right for a contract count and unreadable
+ *  for 1.4e10 — this is core/format.py's own rounding, kept to the same
+ *  breakpoints so the hover and the tab's headline labels agree. */
+function dollars(v: number | undefined): string {
+  if (v === undefined || v === null || Number.isNaN(v)) return '—'
+  const sign = v < 0 ? '-' : ''
+  const n = Math.abs(v)
+  if (n >= 1e9) return `${sign}$${(n / 1e9).toFixed(1)}B`
+  if (n >= 1e6) return `${sign}$${(n / 1e6).toFixed(1)}M`
+  if (n >= 1e3) return `${sign}$${(n / 1e3).toFixed(1)}K`
+  return `${sign}$${n.toFixed(0)}`
+}
+
+export function DealerBubbles({ rows, spot, measure, basis,
+                               height }: DealerBubblesProps) {
   const host = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -68,6 +102,11 @@ export function DealerBubbles({ rows, spot, basis, height }: DealerBubblesProps)
     // legend entries that mean something ("mostly calls"), where one trace
     // per point would give hundreds that mean nothing — and Plotly redraws
     // every trace on hover.
+    // Which vocabulary the rows are speaking. Taken from the measure the
+    // server echoed, NOT sniffed from whether `net_gex` happens to be
+    // present: an empty board has no rows to sniff.
+    const isGamma = measure !== 'volume'
+
     const buckets = [...new Set(rows.map((r) => r.flow))]
     const traces = buckets.map((bucket) => {
       const kind = FLOW[bucket] ?? UNKNOWN
@@ -92,25 +131,52 @@ export function DealerBubbles({ rows, spot, basis, height }: DealerBubblesProps)
           opacity: 0.62,
           line: { color: kind.colour, width: 1 },
         },
-        customdata: points.map((p) => [
-          reading(p.total_volume),
-          reading(p.call_volume),
-          reading(p.put_volume),
-          // A DASH, NOT A ZERO, where the chain carried no mark. The server
-          // sends null for exactly this reason and turning it into 0 here
-          // would claim a strike where nothing was paid.
-          p.notional === null ? '—' : reading(p.notional),
-          kind.label,
-        ]),
-        hovertemplate:
-          '<b>%{y:,.0f}</b>  ·  %{x}<br>' +
-          `<span style="color:${INK}">Traded</span>  %{customdata[0]}<br>` +
-          `<span style="color:${FLOW.call.colour}">Calls</span>  ` +
-          '%{customdata[1]}<br>' +
-          `<span style="color:${FLOW.put.colour}">Puts</span>  ` +
-          '%{customdata[2]}<br>' +
-          `<span style="color:${INK}">Premium</span>  $%{customdata[3]}<br>` +
-          '%{customdata[4]}<extra></extra>',
+        // ONE customdata SHAPE PER MEASURE, chosen once outside the loop.
+        // Both end with the bucket's label so the last template line is
+        // shared; everything above it is the measure's own.
+        customdata: points.map((p) => (isGamma
+          ? [
+              dollars(p.net_gex),
+              dollars(p.call_gex),
+              // Put gamma is stored unsigned (it is a magnitude, dealer sign
+              // applied separately) so it is negated for display: the reader
+              // is looking at what pushes which way, and an unsigned put
+              // figure beside a signed net reads as an arithmetic error.
+              dollars(p.put_gex === undefined ? undefined : -p.put_gex),
+              // The total REGARDLESS of side. On a near-cancelling strike
+              // this is large while the bubble is small, and that gap is the
+              // one thing the chart's geometry cannot show.
+              dollars(p.abs_gex),
+              kind.label,
+            ]
+          : [
+              reading(p.total_volume),
+              reading(p.call_volume),
+              reading(p.put_volume),
+              // A DASH, NOT A ZERO, where the chain carried no mark. The
+              // server sends null for exactly this reason and turning it into
+              // 0 here would claim a strike where nothing was paid.
+              p.notional === null ? '—' : reading(p.notional),
+              kind.label,
+            ])),
+        hovertemplate: isGamma
+          ? '<b>%{y:,.0f}</b>  ·  %{x}<br>' +
+            `<span style="color:${INK}">Net</span>  %{customdata[0]}<br>` +
+            `<span style="color:${FLOW.call.colour}">Calls</span>  ` +
+            '%{customdata[1]}<br>' +
+            `<span style="color:${FLOW.put.colour}">Puts</span>  ` +
+            '%{customdata[2]}<br>' +
+            `<span style="color:${INK}">Total both sides</span>  ` +
+            '%{customdata[3]}<br>' +
+            '%{customdata[4]}<extra></extra>'
+          : '<b>%{y:,.0f}</b>  ·  %{x}<br>' +
+            `<span style="color:${INK}">Traded</span>  %{customdata[0]}<br>` +
+            `<span style="color:${FLOW.call.colour}">Calls</span>  ` +
+            '%{customdata[1]}<br>' +
+            `<span style="color:${FLOW.put.colour}">Puts</span>  ` +
+            '%{customdata[2]}<br>' +
+            `<span style="color:${INK}">Premium</span>  $%{customdata[3]}<br>` +
+            '%{customdata[4]}<extra></extra>',
       }
     })
 
@@ -160,7 +226,7 @@ export function DealerBubbles({ rows, spot, basis, height }: DealerBubblesProps)
         showarrow: false, font: { color: '#54a0ff', size: 9 },
       }],
     }, { displayModeBar: false, responsive: true, scrollZoom: false })
-  }, [rows, spot, height])
+  }, [rows, spot, measure, height])
 
   return (
     <div>

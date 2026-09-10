@@ -30,7 +30,7 @@ import { useEffect, useRef } from 'react'
 import Plotly from 'plotly.js-dist-min'
 
 import type { StrikeFlowRow } from '../api/types'
-import { BG, BRIGHT, CALL, GRID, HOVER, INK, PUT } from './chart'
+import { BG, BRIGHT, CALL, GRID, HOVER, INK, PUT, sessionRange } from './chart'
 
 export interface StrikeFlowProps {
   rows: StrikeFlowRow[]
@@ -53,6 +53,9 @@ export function StrikeFlow({ rows, strike, basis, height }: StrikeFlowProps) {
     if (!node) return
 
     const at = rows.map((r) => r.bucket)
+    // Only the calendar date and the UTC offset are read out of it, so any
+    // bucket in the response answers for the whole session.
+    const band = sessionRange(rows[0]?.bucket)
     const calls = rows.map((r) => r.call_volume)
     const puts = rows.map((r) => r.put_volume)
 
@@ -162,6 +165,12 @@ export function StrikeFlow({ rows, strike, basis, height }: StrikeFlowProps) {
         // frame is one session — if this ever serves several, it will need
         // them, and it will need them in market time.
         type: 'date' as const,
+        // THE WHOLE SESSION, ALWAYS — 09:30 to 16:00, matching the two panels
+        // below. See chart.ts sessionRange. It matters more here than there:
+        // these are BARS, and autorange widens them to fill the axis, so a
+        // handful of morning buckets draw as fat blocks that thin out through
+        // the day. The bar width stops being a quantity you can read.
+        ...(band ? { range: band, autorange: false as const } : {}),
       },
       yaxis: {
         // FROM ZERO. A count has nothing below it, and an axis that floats

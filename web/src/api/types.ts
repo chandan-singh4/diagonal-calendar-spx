@@ -331,10 +331,40 @@ export interface BubbleRow {
   /** Premium that changed hands: mark x volume x 100. Null where the chain
    *  carries no mark — a dash, not an invented zero. */
   notional: number | null
-  /** The call/put verdict for this point, bucketed server-side. */
+  /** The verdict for this point, bucketed server-side.
+   *
+   *  THE VOCABULARY DEPENDS ON THE MEASURE, and the two sets do not overlap
+   *  so they cannot be confused: 'call' | 'put' | 'balanced' under `volume`,
+   *  and 'long' | 'short' | 'flat' under `gex` / `vgex`. A strike can be
+   *  call-dominated and short gamma at the same time, so one set of words
+   *  for both would assert a link that is not there. */
   flow: string
   radius: number
+
+  // ── gamma views only (`gex` / `vgex`) ────────────────────────────────
+  // Absent on the volume rows. The server sends one shape or the other and
+  // names which in `measure`; these are optional rather than nullable so
+  // TypeScript makes a caller check the measure before reading them.
+  /** Dollars per 1% move, dealer-signed: calls positive, puts negative. */
+  net_gex?: number
+  /** |net_gex| — what the radius is drawn from and what the trim ranks on.
+   *  Sent rather than derived so the browser holds no second copy of the
+   *  sizing rule. */
+  abs_net_gex?: number
+  /** Call + put gamma REGARDLESS of sign. Differs from abs_net_gex where the
+   *  two sides cancel: a strike with 10B of each has abs_gex 20B and net_gex
+   *  0 — a large installed position that pushes nowhere. */
+  abs_gex?: number
+  call_gex?: number
+  put_gex?: number
+  call_oi?: number
+  put_oi?: number
 }
+
+/** The three views of the bubble grid. `volume` is where trading went today;
+ *  `gex` is where dealer gamma sits (open interest); `vgex` is the gamma this
+ *  session added (today's volume). */
+export type BubbleMeasure = 'volume' | 'gex' | 'vgex'
 
 export interface BubbleResponse {
   snapshot_id: number
@@ -345,6 +375,10 @@ export interface BubbleResponse {
   band_percent: number
   basis: string
   count: number
+  /** Which of the three views these rows are. Echoed by the server so a
+   *  client never has to infer the row shape from which fields happen to be
+   *  present. */
+  measure: BubbleMeasure
   rows: BubbleRow[]
 }
 
@@ -753,4 +787,65 @@ export interface LocksResponse {
 export interface SpxRow {
   timestamp: string
   spx: number | null
+}
+
+// ── Ask panel (POST /mission/ask) ────────────────────────────────────────
+/** One exchange in the chat. The server trims to the last few, but the whole
+ *  visible conversation is what the panel holds. */
+export interface TutorTurn {
+  role: 'user' | 'assistant'
+  content: string
+}
+
+export type Effort = 'low' | 'medium' | 'high' | 'max'
+
+export interface AskRequest {
+  question: string
+  history: TutorTurn[]
+  /** Omitted means "the newest snapshot", which is what the live board shows. */
+  snapshot_id?: number
+  /** Promoted to the head of the fallback chain. Omitted means the chain's
+   *  own default, which is whichever Gemini Flash is newest today. */
+  model?: string
+  effort?: Effort
+}
+
+/** One rung of the live fallback chain. `context` is the token window, which
+ *  is the only figure that meaningfully separates these for a reader. */
+export interface TutorModel {
+  id: string
+  provider: string
+  name: string
+  context: number
+}
+
+export interface TutorModelsResponse {
+  models: TutorModel[]
+  default: string | null
+  efforts: Effort[]
+}
+
+/** The answer, plus what it was read FROM. The echoed spot, time and pin are
+ *  not decoration: this chat's whole claim is that it is reading the same
+ *  figures as the panels, and an answer with no visible snapshot behind it is
+ *  one the reader cannot check. */
+export interface AskResponse {
+  answer: string
+  provider: string
+  model: string
+  snapshot_id: number
+  spot: string
+  session_time: string
+  /** The chain fell past the model that was picked. Shown, because a reader
+   *  who chose one model and silently got another would draw conclusions
+   *  about the wrong one. */
+  fell_back: boolean
+  effort: Effort
+  pin: {
+    pin_possible: boolean
+    reason: string
+    candidate: string
+    support: string
+    resistance: string
+  }
 }

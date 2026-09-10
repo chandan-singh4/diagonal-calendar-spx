@@ -23,7 +23,7 @@
 import { useEffect, useRef } from 'react'
 import Plotly from 'plotly.js-dist-min'
 
-import { BG, GRID, HOVER, INK } from './chart'
+import { BG, GRID, HOVER, INK, sessionRange } from './chart'
 
 /** Eight hues that stay apart on a dark ground. Ordered so neighbours in the
  *  legend are not neighbours on the colour wheel — adjacent strikes are the
@@ -96,6 +96,11 @@ export function SessionLines({ rows, valueKey, units, format, basis,
       }
     })
 
+    // ANY ROW WILL DO. Only the calendar date and the UTC offset are read out
+    // of it, and every row in one response is the same session — so this does
+    // not depend on the rows being sorted, which they are by strike first.
+    const band = sessionRange(rows[0]?.timestamp)
+
     void Plotly.react(node, traces, {
       paper_bgcolor: BG,
       plot_bgcolor: BG,
@@ -112,6 +117,13 @@ export function SessionLines({ rows, valueKey, units, format, basis,
       },
       xaxis: {
         type: 'date' as const,
+        // THE WHOLE SESSION, ALWAYS — 09:30 to 16:00, whether or not the day
+        // has got there yet. See chart.ts sessionRange: an axis that grows
+        // with the data redraws the same eleven minutes as the full width of
+        // the panel at 09:41 and as a sliver at 15:55, and neither shape can
+        // be compared with the other. Spread rather than assigned so an empty
+        // board falls back to autorange instead of being handed `undefined`.
+        ...(band ? { range: band, autorange: false as const } : {}),
         gridcolor: GRID, linecolor: GRID,
         tickfont: { color: INK, size: 9 },
       },
