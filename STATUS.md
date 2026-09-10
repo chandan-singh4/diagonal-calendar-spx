@@ -1,8 +1,8 @@
 # PROJECT STATUS
 
-**Updated:** 2026-09-09 · **Branch:** `main`. **This wrap-up saves only the notes files — a whole
-session of finished, tested work is NOT yet saved** (see "What to do next", item 1). **1,728
-automatic checks pass;** two faults Chandan reported today are fixed and confirmed against live data.
+**Updated:** 2026-09-10 · **Branch:** `main`, merged and pushed (`f2c592a`). **1,728 automatic
+checks pass**, and the pre-commit hook ran them on each commit. Two faults Chandan reported are
+fixed and confirmed against live data.
 > Self-contained: read this file alone to start a session. Replaced entirely by `/wrap`.
 
 ## What this project is
@@ -56,11 +56,10 @@ auto-restart **hangs** (BUG-045), serving old code while fixes appeared to do no
 
 ## What to do next
 
-1. **Save the work — the most important item.** A session's tested work is unsaved (Ask panel,
-   briefing daemon, Telegram, the refresh fix) **plus earlier unsaved chart work from a previous
-   session**. Ask Chandan first; look before sweeping in files not touched today.
-2. **Start the briefing daemon so it survives** — double-click `start_briefings.bat`, leave the
-   window open. Everything I started today ran in my session and has died with it.
+1. **Start the briefing daemon so it survives** — double-click `start_briefings.bat`, leave the
+   window open. Nothing restarts it, and nothing reports its absence (DEBT-044).
+2. **Two lint findings came in with `core/dealer.py`** (`zip()` without `strict=`), left alone
+   because `strict=` changes behaviour when the inputs differ in length. Worth a deliberate look.
 3. **Check both fixes tomorrow** — briefings from 09:45, and charts updating with nothing touched.
 4. `docs/plan.md`'s milestone table is stale (says stage 4 "not started"); worth one pass. The lower
    half of Gamma Exposure is unbuilt, and **Research**/**Entry Analysis** are not started.
