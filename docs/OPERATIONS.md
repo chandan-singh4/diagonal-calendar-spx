@@ -149,9 +149,13 @@ next snapshot 83 seconds later and recorded no gap at all.
 
 ## The API, and reading it from a phone (M4)
 
-A second server, separate from the dashboard, that serves the record as data
-rather than as a page. **The dashboard does not need it and is unaffected by
-it** — start it, or do not, and nothing about the screen changes.
+Serves the record as data rather than as a page.
+
+> **The dashboard REQUIRES it.** This paragraph said the opposite until 2026-10-02, and
+> it was true then: the dashboard was Streamlit, which read the database directly.
+> **Streamlit is retired — we are not touching it again, this is final (ADR-059).** The
+> dashboard is now the React screen on 5173, which gets every figure through this server.
+> With it stopped, the screen loads and shows nothing.
 
     python -m uvicorn api.app:app --host 127.0.0.1 --port 8899
 
@@ -161,11 +165,12 @@ is the correct state every evening and all weekend; judging silence needs the
 market calendar and is the watchdog's job (ADR-045). Interactive documentation
 for every endpoint is at `/docs` once it is running.
 
-**Both servers bind 127.0.0.1 only.** For Streamlit this is set in
-`.streamlit/config.toml` and closes OPS-006 — before 2026-09-05 `streamlit run`
-advertised a Network URL and an External URL, so the dashboard was reachable
-from anything on the Wi-Fi. For the API it is the `--host` argument above, and
-leaving it off would undo this.
+**Bind 127.0.0.1 only.** For the API that is the `--host` argument above, and leaving it
+off would undo this. Vite's dev server is localhost-only by default; `--host` would undo
+that too. The retired Streamlit app had the same rule set in `.streamlit/config.toml`,
+closing OPS-006 — before 2026-09-05 `streamlit run` advertised a Network URL and an
+External URL, so it was reachable from anything on the Wi-Fi. **Kept here as the reason
+the rule exists**, not as an instruction to run it.
 
 ### Reaching it from the phone
 

@@ -173,11 +173,16 @@ python collector.py --once       # single cycle, for testing
 It sleeps outside market hours and wakes at the open without a restart. It collects
 09:30–16:00 ET on trading days only.
 
-**Dashboard:**
+**Dashboard** — the React screen, port 5173. Two processes:
 
 ```bash
-streamlit run app.py
+python -m uvicorn api.app:app --host 127.0.0.1 --port 8899   # no --reload (BUG-045)
+cd web && npm run dev                                        # then open localhost:5173
 ```
+
+> **STREAMLIT IS RETIRED — WE ARE NOT TOUCHING IT AGAIN. THIS IS FINAL (ADR-059, 2026-10-02).**
+> `streamlit run app.py` was the dashboard until this date. **Do not run it, do not modify it,
+> do not port fixes to it.** “The dashboard” means port 5173 and nothing else.
 
 **Health check:**
 

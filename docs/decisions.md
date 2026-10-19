@@ -7,6 +7,57 @@ it was recorded here.
 
 ---
 
+## ADR-059 — Streamlit is retired. "The dashboard" means the React screen, and this is final
+
+**Date:** 2026-10-02 · **Status:** Accepted · **Decided by:** Chandan
+
+> **WE ARE NOT TOUCHING STREAMLIT AGAIN. THIS IS FINAL.**
+>
+> **"The dashboard" now means the React screen under `web/` on port 5173 — nothing else.**
+> The Streamlit app (`app.py`, `views/`, `ui/`, `pages/`, port 8501) is **retired**: not the
+> live face, not a fallback, not to be started, and not to be modified. No new feature, no
+> bug fix, no port of a change made on the new screen.
+
+**Context.** The rebuild was decided at stage 5 of the 9-stage plan and ADR-058 built the tutor
+only on the new screen. But `STATUS.md` still called Streamlit "still the live one" and
+`README.md` still documented `streamlit run app.py` under the heading **Dashboard**, so the word
+"dashboard" was ambiguous in the documentation while being unambiguous in Chandan's head. On
+2026-10-02 he asked to "open the dashboard"; the documentation pointed at 8501 and the wrong
+screen was started. He then settled it: *"from this moment on, when I say dashboard, I mean the
+new dashboard. Let's expire the old dashboard."*
+
+**Decision.** One live face. Streamlit is retired as of this date. The ambiguity is closed in the
+documentation rather than carried in anyone's memory.
+
+**Reasoning.** Two faces meant every change had a silent second question — *and on the old one
+too?* — which is exactly the tax a rebuild is supposed to end. Worse, the ambiguity was
+load-bearing in the docs, so it could mislead an agent reading them in good faith, which is what
+happened. **A decision that lives only in conversation is not a decision; it is a thing to be
+re-litigated.**
+
+**Alternatives.**
+- *Keep Streamlit as a read-only fallback* — rejected. A fallback nobody exercises rots, and
+  believing you have one is worse than knowing you do not. The new screen is at 4 of 6 tabs, so
+  the honest statement is that two tabs are **not yet rebuilt**, not that 8501 covers them.
+- *Delete `app.py` and `views/` now* — **not done, deliberately.** Retirement is a documentation
+  and operational decision and costs nothing if wrong. Deletion is a code change that would touch
+  the test suite, and two tabs have no replacement yet. Deletion is a separate, later decision;
+  until then the files stay on disk, unstarted and unedited.
+
+**Tradeoff.** The two unrebuilt tabs are unavailable rather than available-on-the-old-screen.
+Accepted: they were not being used, and a known gap drives the rebuild while a shabby fallback
+hides it.
+
+**Consequence for anyone (human or agent) reading the docs.** When Chandan says "dashboard",
+start **two** processes, never `streamlit run`:
+
+    python -m uvicorn api.app:app --host 127.0.0.1 --port 8899   # NO --reload (BUG-045)
+    cd web && npm run dev                                        # then http://localhost:5173
+
+`localhost:5173`, not `127.0.0.1:5173` — see `progress_log.md`, they are not interchangeable here.
+
+---
+
 ## ADR-058 — The tutor is handed computed figures and judges none of them
 
 **Date:** 2026-09-09 · **Status:** Accepted · **Decided by:** Chandan

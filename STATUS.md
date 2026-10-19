@@ -17,9 +17,9 @@ the historical record IS the product.**
 |---|---|
 | **Collector** | Every 1–5 min while markets are open, records all option prices. Starts with Windows. **Running.** |
 | **Database** | One file, ~6,500 snapshots, 19M+ rows since 23 June. Irreplaceable — the broker won't sell you last Tuesday's prices. |
-| **Old dashboard** | 6 tabs, reads only. **Port 8501.** Still the live one. |
-| **Data service** | Serves the record to anything that asks. **Port 8899.** Does NOT restart itself — restart by hand after changing it. |
-| **New screen** | The replacement being built beside the old one, under `web/`. 4 of 6 tabs. **Port 5173.** |
+| **Dashboard** | The React screen under `web/`. **Port 5173.** 4 of 6 tabs. **This is what “the dashboard” means — the only live face.** Needs the data service running too. |
+| **Data service** | Serves the record to anything that asks. **Port 8899.** Does NOT restart itself — restart by hand after changing it. Start it **without `--reload`** (BUG-045). |
+| **Old Streamlit app** | `app.py` on port 8501. **RETIRED 2026-10-02 — WE ARE NOT TOUCHING STREAMLIT AGAIN. THIS IS FINAL.** Do not start it, do not modify it, do not port fixes to it (ADR-059). Files remain on disk only because two tabs are not yet rebuilt. |
 | **Briefing daemon** | New. Wakes at ~15 set times daily, has an AI explain the figures in plain words, sends it to Telegram, and writes it down so its predictions can be scored later. Started by hand — see next steps. The **Ask panel**, a chat button on the new screen, answers questions from the same figures. |
 
 ## The 9-stage plan
@@ -87,6 +87,12 @@ the morning third-Friday option is shown. Others: `docs/backlog.md`.
   struck-through row reads as finished; that is exactly how the half-built refresh went unnoticed.
 
 ## How to work here
+
+> **“DASHBOARD” MEANS THE REACT SCREEN ON PORT 5173. STREAMLIT IS RETIRED AND WE ARE NOT
+> TOUCHING IT AGAIN — THIS IS FINAL (ADR-059, 2026-10-02).** Never run `streamlit run app.py`.
+> To open the dashboard, start **two** processes:
+> `python -m uvicorn api.app:app --host 127.0.0.1 --port 8899` (no `--reload`, BUG-045) and
+> `cd web && npm run dev`, then open **`localhost:5173`** — not `127.0.0.1:5173`.
 
 **Ask first** before: saving online, any database write, deleting files or rows, changing Windows
 settings, starting/stopping the collector, or sending anything off this machine. **No check may
