@@ -6,6 +6,7 @@ so there's exactly one place to look when you need to change a setting.
 """
 
 import os
+from datetime import time as _time
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -119,10 +120,16 @@ RETENTION_DAYS = 90
 # is set so a single slow poll does not raise an alarm, but two do.
 WATCHDOG_LATE_MULTIPLE = 2.5
 
-# Minimum gap between repeat alerts about the SAME ongoing outage, in minutes.
-# Without it, a five-minute schedule turns one dead collector into twelve
-# emails an hour and Chandan learns to delete them unread.
-WATCHDOG_REALERT_MINUTES = 60
+# Times of day (local to DISPLAY_TIMEZONE) at which a STILL-ONGOING outage is
+# re-announced. Without this, a ten-minute schedule turns one dead collector
+# into six emails an hour and Chandan learns to delete them unread.
+#
+# Fixed clock times rather than "every N minutes elapsed" (the original
+# design, removed 2026-10-18): elapsed-minutes free-runs from whenever the
+# outage happened to start, so the emails land at a different time every day
+# and never line up with when Chandan actually checks his inbox. Three fixed
+# slots mean at most three emails about one outage, always at the same times.
+WATCHDOG_REALERT_TIMES = (_time(8, 0), _time(12, 0), _time(20, 0))
 
 # Grace period after the opening bell, in minutes. At 09:31 the newest price
 # is legitimately from yesterday's close, so an age-based check alarms every

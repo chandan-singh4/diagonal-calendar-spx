@@ -47,9 +47,9 @@ untouched.
    cause is the broker permission — go to section 2. On 19 August it was four consecutive cycle
    failures from a code error, and the log said so plainly.
 
-**The alert repeats at most once an hour** for the same ongoing outage. That is deliberate: a
-five-minute check would otherwise turn one dead collector into twelve emails an hour, and you
-would learn to delete them unread.
+**The alert repeats at most three times a day — 8am, noon, 8pm** — for the same ongoing outage.
+That is deliberate: a ten-minute check would otherwise turn one dead collector into dozens of
+emails a day, and you would learn to delete them unread.
 
 ---
 

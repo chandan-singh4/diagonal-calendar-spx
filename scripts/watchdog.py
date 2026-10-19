@@ -25,10 +25,10 @@ THE FOUR WAYS A NAIVE VERSION CRIES WOLF, all handled below:
      WATCHDOG_OPEN_GRACE_MINUTES covers the first cycle or two.
   3. Age reaches the polling interval immediately before every new price
      lands. WATCHDOG_LATE_MULTIPLE means two missed cycles, not one slow one.
-  4. A five-minute schedule turns one outage into twelve emails an hour.
-     WATCHDOG_REALERT_MINUTES holds it to one, plus an all-clear when it
-     recovers — the all-clear matters, because silence is what a dead
-     watchdog also sounds like.
+  4. A ten-minute schedule turns one outage into dozens of emails a day.
+     WATCHDOG_REALERT_TIMES holds it to three fixed times (8am/noon/8pm by
+     default), plus an all-clear when it recovers — the all-clear matters,
+     because silence is what a dead watchdog also sounds like.
 
 USAGE
     python scripts/watchdog.py            # check once, alert if needed
@@ -51,7 +51,7 @@ import json
 import smtplib
 import subprocess
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -277,8 +277,32 @@ def should_alert(result: dict, now_utc: datetime, state: dict) -> tuple[bool, st
     last = state.get("last_alert_utc")
     if not last:
         return (True, "new")
-    elapsed = (now_utc - datetime.fromisoformat(last)).total_seconds() / 60
-    return (elapsed >= config.WATCHDOG_REALERT_MINUTES, "repeat")
+    return (_crossed_a_realert_time(datetime.fromisoformat(last), now_utc),
+             "repeat")
+
+
+def _crossed_a_realert_time(last_utc: datetime, now_utc: datetime) -> bool:
+    """Has one of config.WATCHDOG_REALERT_TIMES happened since the last alert?
+
+    Fixed local clock times rather than "N minutes since last_utc": the old
+    rule free-ran from whenever the outage began, so a collector that died at
+    03:17 got re-alerted at 04:17, 05:17, ... all day — never at a time
+    Chandan was actually looking at his inbox. This instead walks every
+    calendar day from the last alert to now and checks each configured time
+    against that day; the first one that falls strictly after the last alert
+    and at-or-before now fires the repeat.
+    """
+    tz = ZoneInfo(config.DISPLAY_TIMEZONE)
+    last_local = last_utc.astimezone(tz)
+    now_local = now_utc.astimezone(tz)
+    day = last_local.date()
+    while day <= now_local.date():
+        for t in config.WATCHDOG_REALERT_TIMES:
+            candidate = datetime.combine(day, t, tzinfo=tz)
+            if last_local < candidate <= now_local:
+                return True
+        day += timedelta(days=1)
+    return False
 
 
 def load_state() -> dict:

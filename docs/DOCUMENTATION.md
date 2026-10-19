@@ -652,7 +652,7 @@ Dashboard shows last-collected data if the collector stops (staleness turns yell
 | `core.session.session_of` → `None` | — | Alarms overnight, at weekends, on holidays |
 | `WATCHDOG_OPEN_GRACE_MINUTES` | 5 | Alarms at 09:31, when the newest price is legitimately yesterday's close |
 | `WATCHDOG_LATE_MULTIPLE` | 2.5 | Alarms in the moment before every scheduled poll, when the age legitimately *reaches* the interval |
-| `WATCHDOG_REALERT_MINUTES` | 60 | Six emails an hour for one outage |
+| `WATCHDOG_REALERT_TIMES` | 8am, noon, 8pm | Dozens of emails a day for one outage |
 
 **`informative` — the false-all-clear guard.** `_result(..., informative=False)` marks the two states in which the watchdog **cannot see**: market shut, and inside the opening grace period. Without it, 16:00 turns a collector that has been dead all afternoon into `ok`, and the state transition fires **"RECOVERED: prices are arriving again."** A false all-clear is the one message that stops you checking. `should_alert` returns `"no news"` for uninformative results, and `main` carries the previous `alarming` flag forward unchanged, so **an all-clear requires positively observing fresh data**. Covered by five tests in `tests/test_watchdog.py`, two of which tie `informative` to the real `check()` path so the rest cannot pass vacuously.
 

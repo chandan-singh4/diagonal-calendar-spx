@@ -261,12 +261,18 @@ def test_a_price_timestamped_in_the_future_is_an_alarm(wd_db):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Cry-wolf case 4 — not saying it twelve times an hour
+# Cry-wolf case 4 — not saying it every ten minutes, all day
 # ─────────────────────────────────────────────────────────────────────────────
 
 ALARM = {"ok": False, "severity": "alarm", "headline": "x", "detail": "y"}
 FINE = {"ok": True, "severity": "ok", "headline": "x", "detail": "y"}
 NOW = MIDDAY
+
+# NOTE: MIDDAY is 12:00 ET exactly, which is itself one of the fixed
+# WATCHDOG_REALERT_TIMES (8am/noon/8pm). The two re-alert tests below pick
+# their own anchor (14:00 ET -- between the noon and 8pm slots) so the test
+# is not accidentally sitting on the boundary it is trying to avoid.
+AFTERNOON = datetime(2026, 7, 15, 18, 0, tzinfo=UTC)   # 14:00 ET
 
 
 def test_the_first_alarm_is_sent():
@@ -275,17 +281,20 @@ def test_the_first_alarm_is_sent():
 
 
 def test_the_same_alarm_five_minutes_later_is_not():
-    state = {"alarming": True, "last_alert_utc": (NOW - timedelta(minutes=5)).isoformat()}
-    send, _ = watchdog.should_alert(ALARM, NOW, state)
+    state = {"alarming": True,
+             "last_alert_utc": (AFTERNOON - timedelta(minutes=5)).isoformat()}
+    send, _ = watchdog.should_alert(ALARM, AFTERNOON, state)
     assert not send
 
 
 def test_but_it_is_repeated_after_the_re_alert_window():
     """An outage that lasts all day must not go quiet after one message."""
+    # Last alert just before noon; "now" just after 8pm. Two fixed slots
+    # (noon, 8pm) fall in between, so a repeat is due.
     state = {"alarming": True,
-             "last_alert_utc": (NOW - timedelta(
-                 minutes=config.WATCHDOG_REALERT_MINUTES + 1)).isoformat()}
-    send, kind = watchdog.should_alert(ALARM, NOW, state)
+             "last_alert_utc": datetime(2026, 7, 15, 15, 55, tzinfo=UTC).isoformat()}
+    now = datetime(2026, 7, 16, 0, 5, tzinfo=UTC)  # 20:05 ET
+    send, kind = watchdog.should_alert(ALARM, now, state)
     assert send and kind == "repeat"
 
 
