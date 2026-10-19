@@ -19,6 +19,10 @@ data/token.json
 # found untracked on 2026-08-09, one careless `git add .` from being published.
 # A dated suffix is exactly what a re-auth backup looks like.
 *token*
+# The half-finished login parked by `scripts/reauth.py --begin`. It holds the
+# one-time `state` that ties a login URL to the redirect coming back, so it is
+# short-lived credential material — and it does not match `*token*` above.
+.reauth_context.json
 
 # ── Recorded output of the briefing daemon ───────────────────────────────────
 # The forecast log is a RUNTIME RECORD, not source: the daemon appends to it

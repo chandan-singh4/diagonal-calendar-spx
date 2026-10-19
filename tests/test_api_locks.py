@@ -11,6 +11,7 @@ that too.
 from __future__ import annotations
 
 import json
+from datetime import date, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -18,9 +19,17 @@ from fastapi.testclient import TestClient
 from api.app import create_app
 from state import entry_locks
 
+# Calendar dates, not a fixed string: a hardcoded "2026-09-18" is a live
+# lock the day it's written and a dead one the day it passes, and the
+# dashboard's own purge_expired (api/locks.py, ADR-039) deletes it on every
+# request this fixture makes. These tests are about create/list/clear
+# behavior on a LIVE lock, so the front leg must always be in the future.
+_FRONT = (date.today() + timedelta(days=30)).isoformat()
+_BACK = (date.today() + timedelta(days=37)).isoformat()
+
 COMBO = {
-    "front_expiry": "2026-09-18",
-    "back_expiry": "2026-09-25",
+    "front_expiry": _FRONT,
+    "back_expiry": _BACK,
     "put_strike": 6400.0,
     "call_strike": 6500.0,
 }
@@ -53,7 +62,7 @@ class TestCreating:
         record = next(iter(stored.values()))
         assert record["entry_diagonal_mark"] == 3.25
         assert record["put_strike"] == 6400.0
-        assert record["front_expiry"] == "2026-09-18"
+        assert record["front_expiry"] == _FRONT
 
     def test_the_key_served_back_is_the_one_the_lock_is_filed_under(self, served):
         """A client that rebuilt the key itself would eventually address a

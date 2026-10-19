@@ -69,7 +69,8 @@ permission while prices you care about are moving.
 4. **Log in and click Allow.**
 
 5. **The page will then look like an error page. That is expected and correct** — it is your own
-   machine at `https://127.0.0.1:8182`, and there is nothing there to serve a page. **What
+   machine at the callback address in `.env` — currently `https://127.0.0.1` — and there is
+   nothing there to serve a page. **What
    matters is the address bar.**
 
 6. **Copy the FULL address from the address bar** — the whole thing, including everything after
@@ -82,6 +83,45 @@ permission while prices you care about are moving.
 
 ---
 
+## The renewal when you are NOT at that machine
+
+**Added 2026-09-13.** The steps above need a keyboard at that terminal, because the last one is a
+prompt waiting for you to paste. That made the terminal the only route — and the slip dies seven
+days after a login, on whatever day that lands. **"I was away from the machine on day seven" is
+exactly how the 2026-08-09 lapse happened.**
+
+So the same renewal can be done in two halves, minutes or hours apart, from Claude Code, from VS
+Code, or from a phone. Ask Claude to renew the Schwab login, or run it yourself:
+
+```
+C:\Users\chand\Python\.venv\Scripts\python.exe scripts\reauth.py --begin
+```
+
+It prints the login address and **touches nothing**. Open that address anywhere — your phone is
+fine — log in, click Allow, and copy the whole address out of the broken-looking page. Then:
+
+```
+C:\Users\chand\Python\.venv\Scripts\python.exe scripts\reauth.py --finish "<paste the address>"
+```
+
+Keep the quotes; the address contains characters a shell would otherwise chew on.
+
+**Why this is safer than the interactive flow, not merely more convenient.** The interactive
+script has to *delete* your current slip before it can start, because the login only begins when
+the slip is missing. `--begin` does not — it only asks for an address. **So an abandoned
+half-renewal costs nothing at all**, and a slip with time left on it keeps the collector running
+throughout.
+
+**Three things worth knowing:**
+
+- **The address is single use.** Finishing consumes it. Run `--begin` again for another.
+- **A mistyped paste does not cost you the browser login.** `--finish` keeps the half-finished
+  login on failure, so you can simply paste again without going back to Schwab.
+- **It is still you logging in.** Nothing here automates Schwab's login away and nothing runs on a
+  timer. It removes the requirement that you be at that particular desk, and nothing more.
+
+---
+
 ## If something goes wrong
 
 **You can abort at any point.** Close the browser, or press Ctrl+C in the terminal. **The script
@@ -90,13 +130,24 @@ That safety net is the main reason this script exists rather than a list of manu
 aborting halfway used to leave you with *no* permission at all, which is strictly worse than the
 nearly-expired one you started with.
 
-**"The login reported success but no token file was written"** — rare; the script restores the
-old slip and exits. Simply run it again.
+**"Authorization code is invalid, expired or revoked"** — the commonest failure of the two-half
+renewal, and **not** a misconfiguration despite how it reads. Schwab's login codes last **a couple
+of minutes**. If you click Allow and then do something else before running `--finish`, the code is
+dead by the time it is used. Run `--begin` again and finish that one promptly. Nothing was lost:
+your old slip is still in place. The script now says this in as many words when it happens.
+
+**"The login reported success but no token file was written"**, or any complaint that the new
+slip could not be read — the script restores the old one and exits, and the collector carries on
+as before. Simply run it again. It checks the new slip is genuinely usable before discarding the
+old one, so this is the safe failure, not a damaging one.
 
 **The browser never opens, or Schwab rejects the redirect.** Check `.env`:
 `SCHWAB_CALLBACK_URL` must match what is registered on the Schwab developer portal **character
-for character** (default `https://127.0.0.1:8182`). This only breaks if something changed on the
-portal — it does not drift on its own.
+for character**. **On this machine that is `https://127.0.0.1`, with no port.** Do not compare it
+against the `https://127.0.0.1:8182` written as a fallback in `config.py` — `.env` overrides that,
+and the portless address is precisely why `schwab_client.get_client()` uses the copy-paste login
+rather than the automatic one. This only breaks if something changed on the portal; it does not
+drift on its own.
 
 **Nothing works and the login is refused outright.** Check `SCHWAB_APP_KEY` and
 `SCHWAB_APP_SECRET` in `.env`. These are the *app registration*, a different thing from the
